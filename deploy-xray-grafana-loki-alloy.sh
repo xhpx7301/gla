@@ -164,7 +164,7 @@ loki.process "xray_access" {
   }
 
   stage.match {
-    selector = "{inbound=\\\"api\\\"}"
+    selector = "{inbound=\"api\"}"
     action   = "drop"
   }
 }
