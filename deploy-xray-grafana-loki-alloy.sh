@@ -4,7 +4,7 @@ set -Eeuo pipefail
 
 STACK_DIR="${STACK_DIR:-/opt/xray-log-dashboard}"
 XRAY_LOG="${XRAY_LOG:-/var/log/x-ui/access.log}"
-GRAFANA_BIND="${GRAFANA_BIND:-127.0.0.1}"
+GRAFANA_BIND="${GRAFANA_BIND:-0.0.0.0}"
 GRAFANA_PORT="${GRAFANA_PORT:-3000}"
 LOKI_RETENTION="${LOKI_RETENTION:-168h}"
 
@@ -163,10 +163,6 @@ loki.process "xray_access" {
     }
   }
 
-  stage.match {
-    selector = "{inbound=\"api\"}"
-    action   = "drop"
-  }
 }
 
 loki.write "default" {
@@ -208,35 +204,72 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
   "title": "Xray 访问日志",
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
-  "refresh": "10s",
-  "time": { "from": "now-6h", "to": "now" },
+  "version": 2,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "client",
+        "label": "客户端",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "loki" },
+        "definition": "label_values({job=\"xray-access\", email=~\".+\"}, email)",
+        "query": "label_values({job=\"xray-access\", email=~\".+\"}, email)",
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "options": [],
+        "current": { "selected": true, "text": "全部", "value": "$__all" }
+      }
+    ]
+  },
   "panels": [
     {
       "id": 1,
       "type": "logs",
-      "title": "实时访问日志",
+      "title": "全部访问日志（含 API）",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "{job=\\\"xray-access\\\"}" }],
-      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 13 },
+      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\"}" }],
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 9 },
       "options": { "dedupStrategy": "none", "enableLogDetails": true, "showCommonLabels": false, "wrapLogMessage": true, "sortOrder": "Descending" }
     },
     {
       "id": 2,
-      "type": "table",
-      "title": "按客户端连接数",
+      "type": "logs",
+      "title": "真实访问日志（已排除 API）",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "sum by (email) (count_over_time({job=\\\"xray-access\\\"}[$__range]))", "instant": true, "format": "table" }],
-      "gridPos": { "x": 0, "y": 13, "w": 12, "h": 8 },
-      "options": { "showHeader": true }
+      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\"} != \"[api -> api]\"" }],
+      "gridPos": { "x": 0, "y": 9, "w": 24, "h": 9 },
+      "options": { "dedupStrategy": "none", "enableLogDetails": true, "showCommonLabels": false, "wrapLogMessage": true, "sortOrder": "Descending" }
     },
     {
       "id": 3,
+      "type": "logs",
+      "title": "所选客户端最近访问的网站",
+      "description": "通过仪表板顶部的“客户端”下拉框筛选；日志会显示目标域名或 IP 及端口。",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", email=~\"$client\"} != \"[api -> api]\"" }],
+      "gridPos": { "x": 0, "y": 18, "w": 24, "h": 9 },
+      "options": { "dedupStrategy": "none", "enableLogDetails": true, "showCommonLabels": false, "wrapLogMessage": true, "sortOrder": "Descending" }
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "按客户端连接数",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{ "refId": "A", "expr": "sum by (email) (count_over_time({job=\"xray-access\"}[$__range]))", "instant": true, "format": "table" }],
+      "gridPos": { "x": 0, "y": 27, "w": 12, "h": 8 },
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 5,
       "type": "table",
       "title": "按入站连接数",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "sum by (inbound) (count_over_time({job=\\\"xray-access\\\"}[$__range]))", "instant": true, "format": "table" }],
-      "gridPos": { "x": 12, "y": 13, "w": 12, "h": 8 },
+      "targets": [{ "refId": "A", "expr": "sum by (inbound) (count_over_time({job=\"xray-access\"}[$__range]))", "instant": true, "format": "table" }],
+      "gridPos": { "x": 12, "y": 27, "w": 12, "h": 8 },
       "options": { "showHeader": true }
     }
   ]
@@ -257,14 +290,12 @@ cat <<EOF
 
 Deployment complete.
 
-Grafana URL (server-local only): http://${GRAFANA_BIND}:${GRAFANA_PORT}
+Grafana URL: http://SERVER_IP:${GRAFANA_PORT}
 Grafana user: admin
 Grafana password: ${GRAFANA_ADMIN_PASSWORD}
 
-From your Windows computer, create an SSH tunnel:
-  ssh -N -L ${GRAFANA_PORT}:127.0.0.1:${GRAFANA_PORT} root@YOUR_SERVER_IP
-
-Then open: http://127.0.0.1:${GRAFANA_PORT}
+Security: port ${GRAFANA_PORT} is exposed on all server network interfaces.
+Restrict it to your management IP in the cloud firewall or server firewall before using it publicly.
 
 Management commands:
   cd ${STACK_DIR} && ${COMPOSE[*]} ps
