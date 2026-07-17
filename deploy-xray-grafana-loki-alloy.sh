@@ -204,7 +204,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
   "title": "Xray 访问日志",
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 3,
+  "version": 4,
   "refresh": "30s",
   "time": { "from": "now-1h", "to": "now" },
   "templating": {
@@ -294,7 +294,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "title": "所选客户端近 $period 访问目标 Top 10",
       "description": "按目标域名或 IP 聚合。选择“客户端”和“统计周期”后自动更新。",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "topk(10, sum by (destination) (count_over_time({job=\"xray-access\", email=~\"$client\"} != \"[api -> api]\" | regexp \"accepted [^: ]+:(?P<destination>.+):[0-9]+ \\[\" [$period])))", "instant": true, "format": "table" }],
+      "targets": [{ "refId": "A", "expr": "topk(10, sum by (destination) (count_over_time({job=\"xray-access\", email=~\"$client\"} != \"[api -> api]\" | pattern `<_> accepted <_>:<destination>:<port> [<_>` [$period])))", "instant": true, "format": "table" }],
       "gridPos": { "x": 0, "y": 32, "w": 24, "h": 9 },
       "options": { "showHeader": true }
     },
