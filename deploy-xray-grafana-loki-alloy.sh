@@ -39,11 +39,16 @@ install -d -m 0750 "$STACK_DIR" "$STACK_DIR/alloy" \
 CREDENTIALS_FILE="$STACK_DIR/.credentials"
 if [ -f "$CREDENTIALS_FILE" ]; then
   GRAFANA_ADMIN_PASSWORD="$(awk -F= '$1 == "GRAFANA_ADMIN_PASSWORD" {print substr($0, index($0, "=") + 1); exit}' "$CREDENTIALS_FILE")"
+  # Older script versions wrote a literal "\\n" on each run. Remove any
+  # accumulated suffix so the saved value matches the original password.
+  while [[ "$GRAFANA_ADMIN_PASSWORD" == *\\n ]]; do
+    GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD%\\n}"
+  done
   [ -n "$GRAFANA_ADMIN_PASSWORD" ] || die "Invalid credentials file: $CREDENTIALS_FILE"
 elif [ -z "${GRAFANA_ADMIN_PASSWORD:-}" ]; then
   GRAFANA_ADMIN_PASSWORD="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \\n')"
 fi
-printf 'GRAFANA_ADMIN_PASSWORD=%s\\n' "$GRAFANA_ADMIN_PASSWORD" >"$CREDENTIALS_FILE"
+printf 'GRAFANA_ADMIN_PASSWORD=%s\n' "$GRAFANA_ADMIN_PASSWORD" >"$CREDENTIALS_FILE"
 chmod 0600 "$CREDENTIALS_FILE"
 
 cat >"$STACK_DIR/compose.yaml" <<EOF
