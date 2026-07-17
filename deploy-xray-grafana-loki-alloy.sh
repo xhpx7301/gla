@@ -7,12 +7,15 @@ XRAY_LOG="${XRAY_LOG:-/var/log/x-ui/access.log}"
 GRAFANA_BIND="${GRAFANA_BIND:-0.0.0.0}"
 GRAFANA_PORT="${GRAFANA_PORT:-3000}"
 LOKI_RETENTION="${LOKI_RETENTION:-168h}"
+SERVER_NAME="${SERVER_NAME:-central}"
+NPM_NETWORK="${NPM_NETWORK:-npm-loki}"
 
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 note() { printf '\n==> %s\n' "$*"; }
 
 [ "$(id -u)" -eq 0 ] || die "Run this script as root: sudo bash $0"
 [ -r "$XRAY_LOG" ] || die "Xray log not readable: $XRAY_LOG"
+[[ "$SERVER_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || die "SERVER_NAME may only contain letters, numbers, dots, underscores, and hyphens."
 command -v docker >/dev/null 2>&1 || die "Docker is required. Nginx Proxy Manager normally already installs it."
 docker info >/dev/null 2>&1 || die "Docker daemon is not running or is not accessible."
 
@@ -23,6 +26,8 @@ elif command -v docker-compose >/dev/null 2>&1; then
 else
   die "Docker Compose is required (docker compose or docker-compose)."
 fi
+
+docker network inspect "$NPM_NETWORK" >/dev/null 2>&1 || docker network create "$NPM_NETWORK" >/dev/null
 
 mem_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
 if [ "$mem_kb" -lt 1258291 ]; then
@@ -77,6 +82,9 @@ services:
     container_name: xray-loki
     restart: unless-stopped
     command: -config.file=/etc/loki/config.yaml
+    networks:
+      - default
+      - npm
     volumes:
       - ./loki/config.yaml:/etc/loki/config.yaml:ro
       - loki-data:/loki
@@ -98,6 +106,11 @@ volumes:
   grafana-data:
   loki-data:
   alloy-data:
+
+networks:
+  npm:
+    external: true
+    name: ${NPM_NETWORK}
 EOF
 
 cat >"$STACK_DIR/loki/config.yaml" <<EOF
@@ -145,6 +158,7 @@ local.file_match "xray_access" {
   path_targets = [{
     __path__ = "${XRAY_LOG}",
     job      = "xray-access",
+    server   = "${SERVER_NAME}",
   }]
 }
 
@@ -209,18 +223,32 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
   "title": "Xray 访问日志",
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 8,
+  "version": 9,
   "refresh": "30s",
   "time": { "from": "now-1h", "to": "now" },
   "templating": {
     "list": [
       {
+        "name": "server",
+        "label": "服务器",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "loki" },
+        "definition": "label_values({job=\"xray-access\", server=~\".+\"}, server)",
+        "query": "label_values({job=\"xray-access\", server=~\".+\"}, server)",
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "options": [],
+        "current": { "selected": true, "text": "全部", "value": "$__all" }
+      },
+      {
         "name": "client",
         "label": "客户端",
         "type": "query",
         "datasource": { "type": "loki", "uid": "loki" },
-        "definition": "label_values({job=\"xray-access\", email=~\".+\"}, email)",
-        "query": "label_values({job=\"xray-access\", email=~\".+\"}, email)",
+        "definition": "label_values({job=\"xray-access\", server=~\"$server\", email=~\".+\"}, email)",
+        "query": "label_values({job=\"xray-access\", server=~\"$server\", email=~\".+\"}, email)",
         "refresh": 1,
         "includeAll": true,
         "allValue": ".*",
@@ -260,7 +288,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "type": "logs",
       "title": "全部访问日志（含 API）",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\"}" }],
+      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", server=~\"$server\"}" }],
       "gridPos": { "x": 0, "y": 40, "w": 24, "h": 9 },
       "options": { "dedupStrategy": "none", "enableLogDetails": true, "showCommonLabels": false, "wrapLogMessage": true, "sortOrder": "Descending" }
     },
@@ -269,7 +297,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "type": "logs",
       "title": "真实访问日志（已排除 API）",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\"} != \"[api -> api]\"" }],
+      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", server=~\"$server\"} != \"[api -> api]\"" }],
       "gridPos": { "x": 0, "y": 31, "w": 24, "h": 9 },
       "options": { "dedupStrategy": "none", "enableLogDetails": true, "showCommonLabels": false, "wrapLogMessage": true, "sortOrder": "Descending" }
     },
@@ -279,7 +307,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "title": "所选客户端的访问记录",
       "description": "选择客户端后，可在顶部“访问目标关键词”输入域名或 IP；留空则显示该客户端全部访问记录。",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", email=~\"$client\"} != \"[api -> api]\" |= \"$site\"" }],
+      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", server=~\"$server\", email=~\"$client\"} != \"[api -> api]\" |= \"$site\"" }],
       "gridPos": { "x": 0, "y": 0, "w": 24, "h": 9 },
       "options": { "dedupStrategy": "none", "enableLogDetails": true, "showCommonLabels": false, "wrapLogMessage": true, "sortOrder": "Descending" }
     },
@@ -289,7 +317,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "title": "匹配访问目标的连接次数",
       "description": "统计所选客户端和访问目标关键词在当前时间范围内匹配到的 Xray 连接记录数。",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "sum(count_over_time({job=\"xray-access\", email=~\"$client\"} != \"[api -> api]\" |= \"$site\" [$__range]))", "instant": true }],
+      "targets": [{ "refId": "A", "expr": "sum(count_over_time({job=\"xray-access\", server=~\"$server\", email=~\"$client\"} != \"[api -> api]\" |= \"$site\" [$__range]))", "instant": true }],
       "gridPos": { "x": 0, "y": 26, "w": 6, "h": 5 },
       "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" }, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "none", "justifyMode": "auto" }
     },
@@ -299,7 +327,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "title": "所选客户端近 $period 访问目标 Top 10",
       "description": "按目标域名或 IP 聚合。选择“客户端”和“统计周期”后自动更新。",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "topk(10, sum by (destination) (count_over_time({job=\"xray-access\", email=~\"$client\"} != \"[api -> api]\" | pattern `<_> accepted <_>:<destination>:<port> [<_>` [$period])))", "instant": true, "format": "table" }],
+      "targets": [{ "refId": "A", "expr": "topk(10, sum by (destination) (count_over_time({job=\"xray-access\", server=~\"$server\", email=~\"$client\"} != \"[api -> api]\" | pattern `<_> accepted <_>:<destination>:<port> [<_>` [$period])))", "instant": true, "format": "table" }],
       "gridPos": { "x": 0, "y": 9, "w": 24, "h": 9 },
       "options": { "showHeader": true },
       "transformations": [
@@ -325,7 +353,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "type": "table",
       "title": "按客户端连接数",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "sum by (email) (count_over_time({job=\"xray-access\"}[$__range]))", "instant": true, "format": "table" }],
+      "targets": [{ "refId": "A", "expr": "sum by (email) (count_over_time({job=\"xray-access\", server=~\"$server\"}[$__range]))", "instant": true, "format": "table" }],
       "gridPos": { "x": 0, "y": 18, "w": 12, "h": 8 },
       "options": { "showHeader": true },
       "transformations": [{
@@ -342,7 +370,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "type": "table",
       "title": "按入站连接数",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "sum by (inbound) (count_over_time({job=\"xray-access\"}[$__range]))", "instant": true, "format": "table" }],
+      "targets": [{ "refId": "A", "expr": "sum by (inbound) (count_over_time({job=\"xray-access\", server=~\"$server\"}[$__range]))", "instant": true, "format": "table" }],
       "gridPos": { "x": 12, "y": 18, "w": 12, "h": 8 },
       "options": { "showHeader": true },
       "transformations": [{
