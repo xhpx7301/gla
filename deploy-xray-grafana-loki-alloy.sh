@@ -204,7 +204,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
   "title": "Xray 访问日志",
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "30s",
   "time": { "from": "now-1h", "to": "now" },
   "templating": {
@@ -222,6 +222,30 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
         "multi": false,
         "options": [],
         "current": { "selected": true, "text": "全部", "value": "$__all" }
+      },
+      {
+        "name": "site",
+        "label": "网站关键词",
+        "type": "textbox",
+        "hide": 0,
+        "query": "",
+        "options": [
+          { "selected": true, "text": "", "value": "" }
+        ],
+        "current": { "selected": true, "text": "", "value": "" }
+      },
+      {
+        "name": "period",
+        "label": "统计周期",
+        "type": "custom",
+        "hide": 0,
+        "query": "1d,7d,30d",
+        "options": [
+          { "selected": false, "text": "1 天", "value": "1d" },
+          { "selected": true, "text": "7 天", "value": "7d" },
+          { "selected": false, "text": "30 天", "value": "30d" }
+        ],
+        "current": { "selected": true, "text": "7 天", "value": "7d" }
       }
     ]
   },
@@ -247,29 +271,49 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
     {
       "id": 3,
       "type": "logs",
-      "title": "所选客户端最近访问的网站",
-      "description": "通过仪表板顶部的“客户端”下拉框筛选；日志会显示目标域名或 IP 及端口。",
+      "title": "所选客户端的网站访问记录",
+      "description": "选择客户端后，可在顶部“网站关键词”输入域名或 IP；留空则显示该客户端全部访问记录。",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", email=~\"$client\"} != \"[api -> api]\"" }],
+      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", email=~\"$client\"} != \"[api -> api]\" |= \"$site\"" }],
       "gridPos": { "x": 0, "y": 18, "w": 24, "h": 9 },
       "options": { "dedupStrategy": "none", "enableLogDetails": true, "showCommonLabels": false, "wrapLogMessage": true, "sortOrder": "Descending" }
     },
     {
       "id": 4,
-      "type": "table",
-      "title": "按客户端连接数",
+      "type": "stat",
+      "title": "匹配网站的连接次数",
+      "description": "统计所选客户端和网站关键词在当前时间范围内匹配到的 Xray 连接记录数。",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "sum by (email) (count_over_time({job=\"xray-access\"}[$__range]))", "instant": true, "format": "table" }],
-      "gridPos": { "x": 0, "y": 27, "w": 12, "h": 8 },
-      "options": { "showHeader": true }
+      "targets": [{ "refId": "A", "expr": "sum(count_over_time({job=\"xray-access\", email=~\"$client\"} != \"[api -> api]\" |= \"$site\" [$__range]))", "instant": true }],
+      "gridPos": { "x": 0, "y": 27, "w": 6, "h": 5 },
+      "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" }, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "none", "justifyMode": "auto" }
     },
     {
       "id": 5,
       "type": "table",
+      "title": "所选客户端近 $period 访问目标 Top 10",
+      "description": "按目标域名或 IP 聚合。选择“客户端”和“统计周期”后自动更新。",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{ "refId": "A", "expr": "topk(10, sum by (destination) (count_over_time({job=\"xray-access\", email=~\"$client\"} != \"[api -> api]\" | regexp \"accepted [^: ]+:(?P<destination>.+):[0-9]+ \\[\" [$period])))", "instant": true, "format": "table" }],
+      "gridPos": { "x": 0, "y": 32, "w": 24, "h": 9 },
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "按客户端连接数",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{ "refId": "A", "expr": "sum by (email) (count_over_time({job=\"xray-access\"}[$__range]))", "instant": true, "format": "table" }],
+      "gridPos": { "x": 0, "y": 41, "w": 12, "h": 8 },
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 7,
+      "type": "table",
       "title": "按入站连接数",
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{ "refId": "A", "expr": "sum by (inbound) (count_over_time({job=\"xray-access\"}[$__range]))", "instant": true, "format": "table" }],
-      "gridPos": { "x": 12, "y": 27, "w": 12, "h": 8 },
+      "gridPos": { "x": 12, "y": 41, "w": 12, "h": 8 },
       "options": { "showHeader": true }
     }
   ]
