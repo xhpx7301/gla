@@ -204,7 +204,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
   "title": "Xray 访问日志",
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 7,
+  "version": 8,
   "refresh": "30s",
   "time": { "from": "now-1h", "to": "now" },
   "templating": {
@@ -297,14 +297,23 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "targets": [{ "refId": "A", "expr": "topk(10, sum by (destination) (count_over_time({job=\"xray-access\", email=~\"$client\"} != \"[api -> api]\" | pattern `<_> accepted <_>:<destination>:<port> [<_>` [$period])))", "instant": true, "format": "table" }],
       "gridPos": { "x": 0, "y": 9, "w": 24, "h": 9 },
       "options": { "showHeader": true },
-      "transformations": [{
-        "id": "organize",
-        "options": {
-          "excludeByName": {},
-          "indexByName": { "Time": 0, "destination": 1, "Value #A": 2 },
-          "renameByName": { "Time": "时间", "destination": "访问目标", "Value #A": "次数" }
+      "transformations": [
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [{ "field": "Value #A", "desc": true }]
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "indexByName": { "Time": 0, "destination": 1, "Value #A": 2 },
+            "renameByName": { "Time": "时间", "destination": "访问目标", "Value #A": "次数" }
+          }
         }
-      }]
+      ]
     },
     {
       "id": 6,
