@@ -448,8 +448,8 @@ die() { printf '错误: %s\n' "$*" >&2; exit 1; }
 pause() { read -rp "按 Enter 键继续..." _; }
 confirm() {
   local prompt="$1"
-  read -rp "$prompt 输入 DELETE 确认: " answer
-  [ "$answer" = "DELETE" ]
+  read -rp "$prompt [Y/N]: " answer
+  [[ "$answer" =~ ^[Yy]$ ]]
 }
 
 compose() {
@@ -469,8 +469,25 @@ show_status() {
   else
     printf '未找到面板配置。可能仍保留 Docker 数据卷。\n'
   fi
-  printf '\n'
-  docker system df
+
+  local image volume mountpoint log_path
+  printf '\n项目镜像占用：\n'
+  for image in grafana/grafana:latest grafana/loki:latest grafana/alloy:latest; do
+    docker image ls "$image"
+  done
+
+  printf '\n项目数据卷占用：\n'
+  while IFS= read -r volume; do
+    [ -n "$volume" ] || continue
+    mountpoint="$(docker volume inspect -f '{{.Mountpoint}}' "$volume")"
+    du -sh "$mountpoint"
+  done < <(docker volume ls -q --filter label=com.docker.compose.project=xray-log-dashboard)
+
+  log_path="$(sed -n 's/^[[:space:]]*__path__[[:space:]]*=[[:space:]]*"\(.*\)",/\1/p' "$STACK_DIR/alloy/config.alloy" 2>/dev/null | head -n 1)"
+  if [ -n "$log_path" ] && [ -e "$log_path" ]; then
+    printf '\nXray 原始访问日志占用：\n'
+    du -sh "$log_path"
+  fi
 }
 
 show_logs() {

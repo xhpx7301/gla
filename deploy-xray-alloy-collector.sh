@@ -173,8 +173,8 @@ die() { printf '错误: %s\n' "$*" >&2; exit 1; }
 pause() { read -rp "按 Enter 键继续..." _; }
 confirm() {
   local prompt="$1"
-  read -rp "$prompt 输入 DELETE 确认: " answer
-  [ "$answer" = "DELETE" ]
+  read -rp "$prompt [Y/N]: " answer
+  [[ "$answer" =~ ^[Yy]$ ]]
 }
 
 compose() {
@@ -194,8 +194,24 @@ show_status() {
   else
     printf '未找到采集器配置。可能仍保留 Docker 数据卷。\n'
   fi
-  printf '\n'
-  docker system df
+
+  local alloy_image volume mountpoint log_path
+  alloy_image="$(docker inspect -f '{{.Config.Image}}' xray-alloy 2>/dev/null || printf '%s' 'grafana/alloy:latest')"
+  printf '\nAlloy 镜像占用：\n'
+  docker image ls "$alloy_image"
+
+  printf '\nAlloy 数据卷占用：\n'
+  while IFS= read -r volume; do
+    [ -n "$volume" ] || continue
+    mountpoint="$(docker volume inspect -f '{{.Mountpoint}}' "$volume")"
+    du -sh "$mountpoint"
+  done < <(docker volume ls -q --filter label=com.docker.compose.project=xray-alloy-collector)
+
+  log_path="$(sed -n 's/^[[:space:]]*__path__[[:space:]]*=[[:space:]]*"\(.*\)",/\1/p' "$STACK_DIR/alloy/config.alloy" 2>/dev/null | head -n 1)"
+  if [ -n "$log_path" ] && [ -e "$log_path" ]; then
+    printf '\nXray 原始访问日志占用：\n'
+    du -sh "$log_path"
+  fi
 }
 
 show_config() {
