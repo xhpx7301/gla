@@ -9,35 +9,55 @@ GRAFANA_PORT="${GRAFANA_PORT:-3000}"
 LOKI_RETENTION="${LOKI_RETENTION:-168h}"
 SERVER_NAME="${SERVER_NAME:-central}"
 NPM_NETWORK="${NPM_NETWORK:-npm-loki}"
+MANAGER_PATH="/usr/local/bin/gla"
+INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
 
-die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+die() { printf '错误: %s\n' "$*" >&2; exit 1; }
 note() { printf '\n==> %s\n' "$*"; }
 
-[ "$(id -u)" -eq 0 ] || die "Run this script as root: sudo bash $0"
-[ -r "$XRAY_LOG" ] || die "Xray log not readable: $XRAY_LOG"
-[[ "$SERVER_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || die "SERVER_NAME may only contain letters, numbers, dots, underscores, and hyphens."
-command -v docker >/dev/null 2>&1 || die "Docker is required. Nginx Proxy Manager normally already installs it."
-docker info >/dev/null 2>&1 || die "Docker daemon is not running or is not accessible."
+write_install_settings() {
+  {
+    printf 'STACK_DIR=%q\n' "$STACK_DIR"
+    printf 'XRAY_LOG=%q\n' "$XRAY_LOG"
+    printf 'GRAFANA_BIND=%q\n' "$GRAFANA_BIND"
+    printf 'GRAFANA_PORT=%q\n' "$GRAFANA_PORT"
+    printf 'LOKI_RETENTION=%q\n' "$LOKI_RETENTION"
+    printf 'SERVER_NAME=%q\n' "$SERVER_NAME"
+    printf 'NPM_NETWORK=%q\n' "$NPM_NETWORK"
+  } >"$INSTALL_SETTINGS_FILE"
+  chmod 0600 "$INSTALL_SETTINGS_FILE"
+}
 
-if docker compose version >/dev/null 2>&1; then
-  COMPOSE=(docker compose)
-elif command -v docker-compose >/dev/null 2>&1; then
-  COMPOSE=(docker-compose)
-else
-  die "Docker Compose is required (docker compose or docker-compose)."
-fi
+require_install_prerequisites() {
+  [ "$(id -u)" -eq 0 ] || die "请使用 root 执行：sudo bash $0"
+  [ -r "$XRAY_LOG" ] || die "无法读取 Xray 日志：$XRAY_LOG"
+  [[ "$SERVER_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || die "SERVER_NAME 只能包含字母、数字、点、下划线和连字符。"
+  command -v docker >/dev/null 2>&1 || die "未找到 Docker。通常 Nginx Proxy Manager 已经安装 Docker。"
+  docker info >/dev/null 2>&1 || die "Docker 服务未运行或当前用户无权限访问。"
 
-docker network inspect "$NPM_NETWORK" >/dev/null 2>&1 || docker network create "$NPM_NETWORK" >/dev/null
+  if docker compose version >/dev/null 2>&1; then
+    COMPOSE=(docker compose)
+  elif command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE=(docker-compose)
+  else
+    die "需要 Docker Compose（docker compose 或 docker-compose）。"
+  fi
+}
 
-mem_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
-if [ "$mem_kb" -lt 1258291 ]; then
-  printf 'Warning: this server has less than 1.2 GB RAM. Grafana may be slow; keep swap enabled and stop unused services.\n' >&2
-fi
+install_stack() {
+  require_install_prerequisites
+  docker network inspect "$NPM_NETWORK" >/dev/null 2>&1 || docker network create "$NPM_NETWORK" >/dev/null
 
-note "Creating deployment files in $STACK_DIR"
+  mem_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
+  if [ "$mem_kb" -lt 1258291 ]; then
+    printf '警告：此服务器内存低于 1.2 GB，Grafana 可能较慢。请保留 Swap，并停止不需要的服务。\n' >&2
+  fi
+
+note "正在创建部署文件：$STACK_DIR"
 install -d -m 0750 "$STACK_DIR" "$STACK_DIR/alloy" \
   "$STACK_DIR/loki" "$STACK_DIR/grafana/provisioning/datasources" \
   "$STACK_DIR/grafana/provisioning/dashboards" "$STACK_DIR/grafana/dashboards"
+write_install_settings
 
 # Grafana only applies its admin password on the first database initialization.
 # Preserve the generated value so a later script run cannot print a false password.
@@ -49,7 +69,7 @@ if [ -f "$CREDENTIALS_FILE" ]; then
   while [[ "$GRAFANA_ADMIN_PASSWORD" == *\\n ]]; do
     GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD%\\n}"
   done
-  [ -n "$GRAFANA_ADMIN_PASSWORD" ] || die "Invalid credentials file: $CREDENTIALS_FILE"
+  [ -n "$GRAFANA_ADMIN_PASSWORD" ] || die "凭据文件无效：$CREDENTIALS_FILE"
 elif [ -z "${GRAFANA_ADMIN_PASSWORD:-}" ]; then
   GRAFANA_ADMIN_PASSWORD="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \\n')"
 fi
@@ -388,27 +408,187 @@ EOF
 
 chmod 0600 "$STACK_DIR/compose.yaml"
 
-note "Starting Grafana, Loki, and Alloy"
+note "正在启动 Grafana、Loki 和 Alloy"
 cd "$STACK_DIR"
 "${COMPOSE[@]}" pull
 "${COMPOSE[@]}" up -d
 
-note "Verifying containers"
+note "正在验证容器状态"
 "${COMPOSE[@]}" ps
+
+install_manager
 
 cat <<EOF
 
-Deployment complete.
+部署完成。
 
-Grafana URL: http://SERVER_IP:${GRAFANA_PORT}
-Grafana user: admin
-Grafana password: ${GRAFANA_ADMIN_PASSWORD}
+Grafana 地址：http://服务器_IP:${GRAFANA_PORT}
+Grafana 用户名：admin
+Grafana 密码：${GRAFANA_ADMIN_PASSWORD}
 
-Security: port ${GRAFANA_PORT} is exposed on all server network interfaces.
-Restrict it to your management IP in the cloud firewall or server firewall before using it publicly.
+安全提示：端口 ${GRAFANA_PORT} 已监听在所有服务器网络接口。
+公网使用前，请在云防火墙或服务器防火墙中仅允许你的管理 IP 访问。
 
-Management commands:
-  cd ${STACK_DIR} && ${COMPOSE[*]} ps
-  cd ${STACK_DIR} && ${COMPOSE[*]} logs -f alloy
-  cd ${STACK_DIR} && ${COMPOSE[*]} down
+管理命令：
+  gla
 EOF
+}
+
+install_manager() {
+  cat >"$MANAGER_PATH" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+STACK_DIR="${STACK_DIR:-/opt/xray-log-dashboard}"
+COMPOSE_FILE="$STACK_DIR/compose.yaml"
+INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
+INSTALLER_URL="https://raw.githubusercontent.com/xhpx7301/gla/main/deploy-xray-grafana-loki-alloy.sh"
+
+die() { printf '错误: %s\n' "$*" >&2; exit 1; }
+pause() { read -rp "按 Enter 键继续..." _; }
+confirm() {
+  local prompt="$1"
+  read -rp "$prompt 输入 DELETE 确认: " answer
+  [ "$answer" = "DELETE" ]
+}
+
+compose() {
+  [ -f "$COMPOSE_FILE" ] || die "日志面板未安装：$STACK_DIR"
+  if docker compose version >/dev/null 2>&1; then
+    docker compose -f "$COMPOSE_FILE" "$@"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    docker-compose -f "$COMPOSE_FILE" "$@"
+  else
+    die "需要 Docker Compose。"
+  fi
+}
+
+show_status() {
+  if [ -f "$COMPOSE_FILE" ]; then
+    compose ps
+  else
+    printf '未找到面板配置。可能仍保留 Docker 数据卷。\n'
+  fi
+  printf '\n'
+  docker system df
+}
+
+show_logs() {
+  printf '\n1. Grafana\n2. Loki\n3. Alloy\n0. 返回\n'
+  read -rp "请选择服务: " choice
+  case "$choice" in
+    1) compose logs -f --tail=100 grafana ;;
+    2) compose logs -f --tail=100 loki ;;
+    3) compose logs -f --tail=100 alloy ;;
+    0) return ;;
+    *) printf '无效选择。\n' ;;
+  esac
+}
+
+download_installer() {
+  if command -v wget >/dev/null 2>&1; then
+    wget -qO- "$INSTALLER_URL"
+  elif command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$INSTALLER_URL"
+  else
+    die "需要 wget 或 curl 才能更新脚本。"
+  fi
+}
+
+update_script_and_deploy() {
+  [ -r "$INSTALL_SETTINGS_FILE" ] || die "未找到安装配置：$INSTALL_SETTINGS_FILE"
+  printf '正在从 GitHub 下载最新版脚本并重新部署，服务可能短暂重建。\n'
+  set -a
+  # This file is created locally by the installer and contains no password.
+  . "$INSTALL_SETTINGS_FILE"
+  set +a
+  GLA_ACTION=install bash <(download_installer)
+}
+
+update_stack() {
+  printf '正在拉取 Grafana、Loki 和 Alloy 的最新镜像，服务可能短暂重建。\n'
+  compose pull
+  compose up -d
+  printf '服务组件更新完成。\n'
+}
+
+uninstall_everything() {
+  if ! confirm "永久删除此日志面板、Loki 历史日志、Grafana 数据和项目镜像？"; then
+    printf '已取消。\n'
+    return
+  fi
+  [ -f "$COMPOSE_FILE" ] && compose down -v || true
+  docker volume ls -q --filter label=com.docker.compose.project=xray-log-dashboard | xargs -r docker volume rm
+  docker image rm grafana/grafana:latest grafana/loki:latest grafana/alloy:latest 2>/dev/null || true
+  rm -rf "$STACK_DIR"
+  rm -f "$0"
+  printf 'Xray 日志面板已完整卸载。NPM 和 npm-loki 网络未被修改。\n'
+  exit 0
+}
+
+while true; do
+  clear
+  cat <<'MENU'
+Xray 访问日志面板管理
+
+0. 退出
+1. 安装或更新脚本并重新部署
+2. 启动服务
+3. 停止服务
+4. 重启服务
+5. 查看服务状态与磁盘占用
+6. 查看服务日志
+7. 查看 Grafana 密码
+8. 更新 Grafana、Loki 和 Alloy
+9. 卸载并删除所有面板数据
+MENU
+  read -rp "请输入操作编号 [0-9]: " choice
+  case "$choice" in
+    0) exit 0 ;;
+    1) update_script_and_deploy; exit $? ;;
+    2) compose up -d; pause ;;
+    3) compose stop; pause ;;
+    4) compose restart; pause ;;
+    5) show_status; pause ;;
+    6) show_logs; pause ;;
+    7) [ -f "$STACK_DIR/.credentials" ] && sed -n 's/^GRAFANA_ADMIN_PASSWORD=/Grafana 密码：/p' "$STACK_DIR/.credentials" || printf '未找到凭据文件。\n'; pause ;;
+    8) update_stack; pause ;;
+    9) uninstall_everything ;;
+    *) printf '无效选择。\n'; pause ;;
+  esac
+done
+EOF
+  chmod 0750 "$MANAGER_PATH"
+}
+
+show_installer_menu() {
+  while true; do
+    clear
+    cat <<'MENU'
+Xray 访问日志面板管理
+
+0. 退出
+1. 安装或更新日志面板
+2. 启动服务
+3. 停止服务
+4. 重启服务
+5. 查看服务状态与磁盘占用
+6. 查看服务日志
+7. 查看 Grafana 密码
+8. 更新 Grafana、Loki 和 Alloy
+9. 卸载并删除所有面板数据
+MENU
+    read -rp "请输入操作编号 [0-9]: " choice
+    case "$choice" in
+      0) exit 0 ;;
+      1) install_stack; return ;;
+      *) printf '请先选择 1 安装或更新日志面板；安装完成后输入 gla 使用完整管理功能。\n'; read -rp "按 Enter 键继续..." _ ;;
+    esac
+  done
+}
+
+case "${GLA_ACTION:-menu}" in
+  install) install_stack ;;
+  menu) show_installer_menu ;;
+  *) die "未知操作：${GLA_ACTION}" ;;
+esac
