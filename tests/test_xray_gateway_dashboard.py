@@ -16,6 +16,10 @@ class XrayGatewayDashboardTest(unittest.TestCase):
         self.assertEqual(server_variable["name"], "server")
         self.assertEqual(server_variable["allValue"], ".+")
         self.assertIn("xui_exporter_up", server_variable["definition"])
+        self.assertEqual(
+            server_variable["query"]["refId"],
+            "PrometheusVariableQueryEditor-VariableQuery",
+        )
 
     def test_port_field_is_not_formatted_as_bytes(self):
         panel = next(panel for panel in self.dashboard["panels"] if panel["id"] == 7)

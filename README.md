@@ -41,6 +41,8 @@ HY-2314 中心服务器
 
 Xray 来源 IP 的“连接次数”和 3x-ui 的“流量字节数”是两种不同口径。普通 access log 没有每条连接的字节数，因此项目不会把来源 IP 连接次数伪装成精确流量。
 
+仪表盘表格会将 Grafana 原始字段名转换为中文，并默认按主要数值降序排列：SSH 使用“来源 IP / 失败次数”，Fail2ban 使用“封禁 IP / 封禁次数”，3x-ui 使用“客户端 / 流量”和“入站 / 端口 / 协议 / 流量”，Xray access log 使用“来源 IP / 连接次数”。“协议”用于区分 `vless`、`vmess` 等入站类型，不能替代“流量”；流量由独立数值列显示。
+
 ## 环境要求
 
 - Debian 或 Ubuntu。
@@ -264,4 +266,4 @@ tests/test_xui_exporter.py         3x-ui 导出器测试
 tests/test_generated_alloy_regex.sh Bash 到 Alloy 的正则转义测试
 ```
 
-国家地图需要单独配置 MaxMind GeoLite2 等本地 GeoIP 数据库。本版本不会把来源 IP 发送给第三方在线查询服务。
+原始来源 IP 会直接显示在表格中。若还需要国家、地区或城市，需要单独配置 MaxMind GeoLite2 等本地 GeoIP 数据库，并在采集阶段完成离线解析。本版本不会把来源 IP 发送给第三方在线查询服务，避免查询限额、延迟和隐私泄露。
