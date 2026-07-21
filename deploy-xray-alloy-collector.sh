@@ -414,6 +414,7 @@ install_manager() {
 # GLA Alloy Collector Manager
 set -Eeuo pipefail
 
+GLA_VERSION="2.0.0"
 STACK_DIR="${STACK_DIR:-/opt/xray-alloy-collector}"
 COMPOSE_FILE="$STACK_DIR/compose.yaml"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
@@ -425,6 +426,62 @@ confirm() {
   local prompt="$1"
   read -rp "$prompt [Y/N]: " answer
   [[ "$answer" =~ ^[Yy]$ ]]
+}
+
+container_state() {
+  local container="$1" state
+  state="$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || true)"
+  case "$state" in
+    running) printf '[运行中]' ;;
+    restarting) printf '[重启中]' ;;
+    exited|dead) printf '[已停止]' ;;
+    created|paused) printf '[%s]' "$state" ;;
+    *) printf '[未安装]' ;;
+  esac
+}
+
+boolean_state() {
+  if [ "$1" = true ]; then
+    printf '[已启用]'
+  else
+    printf '[未启用]'
+  fi
+}
+
+configured_state() {
+  if [ -n "$1" ]; then
+    printf '[已启用]'
+  else
+    printf '[未启用]'
+  fi
+}
+
+xui_state() {
+  if [ -z "$1" ]; then
+    printf '[未启用]'
+  else
+    container_state gla-xui-exporter
+  fi
+}
+
+show_header() {
+  local server_name="未知服务器" enable_xray="" enable_security="" metrics_url="" xui_api_url=""
+  if [ -r "$INSTALL_SETTINGS_FILE" ]; then
+    set +u
+    # Generated locally by GLA and restricted to root.
+    . "$INSTALL_SETTINGS_FILE"
+    set -u
+    server_name="${SERVER_NAME:-未知服务器}"
+    enable_xray="${ENABLE_XRAY:-}"
+    enable_security="${ENABLE_SECURITY:-}"
+    metrics_url="${METRICS_URL:-}"
+    xui_api_url="${XUI_API_URL:-}"
+  fi
+
+  printf 'GLA Alloy %s - %s\n\n' "$GLA_VERSION" "$server_name"
+  printf 'Alloy          %s    Xray 日志      %s\n' "$(container_state xray-alloy)" "$(boolean_state "$enable_xray")"
+  printf '安全日志       %s    主机指标       %s\n' "$(boolean_state "$enable_security")" "$(configured_state "$metrics_url")"
+  printf '3x-ui 流量采集 %s\n' "$(xui_state "$xui_api_url")"
 }
 
 compose() {
@@ -462,6 +519,23 @@ show_status() {
     printf '\nXray 原始访问日志占用：\n'
     du -sh "$log_path"
   fi
+}
+
+show_logs() {
+  printf '\n采集器日志\n\n1. Alloy\n2. 3x-ui API 流量采集\n0. 返回\n'
+  read -rp "请选择服务: " choice
+  case "$choice" in
+    1) compose logs -f --tail=100 alloy || true ;;
+    2)
+      if grep -q '^  xui-exporter:' "$COMPOSE_FILE" 2>/dev/null; then
+        compose logs -f --tail=100 xui-exporter || true
+      else
+        printf '3x-ui API 流量采集未启用。\n'
+      fi
+      ;;
+    0) return ;;
+    *) printf '无效选择。\n' ;;
+  esac
 }
 
 show_config() {
@@ -570,8 +644,8 @@ uninstall_everything() {
 
 while true; do
   clear
+  show_header
   cat <<'MENU'
-GLA Alloy 模块化采集器管理
 
 0. 退出
 1. 安装或更新脚本并重新部署
@@ -579,7 +653,7 @@ GLA Alloy 模块化采集器管理
 3. 停止采集器
 4. 重启采集器
 5. 查看采集器状态与磁盘占用
-6. 查看 Alloy 日志
+6. 查看采集器日志
 7. 查看采集器设置
 8. 更新 Alloy
 9. 卸载但保留采集器数据
@@ -594,7 +668,7 @@ MENU
     3) compose stop; pause ;;
     4) compose restart; pause ;;
     5) show_status; pause ;;
-    6) compose logs -f --tail=100 alloy; pause ;;
+    6) show_logs; pause ;;
     7) show_config; pause ;;
     8) update_collector; pause ;;
     9) uninstall_keep_data; pause ;;
