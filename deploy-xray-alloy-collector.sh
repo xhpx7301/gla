@@ -481,13 +481,60 @@ download_installer() {
 }
 
 update_script_and_deploy() {
+  local xui_api_url_is_set="${XUI_API_URL+x}" xui_api_url_override="${XUI_API_URL-}"
+  local metrics_url_is_set="${METRICS_URL+x}" metrics_url_override="${METRICS_URL-}"
+  local metrics_username_is_set="${METRICS_USERNAME+x}" metrics_username_override="${METRICS_USERNAME-}"
   [ -r "$INSTALL_SETTINGS_FILE" ] || die "未找到安装配置：$INSTALL_SETTINGS_FILE"
   printf '正在从 GitHub 下载最新版脚本并重新部署。请输入现有 Loki 密码以保留连接配置。\n'
   set -a
   # This file is created locally by the installer and intentionally excludes the password.
   . "$INSTALL_SETTINGS_FILE"
   set +a
+  if [ "$xui_api_url_is_set" = x ]; then
+    XUI_API_URL="$xui_api_url_override"
+    export XUI_API_URL
+  fi
+  if [ "$metrics_url_is_set" = x ]; then
+    METRICS_URL="$metrics_url_override"
+    export METRICS_URL
+  fi
+  if [ "$metrics_username_is_set" = x ]; then
+    METRICS_USERNAME="$metrics_username_override"
+    export METRICS_USERNAME
+  fi
   ALLOY_ACTION=install bash <(download_installer)
+}
+
+configure_xui_api() {
+  local current_url="" answer
+  if [ -r "$INSTALL_SETTINGS_FILE" ]; then
+    set +u
+    . "$INSTALL_SETTINGS_FILE"
+    set -u
+    current_url="${XUI_API_URL:-}"
+  fi
+
+  printf '\n3x-ui API 流量采集配置\n'
+  if [ -n "$current_url" ]; then
+    printf '当前地址：%s\n' "$current_url"
+  else
+    printf '当前状态：未启用\n'
+  fi
+  printf '\n请输入完整的 HTTPS API 地址。\n'
+  printf '格式：https://面板域名/面板路径/panel/api/inbounds/list\n'
+  printf '输入 0 可关闭，直接按 Enter 取消。\n'
+  read -rp "3x-ui API 地址: " answer
+  if [ -z "$answer" ]; then
+    printf '已取消。\n'
+    return 1
+  fi
+  if [ "$answer" = 0 ]; then
+    XUI_API_URL=""
+  else
+    XUI_API_URL="$answer"
+  fi
+  export XUI_API_URL
+  update_script_and_deploy
 }
 
 update_collector() {
@@ -537,8 +584,9 @@ GLA Alloy 模块化采集器管理
 8. 更新 Alloy
 9. 卸载但保留采集器数据
 10. 完整卸载并删除所有数据
+11. 配置或关闭 3x-ui API 流量采集
 MENU
-  read -rp "请输入操作编号 [0-10]: " choice
+  read -rp "请输入操作编号 [0-11]: " choice
   case "$choice" in
     0) exit 0 ;;
     1) update_script_and_deploy; exit $? ;;
@@ -551,6 +599,13 @@ MENU
     8) update_collector; pause ;;
     9) uninstall_keep_data; pause ;;
     10) uninstall_everything ;;
+    11)
+      if configure_xui_api; then
+        exit 0
+      else
+        pause
+      fi
+      ;;
     *) printf '无效选择。\n'; pause ;;
   esac
 done
