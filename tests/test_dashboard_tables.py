@@ -128,13 +128,15 @@ class DashboardTableTest(unittest.TestCase):
         self.assertEqual(latest_ssh["type"], "table")
         self.assertEqual(latest_ssh["gridPos"], {"x": 0, "y": 5, "w": 24, "h": 10})
         self.assertEqual(latest_ssh["targets"][0]["maxLines"], 20)
+        self.assertEqual(latest_ssh["targets"][0]["queryType"], "range")
+        self.assertEqual(latest_ssh["targets"][0]["format"], "table")
         expression = latest_ssh["targets"][0]["expr"]
         for field in ("source_ip", "source_port", "attempted_user", "geo_country", "geo_region", "geo_city"):
             self.assertIn(field, expression)
         self.assertIn("尝试用户名", expression)
         self.assertNotIn("流量使用量", expression)
+        self.assertIn("label_format", expression)
         self.assertEqual(latest_ssh["transformations"][0]["id"], "labelsToFields")
-        self.assertIn('| json', expression)
         self.assertEqual(latest_ssh["transformations"][1]["id"], "sortBy")
         self.assertEqual(latest_ssh["transformations"][2]["id"], "organize")
         excluded = latest_ssh["transformations"][2]["options"]["excludeByName"]
