@@ -7,6 +7,8 @@ XRAY_LOG="${XRAY_LOG:-/var/log/x-ui/access.log}"
 ENABLE_XRAY="${ENABLE_XRAY:-auto}"
 ENABLE_SECURITY="${ENABLE_SECURITY:-true}"
 ENABLE_GEOIP="${ENABLE_GEOIP:-auto}"
+ENABLE_SECURITY_TRAFFIC="${ENABLE_SECURITY_TRAFFIC:-auto}"
+SSH_PORT="${SSH_PORT:-}"
 SERVER_NAME="${SERVER_NAME:-}"
 LOKI_URL="${LOKI_URL:-}"
 LOKI_USERNAME="${LOKI_USERNAME:-alloy-agent}"
@@ -35,6 +37,8 @@ write_install_settings() {
     printf 'ENABLE_XRAY=%q\n' "$ENABLE_XRAY"
     printf 'ENABLE_SECURITY=%q\n' "$ENABLE_SECURITY"
     printf 'ENABLE_GEOIP=%q\n' "$ENABLE_GEOIP"
+    printf 'ENABLE_SECURITY_TRAFFIC=%q\n' "$ENABLE_SECURITY_TRAFFIC"
+    printf 'SSH_PORT=%q\n' "$SSH_PORT"
     printf 'GEOIP_DB_PATH=%q\n' "$GEOIP_DB_PATH"
     printf 'GEOIP_MIRROR_URL=%q\n' "$GEOIP_MIRROR_URL"
     printf 'SERVER_NAME=%q\n' "$SERVER_NAME"
@@ -89,6 +93,93 @@ require_install_prerequisites() {
     case "$XUI_API_URL" in *$'\n'*|*$'\r'*|*\"*) die "XUI_API_URL 包含不支持的字符。" ;; esac
     [ -n "$METRICS_URL" ] || die "启用 3x-ui API 采集时必须同时设置 METRICS_URL。"
   fi
+  case "$ENABLE_SECURITY_TRAFFIC" in
+    auto)
+      if [ "$ENABLE_SECURITY" = true ] && [ -n "$METRICS_URL" ] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active$' && command -v iptables >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
+        ENABLE_SECURITY_TRAFFIC=true
+      else
+        ENABLE_SECURITY_TRAFFIC=false
+      fi
+      ;;
+    true)
+      [ "$ENABLE_SECURITY" = true ] || die "ENABLE_SECURITY_TRAFFIC=true 需要 ENABLE_SECURITY=true。"
+      [ -n "$METRICS_URL" ] || die "ENABLE_SECURITY_TRAFFIC=true 需要 METRICS_URL。"
+      command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active$' || die "ENABLE_SECURITY_TRAFFIC=true 需要已启用的 UFW。"
+      command -v iptables >/dev/null 2>&1 || die "ENABLE_SECURITY_TRAFFIC=true 需要 iptables。"
+      command -v systemctl >/dev/null 2>&1 || die "ENABLE_SECURITY_TRAFFIC=true 需要 systemd。"
+      ;;
+    false) ;;
+    *) die "ENABLE_SECURITY_TRAFFIC 只能是 auto、true 或 false。" ;;
+  esac
+  if [ -z "$SSH_PORT" ]; then
+    SSH_PORT="$(sshd -T 2>/dev/null | awk '$1 == "port" { print $2; exit }' || true)"
+    SSH_PORT="${SSH_PORT:-22}"
+  fi
+  [[ "$SSH_PORT" =~ ^[0-9]+$ ]] && [ "$SSH_PORT" -ge 1 ] && [ "$SSH_PORT" -le 65535 ] || die "SSH_PORT 必须是 1 到 65535 的端口号。"
+  if [ "$ENABLE_SECURITY_TRAFFIC" = true ]; then
+    SECURITY_TRAFFIC_VOLUME_LINE="      - $STACK_DIR/textfile:/var/lib/node_exporter/textfile:ro"
+    SECURITY_TRAFFIC_EXPORTER_CONFIG='  textfile { directory = "/var/lib/node_exporter/textfile" }'
+  else
+    SECURITY_TRAFFIC_VOLUME_LINE=""
+    SECURITY_TRAFFIC_EXPORTER_CONFIG=""
+  fi
+}
+
+setup_security_traffic_collector() {
+  local service_file=/etc/systemd/system/gla-security-traffic.service
+  local timer_file=/etc/systemd/system/gla-security-traffic.timer
+  local environment_file="$STACK_DIR/security-traffic.env"
+  local collector_file="$STACK_DIR/assets/security_traffic_collector.sh"
+
+  if [ "$ENABLE_SECURITY_TRAFFIC" = false ]; then
+    if [ -r "$environment_file" ] && [ -x "$collector_file" ]; then
+      set -a
+      # shellcheck disable=SC1090
+      . "$environment_file"
+      set +a
+      "$collector_file" --cleanup || true
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl disable --now gla-security-traffic.timer >/dev/null 2>&1 || true
+      systemctl daemon-reload
+    fi
+    rm -f "$service_file" "$timer_file" "$environment_file"
+    return
+  fi
+
+  install -d -m 0750 "$STACK_DIR/textfile"
+  {
+    printf 'GLA_TEXTFILE_DIR=%q\n' "$STACK_DIR/textfile"
+    printf 'GLA_SERVER_NAME=%q\n' "$SERVER_NAME"
+    printf 'GLA_SSH_PORT=%q\n' "$SSH_PORT"
+  } >"$environment_file"
+  chmod 0600 "$environment_file"
+
+  cat >"$service_file" <<EOF
+[Unit]
+Description=GLA aggregate SSH and UFW traffic collector
+After=network-online.target ufw.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=$environment_file
+ExecStart=$collector_file
+EOF
+  cat >"$timer_file" <<'EOF'
+[Unit]
+Description=Run the GLA aggregate firewall traffic collector every 30 seconds
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=30s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now gla-security-traffic.timer
+  systemctl start gla-security-traffic.service
 }
 
 download_asset() {
@@ -223,9 +314,14 @@ install_collector() {
 
 note "正在创建采集器文件：$STACK_DIR"
 install -d -m 0750 "$STACK_DIR/alloy" "$STACK_DIR/assets" "$STACK_DIR/secrets" "$STACK_DIR/geoip"
-write_install_settings
+  write_install_settings
+  if [ "$ENABLE_SECURITY_TRAFFIC" = true ]; then
+    download_asset assets/security_traffic_collector.sh "$STACK_DIR/assets/security_traffic_collector.sh"
+    chmod 0750 "$STACK_DIR/assets/security_traffic_collector.sh"
+  fi
+  setup_security_traffic_collector
 
-if [ -n "$XUI_API_URL" ]; then
+  if [ -n "$XUI_API_URL" ]; then
   printf '%s\n' "$XUI_API_TOKEN" >"$STACK_DIR/secrets/xui-api-token"
   chmod 0600 "$STACK_DIR/secrets/xui-api-token"
   download_asset assets/xui_exporter.py "$STACK_DIR/assets/xui_exporter.py"
@@ -261,6 +357,10 @@ if [ "$ENABLE_SECURITY" = true ]; then
       - /etc/machine-id:/etc/machine-id:ro
       - /var/log:/host/var/log:ro
 EOF
+fi
+
+if [ "$ENABLE_SECURITY_TRAFFIC" = true ]; then
+  printf '      - %s/textfile:/var/lib/node_exporter/textfile:ro\n' "$STACK_DIR" >>"$STACK_DIR/compose.yaml"
 fi
 
 if [ -n "$XUI_API_URL" ]; then
@@ -490,6 +590,7 @@ prometheus.exporter.unix "host" {
   procfs_path = "/host/proc"
   sysfs_path  = "/host/sys"
   rootfs_path = "/host/root"
+${SECURITY_TRAFFIC_EXPORTER_CONFIG}
 }
 
 discovery.relabel "host" {

@@ -6,6 +6,8 @@ STACK_DIR="${STACK_DIR:-/opt/xray-log-dashboard}"
 XRAY_LOG="${XRAY_LOG:-/var/log/x-ui/access.log}"
 ENABLE_XRAY="${ENABLE_XRAY:-auto}"
 ENABLE_GEOIP="${ENABLE_GEOIP:-auto}"
+ENABLE_SECURITY_TRAFFIC="${ENABLE_SECURITY_TRAFFIC:-auto}"
+SSH_PORT="${SSH_PORT:-}"
 GRAFANA_BIND="${GRAFANA_BIND:-0.0.0.0}"
 GRAFANA_PORT="${GRAFANA_PORT:-3000}"
 LOKI_RETENTION="${LOKI_RETENTION:-168h}"
@@ -29,6 +31,8 @@ write_install_settings() {
     printf 'XRAY_LOG=%q\n' "$XRAY_LOG"
     printf 'ENABLE_XRAY=%q\n' "$ENABLE_XRAY"
     printf 'ENABLE_GEOIP=%q\n' "$ENABLE_GEOIP"
+    printf 'ENABLE_SECURITY_TRAFFIC=%q\n' "$ENABLE_SECURITY_TRAFFIC"
+    printf 'SSH_PORT=%q\n' "$SSH_PORT"
     printf 'GEOIP_DB_PATH=%q\n' "$GEOIP_DB_PATH"
     printf 'GEOIP_MIRROR_URL=%q\n' "$GEOIP_MIRROR_URL"
     printf 'GRAFANA_BIND=%q\n' "$GRAFANA_BIND"
@@ -56,6 +60,34 @@ require_install_prerequisites() {
     false) ;;
     *) die "ENABLE_GEOIP 只能是 auto、true 或 false。" ;;
   esac
+  case "$ENABLE_SECURITY_TRAFFIC" in
+    auto)
+      if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active$' && command -v iptables >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
+        ENABLE_SECURITY_TRAFFIC=true
+      else
+        ENABLE_SECURITY_TRAFFIC=false
+      fi
+      ;;
+    true)
+      command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active$' || die "ENABLE_SECURITY_TRAFFIC=true 需要已启用的 UFW。"
+      command -v iptables >/dev/null 2>&1 || die "ENABLE_SECURITY_TRAFFIC=true 需要 iptables。"
+      command -v systemctl >/dev/null 2>&1 || die "ENABLE_SECURITY_TRAFFIC=true 需要 systemd。"
+      ;;
+    false) ;;
+    *) die "ENABLE_SECURITY_TRAFFIC 只能是 auto、true 或 false。" ;;
+  esac
+  if [ -z "$SSH_PORT" ]; then
+    SSH_PORT="$(sshd -T 2>/dev/null | awk '$1 == "port" { print $2; exit }' || true)"
+    SSH_PORT="${SSH_PORT:-22}"
+  fi
+  [[ "$SSH_PORT" =~ ^[0-9]+$ ]] && [ "$SSH_PORT" -ge 1 ] && [ "$SSH_PORT" -le 65535 ] || die "SSH_PORT 必须是 1 到 65535 的端口号。"
+  if [ "$ENABLE_SECURITY_TRAFFIC" = true ]; then
+    SECURITY_TRAFFIC_VOLUME_LINE="      - $STACK_DIR/textfile:/var/lib/node_exporter/textfile:ro"
+    SECURITY_TRAFFIC_EXPORTER_CONFIG='  textfile { directory = "/var/lib/node_exporter/textfile" }'
+  else
+    SECURITY_TRAFFIC_VOLUME_LINE=""
+    SECURITY_TRAFFIC_EXPORTER_CONFIG=""
+  fi
   [[ "$SERVER_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || die "SERVER_NAME 只能包含字母、数字、点、下划线和连字符。"
   if [ -n "$XUI_API_URL" ]; then
     [[ "$XUI_API_URL" =~ ^https://.+/panel/api/inbounds/list$ ]] || die "XUI_API_URL 必须是 HTTPS 且以 /panel/api/inbounds/list 结尾。"
@@ -77,6 +109,63 @@ require_install_prerequisites() {
   else
     die "需要 Docker Compose（docker compose 或 docker-compose）。"
   fi
+}
+
+setup_security_traffic_collector() {
+  local service_file=/etc/systemd/system/gla-security-traffic.service
+  local timer_file=/etc/systemd/system/gla-security-traffic.timer
+  local environment_file="$STACK_DIR/security-traffic.env"
+  local collector_file="$STACK_DIR/assets/security_traffic_collector.sh"
+
+  if [ "$ENABLE_SECURITY_TRAFFIC" = false ]; then
+    if [ -r "$environment_file" ] && [ -x "$collector_file" ]; then
+      set -a
+      # shellcheck disable=SC1090
+      . "$environment_file"
+      set +a
+      "$collector_file" --cleanup || true
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl disable --now gla-security-traffic.timer >/dev/null 2>&1 || true
+      systemctl daemon-reload
+    fi
+    rm -f "$service_file" "$timer_file" "$environment_file"
+    return
+  fi
+
+  install -d -m 0750 "$STACK_DIR/textfile"
+  {
+    printf 'GLA_TEXTFILE_DIR=%q\n' "$STACK_DIR/textfile"
+    printf 'GLA_SERVER_NAME=%q\n' "$SERVER_NAME"
+    printf 'GLA_SSH_PORT=%q\n' "$SSH_PORT"
+  } >"$environment_file"
+  chmod 0600 "$environment_file"
+
+  cat >"$service_file" <<EOF
+[Unit]
+Description=GLA aggregate SSH and UFW traffic collector
+After=network-online.target ufw.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=$environment_file
+ExecStart=$collector_file
+EOF
+  cat >"$timer_file" <<'EOF'
+[Unit]
+Description=Run the GLA aggregate firewall traffic collector every 30 seconds
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=30s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now gla-security-traffic.timer
+  systemctl start gla-security-traffic.service
 }
 
 download_asset() {
@@ -193,6 +282,9 @@ write_install_settings
 printf '%s\n' "$XUI_API_TOKEN" >"$STACK_DIR/secrets/xui-api-token"
 chmod 0600 "$STACK_DIR/secrets/xui-api-token"
 download_asset assets/xui_exporter.py "$STACK_DIR/assets/xui_exporter.py"
+download_asset assets/security_traffic_collector.sh "$STACK_DIR/assets/security_traffic_collector.sh"
+chmod 0750 "$STACK_DIR/assets/security_traffic_collector.sh"
+setup_security_traffic_collector
 if [ -n "$XUI_API_URL" ]; then
   printf 'COMPOSE_PROFILES=xui\n' >"$STACK_DIR/.env"
 else
@@ -335,6 +427,7 @@ ${GEOIP_VOLUME_LINE}
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /:/host/root:ro,rslave
+${SECURITY_TRAFFIC_VOLUME_LINE}
       - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
       - alloy-data:/var/lib/alloy/data
     depends_on:
@@ -516,6 +609,7 @@ prometheus.exporter.unix "host" {
   procfs_path = "/host/proc"
   sysfs_path  = "/host/sys"
   rootfs_path = "/host/root"
+${SECURITY_TRAFFIC_EXPORTER_CONFIG}
 }
 
 discovery.relabel "host" {
@@ -591,7 +685,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
   "title": "Xray 访问日志",
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 13,
+  "version": 15,
   "refresh": "30s",
   "time": { "from": "now-1h", "to": "now" },
   "templating": {
@@ -702,10 +796,10 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
     {
       "id": 5,
       "type": "table",
-      "title": "所选客户端近 $period 访问目标 Top 10",
+      "title": "所选客户端近 $period 访问目标 Top 20",
       "description": "按目标域名或 IP 聚合。选择“客户端”和“统计周期”后自动更新。",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "topk(10, sum by (destination) (count_over_time({job=\"xray-access\", server=~\"$server\", email=~\"$client\"} != \"[api -> api]\" | pattern `<_> accepted <_>:<destination>:<port> [<_>` [$period])))", "instant": true, "format": "table" }],
+      "targets": [{ "refId": "A", "expr": "topk(20, sum by (destination) (count_over_time({job=\"xray-access\", server=~\"$server\", email=~\"$client\"} != \"[api -> api]\" | pattern `<_> accepted <_>:<destination>:<port> [<_>` [$period])))", "instant": true, "format": "table" }],
       "gridPos": { "x": 0, "y": 9, "w": 24, "h": 9 },
       "fieldConfig": {
         "defaults": {},
@@ -748,14 +842,17 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
         ]
       },
       "options": { "showHeader": true },
-      "transformations": [{
-        "id": "organize",
-        "options": {
-          "excludeByName": { "Time": true },
-          "indexByName": { "email": 0, "Value #A": 1 },
-          "renameByName": { "email": "客户端", "Value #A": "次数" }
+      "transformations": [
+        { "id": "sortBy", "options": { "sort": [{ "field": "Value #A", "desc": true }] } },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true },
+            "indexByName": { "email": 0, "Value #A": 1 },
+            "renameByName": { "email": "客户端", "Value #A": "次数" }
+          }
         }
-      }]
+      ]
     },
     {
       "id": 7,
@@ -772,14 +869,17 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
         ]
       },
       "options": { "showHeader": true },
-      "transformations": [{
-        "id": "organize",
-        "options": {
-          "excludeByName": { "Time": true },
-          "indexByName": { "inbound": 0, "Value #A": 1 },
-          "renameByName": { "inbound": "入站", "Value #A": "次数" }
+      "transformations": [
+        { "id": "sortBy", "options": { "sort": [{ "field": "Value #A", "desc": true }] } },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true },
+            "indexByName": { "inbound": 0, "Value #A": 1 },
+            "renameByName": { "inbound": "入站", "Value #A": "次数" }
+          }
         }
-      }]
+      ]
     }
   ]
 }

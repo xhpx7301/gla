@@ -62,11 +62,11 @@ class DashboardTableTest(unittest.TestCase):
         self.assertIn("geo_country", fail2ban["targets"][0]["expr"])
         self.assertEqual(
             panel_by_id(self.security, 8)["gridPos"],
-            {"x": 0, "y": 21, "w": 24, "h": 9},
+            {"x": 0, "y": 32, "w": 24, "h": 9},
         )
         self.assertEqual(
             panel_by_id(self.security, 9)["gridPos"],
-            {"x": 0, "y": 30, "w": 24, "h": 9},
+            {"x": 0, "y": 41, "w": 24, "h": 9},
         )
 
     def test_gateway_tables_are_chinese_and_sorted(self):
@@ -117,10 +117,28 @@ class DashboardTableTest(unittest.TestCase):
         security_card = panel_by_id(self.security, 11)
         self.assertEqual(gateway_card["title"], "指标最新时间")
         self.assertEqual(security_card["title"], "指标最新时间")
-        self.assertEqual(gateway_card["targets"][0]["expr"], 'max(timestamp(xui_exporter_up{server=~"$server"}))')
-        self.assertEqual(security_card["targets"][0]["expr"], 'max(timestamp(node_time_seconds{server=~"$server"}))')
+        self.assertEqual(gateway_card["targets"][0]["expr"], '1000 * max(timestamp(xui_exporter_up{server=~"$server"}))')
+        self.assertEqual(security_card["targets"][0]["expr"], '1000 * max(timestamp(node_time_seconds{server=~"$server"}))')
         self.assertEqual(gateway_card["fieldConfig"]["defaults"]["unit"], "dateTimeAsLocal")
         self.assertEqual(security_card["fieldConfig"]["defaults"]["unit"], "dateTimeAsLocal")
+
+    def test_security_dashboard_shows_the_latest_parseable_ssh_failure(self):
+        latest_ssh = panel_by_id(self.security, 12)
+        self.assertEqual(latest_ssh["title"], "最新 SSH 失败记录")
+        self.assertEqual(latest_ssh["gridPos"], {"x": 0, "y": 5, "w": 24, "h": 4})
+        expression = latest_ssh["targets"][0]["expr"]
+        for field in ("source_ip", "source_port", "attempted_user", "geo_country", "geo_region", "geo_city"):
+            self.assertIn(field, expression)
+        self.assertIn("尝试用户名", expression)
+        self.assertNotIn("流量使用量", expression)
+
+    def test_security_dashboard_has_aggregate_ssh_and_ufw_traffic(self):
+        ssh_traffic = panel_by_id(self.security, 13)
+        ufw_traffic = panel_by_id(self.security, 14)
+        self.assertEqual(ssh_traffic["gridPos"], {"x": 0, "y": 25, "w": 12, "h": 7})
+        self.assertEqual(ufw_traffic["gridPos"], {"x": 12, "y": 25, "w": 12, "h": 7})
+        self.assertIn("gla_ssh_inbound_bytes_total", ssh_traffic["targets"][0]["expr"])
+        self.assertIn("gla_ufw_default_denied_bytes_total", ufw_traffic["targets"][0]["expr"])
 
     def test_embedded_access_dashboard_uses_full_width_connection_tables(self):
         script = (ROOT / "deploy-xray-grafana-loki-alloy.sh").read_text(encoding="utf-8")
@@ -131,6 +149,9 @@ class DashboardTableTest(unittest.TestCase):
         self.assertIn('inbound=~\\".+\\"', script)
         self.assertIn('"title": "最新访问日志"', script)
         self.assertIn('"maxLines": 1', script)
+        self.assertIn('"title": "所选客户端近 $period 访问目标 Top 20"', script)
+        self.assertIn('"expr": "topk(20, sum by (destination)', script)
+        self.assertEqual(script.count('"id": "sortBy", "options": { "sort": [{ "field": "Value #A", "desc": true }] }'), 2)
 
 
 if __name__ == "__main__":

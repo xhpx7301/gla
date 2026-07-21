@@ -26,7 +26,7 @@ HY-2314 中心服务器
 
 - `Xray 访问日志`：原始日志、最新访问记录、客户端、入站和访问目标统计。
 - `Xray 网关流量与连接`：在线用户、3x-ui API 状态、指标最新时间、上下行速率、客户端和入站流量、来源 IP 连接数。
-- `服务器安全事件与系统资源`：SSH 失败、Fail2ban、UFW、指标最新时间、CPU、内存和网卡流量。
+- `服务器安全事件与系统资源`：SSH 失败、Fail2ban、UFW、指标最新时间、CPU、内存、网卡、SSH 端口入站和 UFW 默认拒绝流量。
 
 ## 数据从哪里来
 
@@ -37,7 +37,11 @@ HY-2314 中心服务器
 | Fail2ban 发现、封禁、解封 | `/var/log/fail2ban.log` | Loki |
 | UFW 拒绝记录 | `/var/log/ufw.log` | Loki |
 | CPU、内存、网卡流量 | Alloy 内置 Unix exporter | VictoriaMetrics |
+| SSH 端口入站流量 | UFW 活跃时的宿主机防火墙计数器 | VictoriaMetrics |
+| UFW 默认拒绝流量 | UFW 默认 INPUT 拒绝策略的宿主机计数器 | VictoriaMetrics |
 | 3x-ui 在线用户和上下行流量 | 3x-ui Panel API | VictoriaMetrics |
+
+SSH 端口入站流量和 UFW 默认拒绝流量仅在 UFW 已启用且配置了指标写入时自动采集。采集器每 30 秒使用仅计数、随后立即返回的防火墙链生成聚合字节数，不会创建来源 IP 标签，也不改变放行或拒绝决定。SSH 端口流量包含正常会话和扫描；UFW 默认拒绝流量仅代表最终落入默认 INPUT 拒绝策略的流量。
 
 Xray 来源 IP 的“连接次数”和 3x-ui 的“流量字节数”是两种不同口径。普通 access log 没有每条连接的字节数，因此项目不会把来源 IP 连接次数伪装成精确流量。
 
@@ -205,6 +209,7 @@ alloy
 | `LOKI_USERNAME` | `alloy-agent` | Loki 反向代理认证用户名 |
 | `METRICS_URL` | 无 | VictoriaMetrics Remote Write HTTPS 地址 |
 | `METRICS_USERNAME` | `alloy-agent` | 指标反向代理认证用户名 |
+| `ENABLE_SECURITY_TRAFFIC` | `auto` | `auto` 仅在 UFW 活跃且已配置指标写入时启用；`true` 强制启用；`false` 停止并清理计数器 |
 | `XUI_API_URL` | 无 | 3x-ui `/panel/api/inbounds/list` 完整 HTTPS 地址 |
 | `ENABLE_GEOIP` | `auto` | `auto`、`true` 或 `false`；检测到本地数据库时自动启用 |
 | `GEOIP_DB_PATH` | 采集端为 `/opt/xray-alloy-collector/geoip/GeoLite2-City.mmdb`，中心端为 `/opt/xray-log-dashboard/geoip/GeoLite2-City.mmdb` | 本地 GeoLite2-City 数据库路径 |
@@ -279,10 +284,12 @@ docker logs --tail=100 xray-alloy
 deploy-xray-grafana-loki-alloy.sh  中心服务器安装与 gla 菜单
 deploy-xray-alloy-collector.sh     采集服务器安装与 alloy 菜单
 assets/xui_exporter.py             3x-ui API Prometheus 导出器
+assets/security_traffic_collector.sh SSH/UFW 聚合流量采集器
 dashboards/xray-gateway.json       Xray / 3x-ui 流量仪表盘
 dashboards/server-security.json    服务器安全事件与系统资源仪表盘
 tests/test_xui_exporter.py         3x-ui 导出器测试
 tests/test_generated_alloy_regex.sh Bash 到 Alloy 的正则转义测试
+tests/test_security_traffic_collector.sh 安全流量采集器配置测试
 ```
 
 原始来源 IP 会直接显示在表格中。第一阶段支持在采集阶段使用 GeoLite2-City 本地数据库离线解析国家/地区、省份和城市。默认下载地址是用户指定的 `P3TERX/GeoLite.mmdb` GitHub 镜像；如果未配置数据库，相关地理列会为空，原有 IP、失败次数、封禁次数和连接次数统计仍可用。
