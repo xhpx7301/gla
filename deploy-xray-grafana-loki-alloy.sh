@@ -48,6 +48,12 @@ require_install_prerequisites() {
   if [ -n "$XUI_API_URL" ]; then
     [[ "$XUI_API_URL" =~ ^https://.+/panel/api/inbounds/list$ ]] || die "XUI_API_URL 必须是 HTTPS 且以 /panel/api/inbounds/list 结尾。"
     case "$XUI_API_URL" in *$'\n'*|*$'\r'*|*\"*) die "XUI_API_URL 包含不支持的字符。" ;; esac
+    XUI_API_HOST="${XUI_API_URL#https://}"
+    XUI_API_HOST="${XUI_API_HOST%%/*}"
+    XUI_API_HOST="${XUI_API_HOST%%:*}"
+    [[ "$XUI_API_HOST" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || die "无法从 XUI_API_URL 识别面板域名。"
+  else
+    XUI_API_HOST="localhost"
   fi
   command -v docker >/dev/null 2>&1 || die "未找到 Docker。通常 Nginx Proxy Manager 已经安装 Docker。"
   docker info >/dev/null 2>&1 || die "Docker 服务未运行或当前用户无权限访问。"
@@ -236,6 +242,8 @@ ${XRAY_VOLUME_LINE}
       XUI_API_URL: "${XUI_API_URL}"
       XUI_API_TOKEN_FILE: /run/secrets/xui_api_token
       SERVER_NAME: "${SERVER_NAME}"
+    extra_hosts:
+      - "${XUI_API_HOST}:host-gateway"
     volumes:
       - ./assets/xui_exporter.py:/app/xui_exporter.py:ro
       - ./secrets/xui-api-token:/run/secrets/xui_api_token:ro
@@ -663,7 +671,7 @@ install_manager() {
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-GLA_VERSION="2.0.1"
+GLA_VERSION="2.0.2"
 STACK_DIR="${STACK_DIR:-/opt/xray-log-dashboard}"
 COMPOSE_FILE="$STACK_DIR/compose.yaml"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
@@ -970,7 +978,7 @@ show_installer_menu() {
   while true; do
     clear
     cat <<'MENU'
-GLA 2.0.1 - 轻量服务器观测平台
+GLA 2.0.2 - 轻量服务器观测平台
 
 当前状态：[尚未安装或需要重新部署]
 

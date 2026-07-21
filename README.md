@@ -75,6 +75,8 @@ gla
 
 已有中心平台可以直接运行 `gla`，选择 `8. 配置或关闭本机 3x-ui API 流量采集`。输入 API 地址后脚本会安全询问 Token、重新部署导出器，并重启 Alloy 使抓取配置立即生效。
 
+中央服务器采集自己的 3x-ui 时，导出器容器会保留 API 域名用于 HTTPS 证书校验，同时将该域名解析到 Docker 宿主机网关，避免服务器通过公网地址访问自身时发生回环超时。此行为只用于中央服务器的本机 3x-ui，不影响远程采集器。
+
 ## 配置远程写入入口
 
 中心容器默认不直接向公网开放 Loki 和 VictoriaMetrics。使用 Nginx Proxy Manager 时，建议创建两个独立 HTTPS Proxy Host：
@@ -228,6 +230,7 @@ docker logs --tail=100 xray-alloy
 - **系统曲线为空**：检查是否设置了 `METRICS_URL`，以及指标域名的 SSL、Basic Auth 和 `/api/v1/write` 转发。
 - **3x-ui API 状态不可用**：检查 API URL、Token、证书，以及采集服务器能否访问面板域名。
 - **Xray Gateway 服务器列表只有 All**：更新中心和采集端脚本后重新部署。新版导出器会在每条 `xui_*` 指标中写入 `server` 标签；可用 `count by (server) (xui_exporter_up)` 验证。
+- **中央服务器本机 3x-ui 显示超时**：更新中央脚本并重新部署，新版会让本机面板域名在导出器容器内直连宿主机网关，解决 Docker 访问本机公网地址的回环超时。
 - **传入 `XUI_API_URL` 后仍未启用**：确认反斜杠是该行最后一个字符，后面不能有空格；也可以直接使用 `alloy` 菜单第 `11` 项。
 - **Xray 面板无日志**：检查 `XRAY_LOG`、3x-ui 的访问日志设置和文件读取权限。
 - **旧日志没有全部出现**：systemd journal 首次默认读取最近数据；GLA 主要保证安装后的持续采集。
