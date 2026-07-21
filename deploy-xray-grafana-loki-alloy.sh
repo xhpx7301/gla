@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
-# Deploys a small Grafana + Loki + Alloy stack for Xray access logs.
+# Deploys the central GLA observability stack.
 set -Eeuo pipefail
 
 STACK_DIR="${STACK_DIR:-/opt/xray-log-dashboard}"
 XRAY_LOG="${XRAY_LOG:-/var/log/x-ui/access.log}"
+ENABLE_XRAY="${ENABLE_XRAY:-auto}"
 GRAFANA_BIND="${GRAFANA_BIND:-0.0.0.0}"
 GRAFANA_PORT="${GRAFANA_PORT:-3000}"
 LOKI_RETENTION="${LOKI_RETENTION:-168h}"
+METRICS_RETENTION="${METRICS_RETENTION:-14d}"
 SERVER_NAME="${SERVER_NAME:-central}"
 NPM_NETWORK="${NPM_NETWORK:-npm-loki}"
+ASSET_BASE_URL="${ASSET_BASE_URL:-https://raw.githubusercontent.com/xhpx7301/gla/main}"
+XUI_API_URL="${XUI_API_URL:-}"
+XUI_API_TOKEN="${XUI_API_TOKEN:-}"
 MANAGER_PATH="/usr/local/bin/gla"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
 
@@ -19,19 +24,31 @@ write_install_settings() {
   {
     printf 'STACK_DIR=%q\n' "$STACK_DIR"
     printf 'XRAY_LOG=%q\n' "$XRAY_LOG"
+    printf 'ENABLE_XRAY=%q\n' "$ENABLE_XRAY"
     printf 'GRAFANA_BIND=%q\n' "$GRAFANA_BIND"
     printf 'GRAFANA_PORT=%q\n' "$GRAFANA_PORT"
     printf 'LOKI_RETENTION=%q\n' "$LOKI_RETENTION"
+    printf 'METRICS_RETENTION=%q\n' "$METRICS_RETENTION"
     printf 'SERVER_NAME=%q\n' "$SERVER_NAME"
     printf 'NPM_NETWORK=%q\n' "$NPM_NETWORK"
+    printf 'XUI_API_URL=%q\n' "$XUI_API_URL"
   } >"$INSTALL_SETTINGS_FILE"
   chmod 0600 "$INSTALL_SETTINGS_FILE"
 }
 
 require_install_prerequisites() {
   [ "$(id -u)" -eq 0 ] || die "请使用 root 执行：sudo bash $0"
-  [ -r "$XRAY_LOG" ] || die "无法读取 Xray 日志：$XRAY_LOG"
+  case "$ENABLE_XRAY" in
+    auto) [ -r "$XRAY_LOG" ] && ENABLE_XRAY=true || ENABLE_XRAY=false ;;
+    true) [ -r "$XRAY_LOG" ] || die "已要求采集 Xray，但无法读取日志：$XRAY_LOG" ;;
+    false) ;;
+    *) die "ENABLE_XRAY 只能是 auto、true 或 false。" ;;
+  esac
   [[ "$SERVER_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || die "SERVER_NAME 只能包含字母、数字、点、下划线和连字符。"
+  if [ -n "$XUI_API_URL" ]; then
+    [[ "$XUI_API_URL" =~ ^https://.+/panel/api/inbounds/list$ ]] || die "XUI_API_URL 必须是 HTTPS 且以 /panel/api/inbounds/list 结尾。"
+    case "$XUI_API_URL" in *$'\n'*|*$'\r'*|*\"*) die "XUI_API_URL 包含不支持的字符。" ;; esac
+  fi
   command -v docker >/dev/null 2>&1 || die "未找到 Docker。通常 Nginx Proxy Manager 已经安装 Docker。"
   docker info >/dev/null 2>&1 || die "Docker 服务未运行或当前用户无权限访问。"
 
@@ -44,9 +61,42 @@ require_install_prerequisites() {
   fi
 }
 
+download_asset() {
+  local relative_path="$1" destination="$2"
+  if [ -n "${GLA_ASSET_DIR:-}" ] && [ -r "$GLA_ASSET_DIR/$relative_path" ]; then
+    install -m 0644 "$GLA_ASSET_DIR/$relative_path" "$destination"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$destination" "$ASSET_BASE_URL/$relative_path"
+  elif command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$ASSET_BASE_URL/$relative_path" -o "$destination"
+  else
+    die "需要 wget 或 curl 下载仪表盘文件。"
+  fi
+}
+
 install_stack() {
   require_install_prerequisites
   docker network inspect "$NPM_NETWORK" >/dev/null 2>&1 || docker network create "$NPM_NETWORK" >/dev/null
+
+  if [ -d /var/log/journal ] && [ -n "$(find /var/log/journal -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+    JOURNAL_PATH_HOST=/var/log/journal
+  elif [ -d /run/log/journal ]; then
+    JOURNAL_PATH_HOST=/run/log/journal
+  else
+    die "未找到 systemd journal 目录，无法采集 SSH 安全日志。"
+  fi
+
+  if [ -n "$XUI_API_URL" ]; then
+    if [ -z "$XUI_API_TOKEN" ] && [ -r "$STACK_DIR/secrets/xui-api-token" ]; then
+      XUI_API_TOKEN="$(cat "$STACK_DIR/secrets/xui-api-token")"
+    fi
+    if [ -z "$XUI_API_TOKEN" ]; then
+      read -rsp "请输入 3x-ui API Token（输入内容不会显示）: " XUI_API_TOKEN
+      printf '\n'
+    fi
+    [ -n "$XUI_API_TOKEN" ] || die "XUI_API_TOKEN 不能为空。"
+    case "$XUI_API_TOKEN" in *$'\n'*|*$'\r'*) die "XUI_API_TOKEN 不能包含换行符。" ;; esac
+  fi
 
   mem_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
   if [ "$mem_kb" -lt 1258291 ]; then
@@ -56,8 +106,41 @@ install_stack() {
 note "正在创建部署文件：$STACK_DIR"
 install -d -m 0750 "$STACK_DIR" "$STACK_DIR/alloy" \
   "$STACK_DIR/loki" "$STACK_DIR/grafana/provisioning/datasources" \
-  "$STACK_DIR/grafana/provisioning/dashboards" "$STACK_DIR/grafana/dashboards"
+  "$STACK_DIR/grafana/provisioning/dashboards" "$STACK_DIR/grafana/dashboards" \
+  "$STACK_DIR/assets" "$STACK_DIR/secrets"
 write_install_settings
+
+printf '%s\n' "$XUI_API_TOKEN" >"$STACK_DIR/secrets/xui-api-token"
+chmod 0600 "$STACK_DIR/secrets/xui-api-token"
+download_asset assets/xui_exporter.py "$STACK_DIR/assets/xui_exporter.py"
+if [ -n "$XUI_API_URL" ]; then
+  printf 'COMPOSE_PROFILES=xui\n' >"$STACK_DIR/.env"
+else
+  printf 'COMPOSE_PROFILES=\n' >"$STACK_DIR/.env"
+fi
+chmod 0600 "$STACK_DIR/.env"
+
+XUI_SCRAPE_CONFIG=""
+if [ -n "$XUI_API_URL" ]; then
+  XUI_SCRAPE_CONFIG="$(cat <<EOF
+
+prometheus.scrape "xui" {
+  targets = [{
+    __address__ = "xui-exporter:9105",
+    job         = "xui-metrics",
+    server      = "${SERVER_NAME}",
+  }]
+  scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.local.receiver]
+}
+EOF
+)"
+fi
+
+XRAY_VOLUME_LINE=""
+if [ "$ENABLE_XRAY" = true ]; then
+  XRAY_VOLUME_LINE="      - ${XRAY_LOG}:${XRAY_LOG}:ro"
+fi
 
 # Grafana only applies its admin password on the first database initialization.
 # Preserve the generated value so a later script run cannot print a false password.
@@ -109,6 +192,19 @@ services:
       - ./loki/config.yaml:/etc/loki/config.yaml:ro
       - loki-data:/loki
 
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:latest
+    container_name: gla-victoriametrics
+    restart: unless-stopped
+    command:
+      - -storageDataPath=/victoria-metrics-data
+      - -retentionPeriod=${METRICS_RETENTION}
+    networks:
+      - default
+      - npm
+    volumes:
+      - victoria-metrics-data:/victoria-metrics-data
+
   alloy:
     image: grafana/alloy:latest
     container_name: xray-alloy
@@ -116,15 +212,37 @@ services:
     user: "0:0"
     command: run --server.http.listen-addr=0.0.0.0:12345 --storage.path=/var/lib/alloy/data /etc/alloy/config.alloy
     volumes:
-      - ${XRAY_LOG}:${XRAY_LOG}:ro
+${XRAY_VOLUME_LINE}
+      - ${JOURNAL_PATH_HOST}:/var/log/journal:ro
+      - /etc/machine-id:/etc/machine-id:ro
+      - /var/log:/host/var/log:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro,rslave
       - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
       - alloy-data:/var/lib/alloy/data
     depends_on:
       - loki
+      - victoriametrics
+
+  xui-exporter:
+    profiles: ["xui"]
+    image: python:3.12-alpine
+    container_name: gla-xui-exporter
+    restart: unless-stopped
+    command: ["python3", "/app/xui_exporter.py"]
+    environment:
+      XUI_API_URL: "${XUI_API_URL}"
+      XUI_API_TOKEN_FILE: /run/secrets/xui_api_token
+      SERVER_NAME: "${SERVER_NAME}"
+    volumes:
+      - ./assets/xui_exporter.py:/app/xui_exporter.py:ro
+      - ./secrets/xui-api-token:/run/secrets/xui_api_token:ro
 
 volumes:
   grafana-data:
   loki-data:
+  victoria-metrics-data:
   alloy-data:
 
 networks:
@@ -194,6 +312,11 @@ loki.process "xray_access" {
     expression = "^(?P<timestamp>\\\\d{4}/\\\\d{2}/\\\\d{2} \\\\d{2}:\\\\d{2}:\\\\d{2}\\\\.\\\\d+) from (?P<source>\\\\S+) accepted (?P<network>\\\\w+):(?P<destination>\\\\S+) \\\\[(?P<inbound>[^ ]+) (?:>>|->) (?P<outbound>[^\\\\]]+)\\\\](?: email: (?P<email>\\\\S+))?"
   }
 
+  stage.timestamp {
+    source = "timestamp"
+    format = "2006/01/02 15:04:05.000000"
+  }
+
   stage.labels {
     values = {
       inbound  = "",
@@ -202,6 +325,88 @@ loki.process "xray_access" {
     }
   }
 
+}
+
+loki.source.journal "ssh" {
+  path       = "/var/log/journal"
+  matches    = "_SYSTEMD_UNIT=ssh.service"
+  labels     = { job = "ssh-journal", server = "${SERVER_NAME}" }
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.source.journal "sshd" {
+  path       = "/var/log/journal"
+  matches    = "_SYSTEMD_UNIT=sshd.service"
+  labels     = { job = "ssh-journal", server = "${SERVER_NAME}" }
+  forward_to = [loki.write.default.receiver]
+}
+
+local.file_match "fail2ban" {
+  path_targets = [{
+    __path__ = "/host/var/log/fail2ban.log",
+    job      = "fail2ban",
+    server   = "${SERVER_NAME}",
+  }]
+}
+
+loki.source.file "fail2ban" {
+  targets    = local.file_match.fail2ban.targets
+  forward_to = [loki.process.fail2ban.receiver]
+}
+
+loki.process "fail2ban" {
+  forward_to = [loki.write.default.receiver]
+
+  stage.regex {
+    expression = "^(?P<timestamp>\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2},\\d+)"
+  }
+
+  stage.timestamp {
+    source = "timestamp"
+    format = "2006-01-02 15:04:05,000"
+  }
+}
+
+local.file_match "ufw" {
+  path_targets = [{
+    __path__ = "/host/var/log/ufw.log",
+    job      = "ufw",
+    server   = "${SERVER_NAME}",
+  }]
+}
+
+loki.source.file "ufw" {
+  targets    = local.file_match.ufw.targets
+  forward_to = [loki.write.default.receiver]
+}
+
+prometheus.exporter.unix "host" {
+  procfs_path = "/host/proc"
+  sysfs_path  = "/host/sys"
+  rootfs_path = "/host/root"
+}
+
+discovery.relabel "host" {
+  targets = prometheus.exporter.unix.host.targets
+
+  rule {
+    target_label = "server"
+    replacement  = "${SERVER_NAME}"
+  }
+}
+
+prometheus.scrape "host" {
+  targets         = discovery.relabel.host.output
+  scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.local.receiver]
+}
+
+${XUI_SCRAPE_CONFIG}
+
+prometheus.remote_write "local" {
+  endpoint {
+    url = "http://victoriametrics:8428/api/v1/write"
+  }
 }
 
 loki.write "default" {
@@ -222,6 +427,13 @@ datasources:
     url: http://loki:3100
     isDefault: true
     editable: false
+  - name: VictoriaMetrics
+    uid: victoriametrics
+    type: prometheus
+    access: proxy
+    url: http://victoriametrics:8428
+    isDefault: false
+    editable: false
 EOF
 
 cat >"$STACK_DIR/grafana/provisioning/dashboards/xray.yaml" <<'EOF'
@@ -236,6 +448,10 @@ providers:
     options:
       path: /var/lib/grafana/dashboards
 EOF
+
+note "正在安装 Xray 和服务器安全仪表盘"
+download_asset dashboards/xray-gateway.json "$STACK_DIR/grafana/dashboards/xray-gateway.json"
+download_asset dashboards/server-security.json "$STACK_DIR/grafana/dashboards/server-security.json"
 
 cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
 {
@@ -408,7 +624,7 @@ EOF
 
 chmod 0600 "$STACK_DIR/compose.yaml"
 
-note "正在启动 Grafana、Loki 和 Alloy"
+note "正在启动 Grafana、Loki、VictoriaMetrics 和 Alloy"
 cd "$STACK_DIR"
 "${COMPOSE[@]}" pull
 "${COMPOSE[@]}" up -d
@@ -425,6 +641,7 @@ cat <<EOF
 Grafana 地址：http://服务器_IP:${GRAFANA_PORT}
 Grafana 用户名：admin
 Grafana 密码：${GRAFANA_ADMIN_PASSWORD}
+Xray 日志采集：${ENABLE_XRAY}
 
 安全提示：端口 ${GRAFANA_PORT} 已监听在所有服务器网络接口。
 公网使用前，请在云防火墙或服务器防火墙中仅允许你的管理 IP 访问。
@@ -439,6 +656,7 @@ install_manager() {
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+GLA_VERSION="2.0.0"
 STACK_DIR="${STACK_DIR:-/opt/xray-log-dashboard}"
 COMPOSE_FILE="$STACK_DIR/compose.yaml"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
@@ -450,6 +668,33 @@ confirm() {
   local prompt="$1"
   read -rp "$prompt [Y/N]: " answer
   [[ "$answer" =~ ^[Yy]$ ]]
+}
+
+container_state() {
+  local container="$1" state
+  state="$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || true)"
+  case "$state" in
+    running) printf '[运行中]' ;;
+    restarting) printf '[重启中]' ;;
+    exited|dead) printf '[已停止]' ;;
+    created|paused) printf '[%s]' "$state" ;;
+    *) printf '[未安装]' ;;
+  esac
+}
+
+xui_state() {
+  if ! grep -Eq '^COMPOSE_PROFILES=.*xui' "$STACK_DIR/.env" 2>/dev/null; then
+    printf '[未启用]'
+  else
+    container_state gla-xui-exporter
+  fi
+}
+
+show_header() {
+  printf 'GLA %s - 轻量服务器观测平台\n\n' "$GLA_VERSION"
+  printf 'Grafana         %s    Loki             %s\n' "$(container_state xray-grafana)" "$(container_state xray-loki)"
+  printf 'VictoriaMetrics %s    Alloy            %s\n' "$(container_state gla-victoriametrics)" "$(container_state xray-alloy)"
+  printf '3x-ui 流量采集  %s\n' "$(xui_state)"
 }
 
 compose() {
@@ -472,7 +717,7 @@ show_status() {
 
   local image volume mountpoint log_path
   printf '\n项目镜像占用：\n'
-  for image in grafana/grafana:latest grafana/loki:latest grafana/alloy:latest; do
+  for image in grafana/grafana:latest grafana/loki:latest grafana/alloy:latest victoriametrics/victoria-metrics:latest python:3.12-alpine; do
     docker image ls "$image"
   done
 
@@ -491,15 +736,110 @@ show_status() {
 }
 
 show_logs() {
-  printf '\n1. Grafana\n2. Loki\n3. Alloy\n0. 返回\n'
+  printf '\n服务日志\n\n1. Grafana\n2. Loki\n3. VictoriaMetrics\n4. Alloy\n5. 3x-ui 流量采集\n0. 返回\n'
   read -rp "请选择服务: " choice
   case "$choice" in
-    1) compose logs -f --tail=100 grafana ;;
-    2) compose logs -f --tail=100 loki ;;
-    3) compose logs -f --tail=100 alloy ;;
+    1) compose logs -f --tail=100 grafana || true ;;
+    2) compose logs -f --tail=100 loki || true ;;
+    3) compose logs -f --tail=100 victoriametrics || true ;;
+    4) compose logs -f --tail=100 alloy || true ;;
+    5)
+      if grep -Eq '^COMPOSE_PROFILES=.*xui' "$STACK_DIR/.env" 2>/dev/null; then
+        compose logs -f --tail=100 xui-exporter || true
+      else
+        printf '3x-ui API 流量采集未启用。\n'
+      fi
+      ;;
     0) return ;;
     *) printf '无效选择。\n' ;;
   esac
+}
+
+service_control_menu() {
+  while true; do
+    clear
+    show_header
+    cat <<'MENU'
+
+服务控制
+
+0. 返回主菜单
+1. 启动全部服务
+2. 停止全部服务
+3. 重启全部服务
+4. 仅重启 Grafana
+5. 仅重启 Loki
+6. 仅重启 VictoriaMetrics
+7. 仅重启 Alloy
+8. 仅重启 3x-ui 流量采集
+MENU
+    read -rp "请输入操作编号 [0-8]: " choice
+    case "$choice" in
+      0) return ;;
+      1) compose up -d; pause ;;
+      2)
+        if confirm "停止全部观测服务？采集期间会暂时中断"; then compose stop; else printf '已取消。\n'; fi
+        pause
+        ;;
+      3) compose restart; pause ;;
+      4) compose restart grafana; pause ;;
+      5) compose restart loki; pause ;;
+      6) compose restart victoriametrics; pause ;;
+      7) compose restart alloy; pause ;;
+      8)
+        if grep -Eq '^COMPOSE_PROFILES=.*xui' "$STACK_DIR/.env" 2>/dev/null; then
+          compose restart xui-exporter
+        else
+          printf '3x-ui API 流量采集未启用。\n'
+        fi
+        pause
+        ;;
+      *) printf '无效选择。\n'; pause ;;
+    esac
+  done
+}
+
+show_access_info() {
+  local grafana_bind="0.0.0.0" grafana_port="3000" xui_api_url="" enable_xray="auto" grafana_password=""
+  if [ -r "$INSTALL_SETTINGS_FILE" ]; then
+    set +u
+    # Generated by GLA and contains shell-escaped non-secret settings.
+    . "$INSTALL_SETTINGS_FILE"
+    set -u
+    grafana_bind="${GRAFANA_BIND:-0.0.0.0}"
+    grafana_port="${GRAFANA_PORT:-3000}"
+    xui_api_url="${XUI_API_URL:-}"
+    enable_xray="${ENABLE_XRAY:-auto}"
+  fi
+
+  printf '\n访问与模块信息\n\n'
+  if [ "$grafana_bind" = "0.0.0.0" ]; then
+    printf 'Grafana：       http://服务器_IP:%s\n' "$grafana_port"
+  else
+    printf 'Grafana：       http://%s:%s\n' "$grafana_bind" "$grafana_port"
+  fi
+  printf 'Loki 内部地址： http://loki:3100\n'
+  printf '指标内部地址： http://victoriametrics:8428\n'
+  printf '远程指标路径： /api/v1/write（需通过 HTTPS 反向代理和认证）\n'
+
+  if [ -f "$STACK_DIR/.credentials" ]; then
+    grafana_password="$(sed -n 's/^GRAFANA_ADMIN_PASSWORD=//p' "$STACK_DIR/.credentials" | head -n 1)"
+    printf 'Grafana 用户： admin\nGrafana 密码： %s\n' "$grafana_password"
+  else
+    printf 'Grafana 凭据： 未找到\n'
+  fi
+
+  printf '\n已配置仪表盘：\n'
+  [ -f "$STACK_DIR/grafana/dashboards/xray-access.json" ] && printf '  - Xray 访问日志\n'
+  [ -f "$STACK_DIR/grafana/dashboards/xray-gateway.json" ] && printf '  - Xray Gateway\n'
+  [ -f "$STACK_DIR/grafana/dashboards/server-security.json" ] && printf '  - 服务器安全与系统\n'
+
+  if [ -n "$xui_api_url" ]; then
+    printf '\n3x-ui API：    已配置（Token 不显示）\n'
+  else
+    printf '\n3x-ui API：    未启用\n'
+  fi
+  printf 'Xray 日志：    %s\n' "$enable_xray"
 }
 
 download_installer() {
@@ -523,54 +863,50 @@ update_script_and_deploy() {
 }
 
 update_stack() {
-  printf '正在拉取 Grafana、Loki 和 Alloy 的最新镜像，服务可能短暂重建。\n'
+  printf '正在拉取 Grafana、Loki、VictoriaMetrics 和 Alloy 的最新镜像，服务可能短暂重建。\n'
   compose pull
   compose up -d
   printf '服务组件更新完成。\n'
 }
 
 uninstall_everything() {
-  if ! confirm "永久删除此日志面板、Loki 历史日志、Grafana 数据和项目镜像？"; then
+  if ! confirm "永久删除观测平台、历史日志、指标、Grafana 数据和项目镜像？"; then
     printf '已取消。\n'
     return
   fi
   [ -f "$COMPOSE_FILE" ] && compose down -v || true
   docker volume ls -q --filter label=com.docker.compose.project=xray-log-dashboard | xargs -r docker volume rm
-  docker image rm grafana/grafana:latest grafana/loki:latest grafana/alloy:latest 2>/dev/null || true
+  docker image rm grafana/grafana:latest grafana/loki:latest grafana/alloy:latest victoriametrics/victoria-metrics:latest python:3.12-alpine 2>/dev/null || true
   rm -rf "$STACK_DIR"
   rm -f "$0"
-  printf 'Xray 日志面板已完整卸载。NPM 和 npm-loki 网络未被修改。\n'
+  printf 'GLA 已完整卸载。NPM 和外部 Docker 网络未被修改。\n'
   exit 0
 }
 
 while true; do
   clear
+  show_header
   cat <<'MENU'
-Xray 访问日志面板管理
 
 0. 退出
-1. 安装或更新脚本并重新部署
-2. 启动服务
-3. 停止服务
-4. 重启服务
-5. 查看服务状态与磁盘占用
-6. 查看服务日志
-7. 查看 Grafana 密码
-8. 更新 Grafana、Loki 和 Alloy
-9. 卸载并删除所有面板数据
+1. 更新配置、脚本与仪表盘
+2. 服务控制
+3. 查看运行状态与资源占用
+4. 查看服务日志
+5. 查看访问地址、凭据与模块
+6. 更新容器镜像
+7. 卸载并删除全部数据
 MENU
-  read -rp "请输入操作编号 [0-9]: " choice
+  read -rp "请输入操作编号 [0-7]: " choice
   case "$choice" in
     0) exit 0 ;;
     1) update_script_and_deploy; exit $? ;;
-    2) compose up -d; pause ;;
-    3) compose stop; pause ;;
-    4) compose restart; pause ;;
-    5) show_status; pause ;;
-    6) show_logs; pause ;;
-    7) [ -f "$STACK_DIR/.credentials" ] && sed -n 's/^GRAFANA_ADMIN_PASSWORD=/Grafana 密码：/p' "$STACK_DIR/.credentials" || printf '未找到凭据文件。\n'; pause ;;
-    8) update_stack; pause ;;
-    9) uninstall_everything ;;
+    2) service_control_menu ;;
+    3) show_status; pause ;;
+    4) show_logs; pause ;;
+    5) show_access_info; pause ;;
+    6) update_stack; pause ;;
+    7) uninstall_everything ;;
     *) printf '无效选择。\n'; pause ;;
   esac
 done
@@ -582,24 +918,18 @@ show_installer_menu() {
   while true; do
     clear
     cat <<'MENU'
-Xray 访问日志面板管理
+GLA 2.0.0 - 轻量服务器观测平台
+
+当前状态：[尚未安装或需要重新部署]
 
 0. 退出
-1. 安装或更新日志面板
-2. 启动服务
-3. 停止服务
-4. 重启服务
-5. 查看服务状态与磁盘占用
-6. 查看服务日志
-7. 查看 Grafana 密码
-8. 更新 Grafana、Loki 和 Alloy
-9. 卸载并删除所有面板数据
+1. 安装或更新中心观测平台
 MENU
-    read -rp "请输入操作编号 [0-9]: " choice
+    read -rp "请输入操作编号 [0-1]: " choice
     case "$choice" in
       0) exit 0 ;;
       1) install_stack; return ;;
-      *) printf '请先选择 1 安装或更新日志面板；安装完成后输入 gla 使用完整管理功能。\n'; read -rp "按 Enter 键继续..." _ ;;
+      *) printf '无效选择。\n'; read -rp "按 Enter 键继续..." _ ;;
     esac
   done
 }
