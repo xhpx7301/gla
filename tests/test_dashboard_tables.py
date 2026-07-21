@@ -133,9 +133,8 @@ class DashboardTableTest(unittest.TestCase):
             self.assertIn(field, expression)
         self.assertIn("尝试用户名", expression)
         self.assertNotIn("流量使用量", expression)
-        self.assertEqual(latest_ssh["transformations"][0]["id"], "extractFields")
-        self.assertEqual(latest_ssh["transformations"][0]["options"]["source"], "NewField")
-        self.assertEqual(latest_ssh["transformations"][0]["options"]["format"], "json")
+        self.assertEqual(latest_ssh["transformations"][0]["id"], "labelsToFields")
+        self.assertIn('| json', expression)
         self.assertEqual(latest_ssh["transformations"][1]["id"], "sortBy")
         self.assertEqual(latest_ssh["transformations"][2]["id"], "organize")
         excluded = latest_ssh["transformations"][2]["options"]["excludeByName"]
