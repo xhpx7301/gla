@@ -124,24 +124,18 @@ class DashboardTableTest(unittest.TestCase):
 
     def test_security_dashboard_shows_the_latest_parseable_ssh_failure(self):
         latest_ssh = panel_by_id(self.security, 12)
-        self.assertEqual(latest_ssh["title"], "最近 20 次 SSH 失败记录")
-        self.assertEqual(latest_ssh["type"], "table")
+        self.assertEqual(latest_ssh["title"], "最近 20 次 SSH 失败详情")
+        self.assertEqual(latest_ssh["type"], "logs")
         self.assertEqual(latest_ssh["gridPos"], {"x": 0, "y": 5, "w": 24, "h": 10})
         self.assertEqual(latest_ssh["targets"][0]["maxLines"], 20)
-        self.assertEqual(latest_ssh["targets"][0]["queryType"], "range")
-        self.assertEqual(latest_ssh["targets"][0]["format"], "table")
         expression = latest_ssh["targets"][0]["expr"]
         for field in ("source_ip", "source_port", "attempted_user", "geo_country", "geo_region", "geo_city"):
             self.assertIn(field, expression)
         self.assertIn("尝试用户名", expression)
         self.assertNotIn("流量使用量", expression)
         self.assertIn("label_format", expression)
-        self.assertEqual(latest_ssh["transformations"][0]["id"], "labelsToFields")
-        self.assertEqual(latest_ssh["transformations"][1]["id"], "sortBy")
-        self.assertEqual(latest_ssh["transformations"][2]["id"], "organize")
-        excluded = latest_ssh["transformations"][2]["options"]["excludeByName"]
-        for field in ("NewField", "labelTypes", "id"):
-            self.assertTrue(excluded[field])
+        self.assertIn("line_format", expression)
+        self.assertEqual(latest_ssh["options"]["sortOrder"], "Descending")
 
     def test_security_dashboard_has_aggregate_ssh_and_ufw_traffic(self):
         ssh_traffic = panel_by_id(self.security, 13)
