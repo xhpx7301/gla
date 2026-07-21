@@ -134,8 +134,12 @@ class DashboardTableTest(unittest.TestCase):
         self.assertIn("尝试用户名", expression)
         self.assertNotIn("流量使用量", expression)
         self.assertEqual(latest_ssh["transformations"][0]["id"], "extractFields")
+        self.assertEqual(latest_ssh["transformations"][0]["options"]["source"], "NewField")
         self.assertEqual(latest_ssh["transformations"][1]["id"], "sortBy")
         self.assertEqual(latest_ssh["transformations"][2]["id"], "organize")
+        excluded = latest_ssh["transformations"][2]["options"]["excludeByName"]
+        for field in ("NewField", "labelTypes", "id"):
+            self.assertTrue(excluded[field])
 
     def test_security_dashboard_has_aggregate_ssh_and_ufw_traffic(self):
         ssh_traffic = panel_by_id(self.security, 13)
