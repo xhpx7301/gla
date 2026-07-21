@@ -62,11 +62,11 @@ class DashboardTableTest(unittest.TestCase):
         self.assertIn("geo_country", fail2ban["targets"][0]["expr"])
         self.assertEqual(
             panel_by_id(self.security, 8)["gridPos"],
-            {"x": 0, "y": 13, "w": 24, "h": 8},
+            {"x": 0, "y": 21, "w": 24, "h": 9},
         )
         self.assertEqual(
             panel_by_id(self.security, 9)["gridPos"],
-            {"x": 0, "y": 21, "w": 24, "h": 8},
+            {"x": 0, "y": 30, "w": 24, "h": 9},
         )
 
     def test_gateway_tables_are_chinese_and_sorted(self):
@@ -94,6 +94,43 @@ class DashboardTableTest(unittest.TestCase):
             },
         )
         self.assertIn("geo_country", source["targets"][0]["expr"])
+        self.assertEqual(
+            inbound["gridPos"], {"x": 0, "y": 13, "w": 24, "h": 8}
+        )
+        self.assertEqual(
+            source["gridPos"], {"x": 0, "y": 21, "w": 24, "h": 9}
+        )
+
+    def test_dashboard_titles_and_instant_tables_are_compact(self):
+        self.assertEqual(self.security["title"], "服务器安全事件与系统资源")
+        self.assertEqual(self.gateway["title"], "Xray 网关流量与连接")
+        self.assertEqual([item["name"] for item in self.gateway["templating"]["list"]], ["server"])
+
+        for dashboard, panel_ids in ((self.security, (8, 9)), (self.gateway, (6, 7, 8))):
+            for panel_id in panel_ids:
+                organize = panel_by_id(dashboard, panel_id)["transformations"][1]
+                self.assertTrue(organize["options"]["excludeByName"]["Time"])
+                self.assertNotIn("Time", organize["options"]["renameByName"])
+
+    def test_metric_freshness_cards_show_latest_sample_time(self):
+        gateway_card = panel_by_id(self.gateway, 10)
+        security_card = panel_by_id(self.security, 11)
+        self.assertEqual(gateway_card["title"], "指标最新时间")
+        self.assertEqual(security_card["title"], "指标最新时间")
+        self.assertEqual(gateway_card["targets"][0]["expr"], 'max(timestamp(xui_exporter_up{server=~"$server"}))')
+        self.assertEqual(security_card["targets"][0]["expr"], 'max(timestamp(node_time_seconds{server=~"$server"}))')
+        self.assertEqual(gateway_card["fieldConfig"]["defaults"]["unit"], "dateTimeAsLocal")
+        self.assertEqual(security_card["fieldConfig"]["defaults"]["unit"], "dateTimeAsLocal")
+
+    def test_embedded_access_dashboard_uses_full_width_connection_tables(self):
+        script = (ROOT / "deploy-xray-grafana-loki-alloy.sh").read_text(encoding="utf-8")
+        self.assertIn('"title": "匹配连接数"', script)
+        self.assertIn('"gridPos": { "x": 0, "y": 18, "w": 24, "h": 7 }', script)
+        self.assertIn('"gridPos": { "x": 0, "y": 25, "w": 24, "h": 7 }', script)
+        self.assertIn('email=~\\".+\\"', script)
+        self.assertIn('inbound=~\\".+\\"', script)
+        self.assertIn('"title": "最新访问日志"', script)
+        self.assertIn('"maxLines": 1', script)
 
 
 if __name__ == "__main__":

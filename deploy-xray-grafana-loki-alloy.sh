@@ -591,7 +591,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
   "title": "Xray 访问日志",
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 11,
+  "version": 13,
   "refresh": "30s",
   "time": { "from": "now-1h", "to": "now" },
   "templating": {
@@ -657,7 +657,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "title": "全部访问日志（含 API）",
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", server=~\"$server\"}" }],
-      "gridPos": { "x": 0, "y": 35, "w": 24, "h": 9 },
+      "gridPos": { "x": 0, "y": 42, "w": 24, "h": 10 },
       "options": { "dedupStrategy": "none", "enableLogDetails": true, "showCommonLabels": false, "wrapLogMessage": true, "sortOrder": "Descending" }
     },
     {
@@ -666,7 +666,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "title": "真实访问日志（已排除 API）",
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", server=~\"$server\"} != \"[api -> api]\"" }],
-      "gridPos": { "x": 0, "y": 26, "w": 24, "h": 9 },
+      "gridPos": { "x": 0, "y": 32, "w": 24, "h": 10 },
       "options": { "dedupStrategy": "none", "enableLogDetails": true, "showCommonLabels": false, "wrapLogMessage": true, "sortOrder": "Descending" }
     },
     {
@@ -676,18 +676,28 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "description": "选择客户端后，可在顶部“访问目标关键词”输入域名或 IP；留空则显示该客户端全部访问记录。",
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", server=~\"$server\", email=~\"$client\"} != \"[api -> api]\" |= \"$site\"" }],
-      "gridPos": { "x": 0, "y": 0, "w": 20, "h": 9 },
+      "gridPos": { "x": 0, "y": 0, "w": 16, "h": 9 },
       "options": { "dedupStrategy": "none", "enableLogDetails": true, "showCommonLabels": false, "wrapLogMessage": true, "sortOrder": "Descending" }
     },
     {
       "id": 4,
       "type": "stat",
-      "title": "匹配访问目标的连接次数",
+      "title": "匹配连接数",
       "description": "统计所选客户端和访问目标关键词在当前时间范围内匹配到的 Xray 连接记录数。",
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{ "refId": "A", "expr": "sum(count_over_time({job=\"xray-access\", server=~\"$server\", email=~\"$client\"} != \"[api -> api]\" |= \"$site\" [$__range]))", "instant": true }],
-      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 4 },
       "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" }, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "none", "justifyMode": "auto" }
+    },
+    {
+      "id": 8,
+      "type": "logs",
+      "title": "最新访问日志",
+      "description": "显示 Loki 收到的最新一条真实访问记录。没有新访问不代表采集异常。",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", server=~\"$server\"} != \"[api -> api]\"", "maxLines": 1 }],
+      "gridPos": { "x": 16, "y": 4, "w": 8, "h": 5 },
+      "options": { "dedupStrategy": "none", "enableLogDetails": false, "showCommonLabels": false, "wrapLogMessage": false, "sortOrder": "Descending" }
     },
     {
       "id": 5,
@@ -697,6 +707,13 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{ "refId": "A", "expr": "topk(10, sum by (destination) (count_over_time({job=\"xray-access\", server=~\"$server\", email=~\"$client\"} != \"[api -> api]\" | pattern `<_> accepted <_>:<destination>:<port> [<_>` [$period])))", "instant": true, "format": "table" }],
       "gridPos": { "x": 0, "y": 9, "w": 24, "h": 9 },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "destination" }, "properties": [{ "id": "custom.align", "value": "left" }] },
+          { "matcher": { "id": "byName", "options": "Value #A" }, "properties": [{ "id": "custom.width", "value": 100 }, { "id": "custom.align", "value": "right" }] }
+        ]
+      },
       "options": { "showHeader": true },
       "transformations": [
         {
@@ -709,9 +726,9 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
         {
           "id": "organize",
           "options": {
-            "excludeByName": {},
-            "indexByName": { "Time": 0, "destination": 1, "Value #A": 2 },
-            "renameByName": { "Time": "时间", "destination": "访问目标", "Value #A": "次数" }
+            "excludeByName": { "Time": true },
+            "indexByName": { "destination": 0, "Value #A": 1 },
+            "renameByName": { "destination": "访问目标", "Value #A": "次数" }
           }
         }
       ]
@@ -721,15 +738,22 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "type": "table",
       "title": "按客户端连接数",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "sum by (email) (count_over_time({job=\"xray-access\", server=~\"$server\"}[$__range]))", "instant": true, "format": "table" }],
-      "gridPos": { "x": 0, "y": 18, "w": 12, "h": 8 },
+      "targets": [{ "refId": "A", "expr": "sum by (email) (count_over_time({job=\"xray-access\", server=~\"$server\", email=~\".+\"} != \"[api -> api]\" [$__range]))", "instant": true, "format": "table" }],
+      "gridPos": { "x": 0, "y": 18, "w": 24, "h": 7 },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "email" }, "properties": [{ "id": "custom.align", "value": "left" }] },
+          { "matcher": { "id": "byName", "options": "Value #A" }, "properties": [{ "id": "custom.width", "value": 100 }, { "id": "custom.align", "value": "right" }] }
+        ]
+      },
       "options": { "showHeader": true },
       "transformations": [{
         "id": "organize",
         "options": {
-          "excludeByName": {},
-          "indexByName": { "Time": 0, "email": 1, "Value #A": 2 },
-          "renameByName": { "Time": "时间", "email": "客户端", "Value #A": "次数" }
+          "excludeByName": { "Time": true },
+          "indexByName": { "email": 0, "Value #A": 1 },
+          "renameByName": { "email": "客户端", "Value #A": "次数" }
         }
       }]
     },
@@ -738,15 +762,22 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "type": "table",
       "title": "按入站连接数",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "sum by (inbound) (count_over_time({job=\"xray-access\", server=~\"$server\"}[$__range]))", "instant": true, "format": "table" }],
-      "gridPos": { "x": 12, "y": 18, "w": 12, "h": 8 },
+      "targets": [{ "refId": "A", "expr": "sum by (inbound) (count_over_time({job=\"xray-access\", server=~\"$server\", inbound=~\".+\"} != \"[api -> api]\" [$__range]))", "instant": true, "format": "table" }],
+      "gridPos": { "x": 0, "y": 25, "w": 24, "h": 7 },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "inbound" }, "properties": [{ "id": "custom.align", "value": "left" }] },
+          { "matcher": { "id": "byName", "options": "Value #A" }, "properties": [{ "id": "custom.width", "value": 100 }, { "id": "custom.align", "value": "right" }] }
+        ]
+      },
       "options": { "showHeader": true },
       "transformations": [{
         "id": "organize",
         "options": {
-          "excludeByName": {},
-          "indexByName": { "Time": 0, "inbound": 1, "Value #A": 2 },
-          "renameByName": { "Time": "时间", "inbound": "入站", "Value #A": "次数" }
+          "excludeByName": { "Time": true },
+          "indexByName": { "inbound": 0, "Value #A": 1 },
+          "renameByName": { "inbound": "入站", "Value #A": "次数" }
         }
       }]
     }
@@ -974,8 +1005,8 @@ show_access_info() {
 
   printf '\n已配置仪表盘：\n'
   [ -f "$STACK_DIR/grafana/dashboards/xray-access.json" ] && printf '  - Xray 访问日志\n'
-  [ -f "$STACK_DIR/grafana/dashboards/xray-gateway.json" ] && printf '  - Xray Gateway\n'
-  [ -f "$STACK_DIR/grafana/dashboards/server-security.json" ] && printf '  - 服务器安全与系统\n'
+  [ -f "$STACK_DIR/grafana/dashboards/xray-gateway.json" ] && printf '  - Xray 网关流量与连接\n'
+  [ -f "$STACK_DIR/grafana/dashboards/server-security.json" ] && printf '  - 服务器安全事件与系统资源\n'
 
   if [ -n "$xui_api_url" ]; then
     printf '\n本机 3x-ui API：已配置（Token 不显示）\n'

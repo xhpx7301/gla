@@ -24,9 +24,9 @@ HY-2314 中心服务器
 
 项目默认提供三个 Grafana 仪表盘：
 
-- `Xray 访问日志`：原始日志、客户端、入站和访问目标统计。
-- `Xray Gateway`：在线用户、上下行速率、客户端和入站流量、来源 IP。
-- `服务器安全与系统`：SSH 失败、Fail2ban、UFW、CPU、内存和网卡流量。
+- `Xray 访问日志`：原始日志、最新访问记录、客户端、入站和访问目标统计。
+- `Xray 网关流量与连接`：在线用户、3x-ui API 状态、指标最新时间、上下行速率、客户端和入站流量、来源 IP 连接数。
+- `服务器安全事件与系统资源`：SSH 失败、Fail2ban、UFW、指标最新时间、CPU、内存和网卡流量。
 
 ## 数据从哪里来
 
@@ -179,7 +179,7 @@ alloy
 
 ## `gla` 菜单说明
 
-运行 `gla` 后，顶部会直接显示 Grafana、Loki、VictoriaMetrics、Alloy 和中央服务器本机 3x-ui 流量采集的状态。这里的“本机 3x-ui”不代表远程采集服务器；远程服务器的 3x-ui API 状态应在 Xray Gateway 仪表盘中查看。
+运行 `gla` 后，顶部会直接显示 Grafana、Loki、VictoriaMetrics、Alloy 和中央服务器本机 3x-ui 流量采集的状态。这里的“本机 3x-ui”不代表远程采集服务器；远程服务器的 3x-ui API 状态应在“Xray 网关流量与连接”仪表盘中查看。
 
 | 选项 | 作用 |
 | --- | --- |
@@ -248,7 +248,7 @@ docker logs --tail=100 xray-alloy
 - **UFW 面板无数据**：确认 UFW 已启用日志，并检查 `/var/log/ufw.log` 是否存在。
 - **系统曲线为空**：检查是否设置了 `METRICS_URL`，以及指标域名的 SSL、Basic Auth 和 `/api/v1/write` 转发。
 - **3x-ui API 状态不可用**：检查 API URL、Token、证书，以及采集服务器能否访问面板域名。
-- **Xray Gateway 服务器列表只有 All**：更新中心和采集端脚本后重新部署。新版导出器会在每条 `xui_*` 指标中写入 `server` 标签；可用 `count by (server) (xui_exporter_up)` 验证。
+- **Xray 网关流量与连接的服务器列表只有 All**：更新中心和采集端脚本后重新部署。新版导出器会在每条 `xui_*` 指标中写入 `server` 标签；可用 `count by (server) (xui_exporter_up)` 验证。
 - **中央服务器本机 3x-ui 显示超时**：更新中央脚本并重新部署，新版会让本机面板域名在导出器容器内直连宿主机网关，解决 Docker 访问本机公网地址的回环超时。
 - **传入 `XUI_API_URL` 后仍未启用**：确认反斜杠是该行最后一个字符，后面不能有空格；也可以直接使用 `alloy` 菜单第 `11` 项。
 - **Xray 面板无日志**：检查 `XRAY_LOG`、3x-ui 的访问日志设置和文件读取权限。
@@ -280,7 +280,7 @@ deploy-xray-grafana-loki-alloy.sh  中心服务器安装与 gla 菜单
 deploy-xray-alloy-collector.sh     采集服务器安装与 alloy 菜单
 assets/xui_exporter.py             3x-ui API Prometheus 导出器
 dashboards/xray-gateway.json       Xray / 3x-ui 流量仪表盘
-dashboards/server-security.json    服务器安全与系统仪表盘
+dashboards/server-security.json    服务器安全事件与系统资源仪表盘
 tests/test_xui_exporter.py         3x-ui 导出器测试
 tests/test_generated_alloy_regex.sh Bash 到 Alloy 的正则转义测试
 ```
