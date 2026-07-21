@@ -41,7 +41,7 @@ HY-2314 中心服务器
 
 Xray 来源 IP 的“连接次数”和 3x-ui 的“流量字节数”是两种不同口径。普通 access log 没有每条连接的字节数，因此项目不会把来源 IP 连接次数伪装成精确流量。
 
-仪表盘表格会将 Grafana 原始字段名转换为中文，并默认按主要数值降序排列：SSH 使用“来源 IP / 失败次数”，Fail2ban 使用“封禁 IP / 封禁次数”，3x-ui 使用“客户端 / 流量”和“入站 / 端口 / 协议 / 流量”，Xray access log 使用“来源 IP / 连接次数”。“协议”用于区分 `vless`、`vmess` 等入站类型，不能替代“流量”；流量由独立数值列显示。
+仪表盘表格会将 Grafana 原始字段名转换为中文，并默认按主要数值降序排列：SSH 使用“来源 IP / 国家/地区 / 省份 / 城市 / 失败次数”，Fail2ban 使用“封禁 IP / 国家/地区 / 省份 / 城市 / 封禁次数”，3x-ui 使用“客户端 / 流量”和“入站 / 端口 / 流量 / 协议”，Xray access log 使用“来源 IP / 国家/地区 / 省份 / 城市 / 连接次数”。“协议”用于区分 `vless`、`vmess` 等入站类型，不能替代“流量”；流量由独立数值列显示。
 
 ## 环境要求
 
@@ -206,10 +206,28 @@ alloy
 | `METRICS_URL` | 无 | VictoriaMetrics Remote Write HTTPS 地址 |
 | `METRICS_USERNAME` | `alloy-agent` | 指标反向代理认证用户名 |
 | `XUI_API_URL` | 无 | 3x-ui `/panel/api/inbounds/list` 完整 HTTPS 地址 |
+| `ENABLE_GEOIP` | `auto` | `auto`、`true` 或 `false`；检测到本地数据库时自动启用 |
+| `GEOIP_DB_PATH` | 采集端为 `/opt/xray-alloy-collector/geoip/GeoLite2-City.mmdb`，中心端为 `/opt/xray-log-dashboard/geoip/GeoLite2-City.mmdb` | 本地 MaxMind GeoLite2-City 数据库路径 |
 | `LOKI_RETENTION` | `168h` | 中心端 Loki 日志保留时间 |
 | `METRICS_RETENTION` | `14d` | 中心端指标保留时间 |
 
 ## 验证与排查
+
+### 启用第一阶段 GeoIP
+
+项目不会自动下载 GeoLite2 数据库。请按 MaxMind 许可取得 `GeoLite2-City.mmdb`，然后在对应服务器执行：
+
+采集服务器：
+
+```bash
+sudo install -d -m 0750 /opt/xray-alloy-collector/geoip
+sudo install -m 0640 GeoLite2-City.mmdb /opt/xray-alloy-collector/geoip/GeoLite2-City.mmdb
+sudo env ENABLE_GEOIP=true \
+  GEOIP_DB_PATH=/opt/xray-alloy-collector/geoip/GeoLite2-City.mmdb \
+  alloy
+```
+
+进入菜单后选择 `1` 重新部署。中心服务器使用相同方式，将路径改为 `/opt/xray-log-dashboard/geoip/GeoLite2-City.mmdb`，然后运行 `gla` 选择 `1`。重新部署后，新的 SSH、Fail2ban 和 Xray 日志会带有国家/地区、省份和城市字段；历史日志不会自动补齐。
 
 中心服务器：
 
@@ -244,6 +262,8 @@ docker logs --tail=100 xray-alloy
 - `30G` 中心服务器建议先保持默认，不要长期保存大量 Debug 日志。
 - 采集端不会运行 Grafana、Loki 或 VictoriaMetrics，适合 `1C / 1G` 小型服务器。
 - 3x-ui 指标默认每 30 秒采集一次，不会记录 API Token，也不会把来源 IP 设为 Loki Label。
+- GeoIP 默认关闭；将 MaxMind GeoLite2-City 数据库放到 `GEOIP_DB_PATH` 后，用 `ENABLE_GEOIP=true` 重新部署即可。国家、省份和城市来自本地离线数据库，不会把 IP 发给第三方查询服务。
+- GeoIP 只适合展示来源归属参考，代理、VPN、移动网络和云服务器的城市级结果可能不准确。Xray access log 仍统计连接次数，不会凭空产生 IP 级精确流量。
 
 ## 安全说明
 
@@ -266,4 +286,4 @@ tests/test_xui_exporter.py         3x-ui 导出器测试
 tests/test_generated_alloy_regex.sh Bash 到 Alloy 的正则转义测试
 ```
 
-原始来源 IP 会直接显示在表格中。若还需要国家、地区或城市，需要单独配置 MaxMind GeoLite2 等本地 GeoIP 数据库，并在采集阶段完成离线解析。本版本不会把来源 IP 发送给第三方在线查询服务，避免查询限额、延迟和隐私泄露。
+原始来源 IP 会直接显示在表格中。第一阶段支持在采集阶段使用 MaxMind GeoLite2-City 本地数据库离线解析国家/地区、省份和城市；数据库不随项目自动下载，需要按 MaxMind 许可自行取得并放置到 `GEOIP_DB_PATH`。如果未配置数据库，相关地理列会为空，原有 IP、失败次数、封禁次数和连接次数统计仍可用。

@@ -6,6 +6,7 @@ STACK_DIR="${STACK_DIR:-/opt/xray-alloy-collector}"
 XRAY_LOG="${XRAY_LOG:-/var/log/x-ui/access.log}"
 ENABLE_XRAY="${ENABLE_XRAY:-auto}"
 ENABLE_SECURITY="${ENABLE_SECURITY:-true}"
+ENABLE_GEOIP="${ENABLE_GEOIP:-auto}"
 SERVER_NAME="${SERVER_NAME:-}"
 LOKI_URL="${LOKI_URL:-}"
 LOKI_USERNAME="${LOKI_USERNAME:-alloy-agent}"
@@ -19,6 +20,7 @@ ALLOY_IMAGE="${ALLOY_IMAGE:-grafana/alloy:latest}"
 ASSET_BASE_URL="${ASSET_BASE_URL:-https://raw.githubusercontent.com/xhpx7301/gla/main}"
 MANAGER_PATH="/usr/local/bin/alloy"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
+GEOIP_DB_PATH="${GEOIP_DB_PATH:-$STACK_DIR/geoip/GeoLite2-City.mmdb}"
 
 die() { printf '错误: %s\n' "$*" >&2; exit 1; }
 note() { printf '\n==> %s\n' "$*"; }
@@ -31,6 +33,8 @@ write_install_settings() {
     printf 'XRAY_LOG=%q\n' "$XRAY_LOG"
     printf 'ENABLE_XRAY=%q\n' "$ENABLE_XRAY"
     printf 'ENABLE_SECURITY=%q\n' "$ENABLE_SECURITY"
+    printf 'ENABLE_GEOIP=%q\n' "$ENABLE_GEOIP"
+    printf 'GEOIP_DB_PATH=%q\n' "$GEOIP_DB_PATH"
     printf 'SERVER_NAME=%q\n' "$SERVER_NAME"
     printf 'LOKI_URL=%q\n' "$LOKI_URL"
     printf 'LOKI_USERNAME=%q\n' "$LOKI_USERNAME"
@@ -51,6 +55,12 @@ require_install_prerequisites() {
     *) die "ENABLE_XRAY 只能是 auto、true 或 false。" ;;
   esac
   case "$ENABLE_SECURITY" in true|false) ;; *) die "ENABLE_SECURITY 只能是 true 或 false。" ;; esac
+  case "$ENABLE_GEOIP" in
+    auto) [ -r "$GEOIP_DB_PATH" ] && ENABLE_GEOIP=true || ENABLE_GEOIP=false ;;
+    true) [ -r "$GEOIP_DB_PATH" ] || die "已要求启用 GeoIP，但无法读取数据库：$GEOIP_DB_PATH" ;;
+    false) ;;
+    *) die "ENABLE_GEOIP 只能是 auto、true 或 false。" ;;
+  esac
   command -v docker >/dev/null 2>&1 || die "未找到 Docker。"
   docker info >/dev/null 2>&1 || die "Docker 服务未运行或当前用户无权限访问。"
 
@@ -148,7 +158,7 @@ install_collector() {
   METRICS_PASSWORD_HCL="$(printf '%s' "$METRICS_PASSWORD" | hcl_escape)"
 
 note "正在创建采集器文件：$STACK_DIR"
-install -d -m 0750 "$STACK_DIR/alloy" "$STACK_DIR/assets" "$STACK_DIR/secrets"
+install -d -m 0750 "$STACK_DIR/alloy" "$STACK_DIR/assets" "$STACK_DIR/secrets" "$STACK_DIR/geoip"
 write_install_settings
 
 if [ -n "$XUI_API_URL" ]; then
@@ -175,6 +185,10 @@ EOF
 
 if [ "$ENABLE_XRAY" = true ]; then
   printf '      - %s:%s:ro\n' "$XRAY_LOG" "$XRAY_LOG" >>"$STACK_DIR/compose.yaml"
+fi
+
+if [ "$ENABLE_GEOIP" = true ]; then
+  printf '      - %s:/var/lib/gla/geoip/GeoLite2-City.mmdb:ro\n' "$GEOIP_DB_PATH" >>"$STACK_DIR/compose.yaml"
 fi
 
 if [ "$ENABLE_SECURITY" = true ]; then
@@ -242,8 +256,30 @@ loki.process "xray_access" {
   forward_to = [loki.write.central.receiver]
 
   stage.regex {
-    expression = "^(?P<timestamp>\\\\d{4}/\\\\d{2}/\\\\d{2} \\\\d{2}:\\\\d{2}:\\\\d{2}\\\\.\\\\d+) from (?P<source>\\\\S+) accepted (?P<network>\\\\w+):(?P<destination>\\\\S+) \\\\[(?P<inbound>[^ ]+) (?:>>|->) (?P<outbound>[^\\\\]]+)\\\\](?: email: (?P<email>\\\\S+))?"
+    expression = "^(?P<timestamp>\\\\d{4}/\\\\d{2}/\\\\d{2} \\\\d{2}:\\\\d{2}:\\\\d{2}\\\\.\\\\d+) from (?P<source_ip>(?:\\\\[[0-9A-Fa-f:]+\\\\]|[0-9A-Fa-f:.]+)):[0-9]+ accepted (?P<network>\\\\w+):(?P<destination>\\\\S+) \\\\[(?P<inbound>[^ ]+) (?:>>|->) (?P<outbound>[^\\\\]]+)\\\\](?: email: (?P<email>\\\\S+))?"
   }
+
+EOF
+  if [ "$ENABLE_GEOIP" = true ]; then
+    cat >>"$STACK_DIR/alloy/config.alloy" <<'EOF'
+
+  stage.geoip {
+    db      = "/var/lib/gla/geoip/GeoLite2-City.mmdb"
+    source  = "source_ip"
+    db_type = "city"
+  }
+
+  stage.labels {
+    values = {
+      geo_country = "geoip_country_name",
+      geo_region  = "geoip_subdivision_name",
+      geo_city    = "geoip_city_name",
+    }
+  }
+EOF
+  fi
+
+  cat >>"$STACK_DIR/alloy/config.alloy" <<'EOF'
 
   stage.timestamp {
     source = "timestamp"
@@ -268,14 +304,42 @@ loki.source.journal "ssh" {
   path       = "/var/log/journal"
   matches    = "_SYSTEMD_UNIT=ssh.service"
   labels     = { job = "ssh-journal", server = "$SERVER_NAME" }
-  forward_to = [loki.write.central.receiver]
+  forward_to = [loki.process.ssh.receiver]
 }
 
 loki.source.journal "sshd" {
   path       = "/var/log/journal"
   matches    = "_SYSTEMD_UNIT=sshd.service"
   labels     = { job = "ssh-journal", server = "$SERVER_NAME" }
+  forward_to = [loki.process.ssh.receiver]
+}
+
+loki.process "ssh" {
   forward_to = [loki.write.central.receiver]
+
+  stage.regex {
+    expression = "from (?P<source_ip>(?:\\\\[[0-9A-Fa-f:]+\\\\]|[0-9A-Fa-f:.]+))"
+  }
+
+EOF
+  if [ "$ENABLE_GEOIP" = true ]; then
+    cat >>"$STACK_DIR/alloy/config.alloy" <<'EOF'
+  stage.geoip {
+    db      = "/var/lib/gla/geoip/GeoLite2-City.mmdb"
+    source  = "source_ip"
+    db_type = "city"
+  }
+
+  stage.labels {
+    values = {
+      geo_country = "geoip_country_name",
+      geo_region  = "geoip_subdivision_name",
+      geo_city    = "geoip_city_name",
+    }
+  }
+EOF
+  fi
+  cat >>"$STACK_DIR/alloy/config.alloy" <<EOF
 }
 
 local.file_match "fail2ban" {
@@ -295,8 +359,29 @@ loki.process "fail2ban" {
   forward_to = [loki.write.central.receiver]
 
   stage.regex {
-    expression = "^(?P<timestamp>\\\\d{4}-\\\\d{2}-\\\\d{2} \\\\d{2}:\\\\d{2}:\\\\d{2},\\\\d+)"
+    expression = "^(?P<timestamp>\\\\d{4}-\\\\d{2}-\\\\d{2} \\\\d{2}:\\\\d{2}:\\\\d{2},\\\\d+).*?(?:Found|Ban|Unban) (?P<source_ip>(?:\\\\[[0-9A-Fa-f:]+\\\\]|[0-9A-Fa-f:.]+))"
   }
+
+EOF
+  if [ "$ENABLE_GEOIP" = true ]; then
+    cat >>"$STACK_DIR/alloy/config.alloy" <<'EOF'
+  stage.geoip {
+    db      = "/var/lib/gla/geoip/GeoLite2-City.mmdb"
+    source  = "source_ip"
+    db_type = "city"
+  }
+
+  stage.labels {
+    values = {
+      geo_country = "geoip_country_name",
+      geo_region  = "geoip_subdivision_name",
+      geo_city    = "geoip_city_name",
+    }
+  }
+
+EOF
+  fi
+  cat >>"$STACK_DIR/alloy/config.alloy" <<EOF
 
   stage.timestamp {
     source = "timestamp"
@@ -421,7 +506,7 @@ install_manager() {
 # GLA Alloy Collector Manager
 set -Eeuo pipefail
 
-GLA_VERSION="2.0.1"
+GLA_VERSION="2.1.0"
 STACK_DIR="${STACK_DIR:-/opt/xray-alloy-collector}"
 COMPOSE_FILE="$STACK_DIR/compose.yaml"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
@@ -472,7 +557,7 @@ xui_state() {
 }
 
 show_header() {
-  local server_name="未知服务器" enable_xray="" enable_security="" metrics_url="" xui_api_url=""
+  local server_name="未知服务器" enable_xray="" enable_security="" enable_geoip="" metrics_url="" xui_api_url=""
   if [ -r "$INSTALL_SETTINGS_FILE" ]; then
     set +u
     # Generated locally by GLA and restricted to root.
@@ -481,6 +566,7 @@ show_header() {
     server_name="${SERVER_NAME:-未知服务器}"
     enable_xray="${ENABLE_XRAY:-}"
     enable_security="${ENABLE_SECURITY:-}"
+    enable_geoip="${ENABLE_GEOIP:-}"
     metrics_url="${METRICS_URL:-}"
     xui_api_url="${XUI_API_URL:-}"
   fi
@@ -488,6 +574,7 @@ show_header() {
   printf 'GLA Alloy %s - %s\n\n' "$GLA_VERSION" "$server_name"
   printf 'Alloy          %s    Xray 日志      %s\n' "$(container_state xray-alloy)" "$(boolean_state "$enable_xray")"
   printf '安全日志       %s    主机指标       %s\n' "$(boolean_state "$enable_security")" "$(configured_state "$metrics_url")"
+  printf 'GeoIP 归属解析  %s\n' "$(boolean_state "$enable_geoip")"
   printf '3x-ui 流量采集 %s\n' "$(xui_state "$xui_api_url")"
 }
 
@@ -565,6 +652,8 @@ update_script_and_deploy() {
   local xui_api_url_is_set="${XUI_API_URL+x}" xui_api_url_override="${XUI_API_URL-}"
   local metrics_url_is_set="${METRICS_URL+x}" metrics_url_override="${METRICS_URL-}"
   local metrics_username_is_set="${METRICS_USERNAME+x}" metrics_username_override="${METRICS_USERNAME-}"
+  local enable_geoip_is_set="${ENABLE_GEOIP+x}" enable_geoip_override="${ENABLE_GEOIP-}"
+  local geoip_db_path_is_set="${GEOIP_DB_PATH+x}" geoip_db_path_override="${GEOIP_DB_PATH-}"
   [ -r "$INSTALL_SETTINGS_FILE" ] || die "未找到安装配置：$INSTALL_SETTINGS_FILE"
   printf '正在从 GitHub 下载最新版脚本并重新部署。请输入现有 Loki 密码以保留连接配置。\n'
   set -a
@@ -582,6 +671,14 @@ update_script_and_deploy() {
   if [ "$metrics_username_is_set" = x ]; then
     METRICS_USERNAME="$metrics_username_override"
     export METRICS_USERNAME
+  fi
+  if [ "$enable_geoip_is_set" = x ]; then
+    ENABLE_GEOIP="$enable_geoip_override"
+    export ENABLE_GEOIP
+  fi
+  if [ "$geoip_db_path_is_set" = x ]; then
+    GEOIP_DB_PATH="$geoip_db_path_override"
+    export GEOIP_DB_PATH
   fi
   ALLOY_ACTION=install bash <(download_installer)
 }

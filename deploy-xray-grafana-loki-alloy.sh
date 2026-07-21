@@ -5,6 +5,7 @@ set -Eeuo pipefail
 STACK_DIR="${STACK_DIR:-/opt/xray-log-dashboard}"
 XRAY_LOG="${XRAY_LOG:-/var/log/x-ui/access.log}"
 ENABLE_XRAY="${ENABLE_XRAY:-auto}"
+ENABLE_GEOIP="${ENABLE_GEOIP:-auto}"
 GRAFANA_BIND="${GRAFANA_BIND:-0.0.0.0}"
 GRAFANA_PORT="${GRAFANA_PORT:-3000}"
 LOKI_RETENTION="${LOKI_RETENTION:-168h}"
@@ -16,6 +17,7 @@ XUI_API_URL="${XUI_API_URL:-}"
 XUI_API_TOKEN="${XUI_API_TOKEN:-}"
 MANAGER_PATH="/usr/local/bin/gla"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
+GEOIP_DB_PATH="${GEOIP_DB_PATH:-$STACK_DIR/geoip/GeoLite2-City.mmdb}"
 
 die() { printf '错误: %s\n' "$*" >&2; exit 1; }
 note() { printf '\n==> %s\n' "$*"; }
@@ -25,6 +27,8 @@ write_install_settings() {
     printf 'STACK_DIR=%q\n' "$STACK_DIR"
     printf 'XRAY_LOG=%q\n' "$XRAY_LOG"
     printf 'ENABLE_XRAY=%q\n' "$ENABLE_XRAY"
+    printf 'ENABLE_GEOIP=%q\n' "$ENABLE_GEOIP"
+    printf 'GEOIP_DB_PATH=%q\n' "$GEOIP_DB_PATH"
     printf 'GRAFANA_BIND=%q\n' "$GRAFANA_BIND"
     printf 'GRAFANA_PORT=%q\n' "$GRAFANA_PORT"
     printf 'LOKI_RETENTION=%q\n' "$LOKI_RETENTION"
@@ -43,6 +47,12 @@ require_install_prerequisites() {
     true) [ -r "$XRAY_LOG" ] || die "已要求采集 Xray，但无法读取日志：$XRAY_LOG" ;;
     false) ;;
     *) die "ENABLE_XRAY 只能是 auto、true 或 false。" ;;
+  esac
+  case "$ENABLE_GEOIP" in
+    auto) [ -r "$GEOIP_DB_PATH" ] && ENABLE_GEOIP=true || ENABLE_GEOIP=false ;;
+    true) [ -r "$GEOIP_DB_PATH" ] || die "已要求启用 GeoIP，但无法读取数据库：$GEOIP_DB_PATH" ;;
+    false) ;;
+    *) die "ENABLE_GEOIP 只能是 auto、true 或 false。" ;;
   esac
   [[ "$SERVER_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || die "SERVER_NAME 只能包含字母、数字、点、下划线和连字符。"
   if [ -n "$XUI_API_URL" ]; then
@@ -113,7 +123,7 @@ note "正在创建部署文件：$STACK_DIR"
 install -d -m 0750 "$STACK_DIR" "$STACK_DIR/alloy" \
   "$STACK_DIR/loki" "$STACK_DIR/grafana/provisioning/datasources" \
   "$STACK_DIR/grafana/provisioning/dashboards" "$STACK_DIR/grafana/dashboards" \
-  "$STACK_DIR/assets" "$STACK_DIR/secrets"
+  "$STACK_DIR/assets" "$STACK_DIR/secrets" "$STACK_DIR/geoip"
 write_install_settings
 
 printf '%s\n' "$XUI_API_TOKEN" >"$STACK_DIR/secrets/xui-api-token"
@@ -147,6 +157,35 @@ fi
 XRAY_VOLUME_LINE=""
 if [ "$ENABLE_XRAY" = true ]; then
   XRAY_VOLUME_LINE="      - ${XRAY_LOG}:${XRAY_LOG}:ro"
+fi
+
+GEOIP_VOLUME_LINE=""
+if [ "$ENABLE_GEOIP" = true ]; then
+  GEOIP_VOLUME_LINE="      - ${GEOIP_DB_PATH}:/var/lib/gla/geoip/GeoLite2-City.mmdb:ro"
+fi
+
+GEOIP_XRAY_STAGES=""
+GEOIP_SSH_STAGES=""
+GEOIP_FAIL2BAN_STAGES=""
+if [ "$ENABLE_GEOIP" = true ]; then
+  GEOIP_XRAY_STAGES="$(cat <<'EOF'
+  stage.geoip {
+    db      = "/var/lib/gla/geoip/GeoLite2-City.mmdb"
+    source  = "source_ip"
+    db_type = "city"
+  }
+
+  stage.labels {
+    values = {
+      geo_country = "geoip_country_name",
+      geo_region  = "geoip_subdivision_name",
+      geo_city    = "geoip_city_name",
+    }
+  }
+EOF
+)"
+  GEOIP_SSH_STAGES="$GEOIP_XRAY_STAGES"
+  GEOIP_FAIL2BAN_STAGES="$GEOIP_XRAY_STAGES"
 fi
 
 # Grafana only applies its admin password on the first database initialization.
@@ -220,6 +259,7 @@ services:
     command: run --server.http.listen-addr=0.0.0.0:12345 --storage.path=/var/lib/alloy/data /etc/alloy/config.alloy
     volumes:
 ${XRAY_VOLUME_LINE}
+${GEOIP_VOLUME_LINE}
       - ${JOURNAL_PATH_HOST}:/var/log/journal:ro
       - /etc/machine-id:/etc/machine-id:ro
       - /var/log:/host/var/log:ro
@@ -318,8 +358,10 @@ loki.process "xray_access" {
   forward_to = [loki.write.default.receiver]
 
   stage.regex {
-    expression = "^(?P<timestamp>\\\\d{4}/\\\\d{2}/\\\\d{2} \\\\d{2}:\\\\d{2}:\\\\d{2}\\\\.\\\\d+) from (?P<source>\\\\S+) accepted (?P<network>\\\\w+):(?P<destination>\\\\S+) \\\\[(?P<inbound>[^ ]+) (?:>>|->) (?P<outbound>[^\\\\]]+)\\\\](?: email: (?P<email>\\\\S+))?"
+    expression = "^(?P<timestamp>\\\\d{4}/\\\\d{2}/\\\\d{2} \\\\d{2}:\\\\d{2}:\\\\d{2}\\\\.\\\\d+) from (?P<source_ip>(?:\\\\[[0-9A-Fa-f:]+\\\\]|[0-9A-Fa-f:.]+)):[0-9]+ accepted (?P<network>\\\\w+):(?P<destination>\\\\S+) \\\\[(?P<inbound>[^ ]+) (?:>>|->) (?P<outbound>[^\\\\]]+)\\\\](?: email: (?P<email>\\\\S+))?"
   }
+
+${GEOIP_XRAY_STAGES}
 
   stage.timestamp {
     source = "timestamp"
@@ -340,14 +382,24 @@ loki.source.journal "ssh" {
   path       = "/var/log/journal"
   matches    = "_SYSTEMD_UNIT=ssh.service"
   labels     = { job = "ssh-journal", server = "${SERVER_NAME}" }
-  forward_to = [loki.write.default.receiver]
+  forward_to = [loki.process.ssh.receiver]
 }
 
 loki.source.journal "sshd" {
   path       = "/var/log/journal"
   matches    = "_SYSTEMD_UNIT=sshd.service"
   labels     = { job = "ssh-journal", server = "${SERVER_NAME}" }
+  forward_to = [loki.process.ssh.receiver]
+}
+
+loki.process "ssh" {
   forward_to = [loki.write.default.receiver]
+
+  stage.regex {
+    expression = "from (?P<source_ip>(?:\\\\[[0-9A-Fa-f:]+\\\\]|[0-9A-Fa-f:.]+))"
+  }
+
+${GEOIP_SSH_STAGES}
 }
 
 local.file_match "fail2ban" {
@@ -367,8 +419,10 @@ loki.process "fail2ban" {
   forward_to = [loki.write.default.receiver]
 
   stage.regex {
-    expression = "^(?P<timestamp>\\\\d{4}-\\\\d{2}-\\\\d{2} \\\\d{2}:\\\\d{2}:\\\\d{2},\\\\d+)"
+    expression = "^(?P<timestamp>\\\\d{4}-\\\\d{2}-\\\\d{2} \\\\d{2}:\\\\d{2}:\\\\d{2},\\\\d+).*?(?:Found|Ban|Unban) (?P<source_ip>(?:\\\\[[0-9A-Fa-f:]+\\\\]|[0-9A-Fa-f:.]+))"
   }
+
+${GEOIP_FAIL2BAN_STAGES}
 
   stage.timestamp {
     source = "timestamp"
@@ -671,7 +725,7 @@ install_manager() {
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-GLA_VERSION="2.0.2"
+GLA_VERSION="2.1.0"
 STACK_DIR="${STACK_DIR:-/opt/xray-log-dashboard}"
 COMPOSE_FILE="$STACK_DIR/compose.yaml"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
@@ -709,6 +763,11 @@ show_header() {
   printf 'GLA %s - 轻量服务器观测平台\n\n' "$GLA_VERSION"
   printf 'Grafana         %s    Loki             %s\n' "$(container_state xray-grafana)" "$(container_state xray-loki)"
   printf 'VictoriaMetrics %s    Alloy            %s\n' "$(container_state gla-victoriametrics)" "$(container_state xray-alloy)"
+  if grep -Eq '^ENABLE_GEOIP=true$' "$STACK_DIR/.install.env" 2>/dev/null; then
+    printf 'GeoIP 归属解析   [已启用]\n'
+  else
+    printf 'GeoIP 归属解析   [未启用]\n'
+  fi
   printf '本机 3x-ui 采集 %s\n' "$(xui_state)"
 }
 
@@ -869,6 +928,8 @@ download_installer() {
 
 update_script_and_deploy() {
   local xui_api_url_is_set="${XUI_API_URL+x}" xui_api_url_override="${XUI_API_URL-}"
+  local enable_geoip_is_set="${ENABLE_GEOIP+x}" enable_geoip_override="${ENABLE_GEOIP-}"
+  local geoip_db_path_is_set="${GEOIP_DB_PATH+x}" geoip_db_path_override="${GEOIP_DB_PATH-}"
   [ -r "$INSTALL_SETTINGS_FILE" ] || die "未找到安装配置：$INSTALL_SETTINGS_FILE"
   printf '正在从 GitHub 下载最新版脚本并重新部署，服务可能短暂重建。\n'
   set -a
@@ -878,6 +939,14 @@ update_script_and_deploy() {
   if [ "$xui_api_url_is_set" = x ]; then
     XUI_API_URL="$xui_api_url_override"
     export XUI_API_URL
+  fi
+  if [ "$enable_geoip_is_set" = x ]; then
+    ENABLE_GEOIP="$enable_geoip_override"
+    export ENABLE_GEOIP
+  fi
+  if [ "$geoip_db_path_is_set" = x ]; then
+    GEOIP_DB_PATH="$geoip_db_path_override"
+    export GEOIP_DB_PATH
   fi
   GLA_ACTION=install bash <(download_installer)
 }

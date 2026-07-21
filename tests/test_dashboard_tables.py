@@ -36,13 +36,30 @@ class DashboardTableTest(unittest.TestCase):
         ssh = panel_by_id(self.security, 8)
         fail2ban = panel_by_id(self.security, 9)
         self.assert_sorted_and_renamed(
-            ssh, "Value #A", "失败次数", {"source_ip": "来源 IP"}
+            ssh,
+            "Value #A",
+            "失败次数",
+            {
+                "source_ip": "来源 IP",
+                "geo_country": "国家/地区",
+                "geo_region": "省份",
+                "geo_city": "城市",
+            },
         )
         self.assert_sorted_and_renamed(
-            fail2ban, "Value #A", "封禁次数", {"source_ip": "封禁 IP"}
+            fail2ban,
+            "Value #A",
+            "封禁次数",
+            {
+                "source_ip": "封禁 IP",
+                "geo_country": "国家/地区",
+                "geo_region": "省份",
+                "geo_city": "城市",
+            },
         )
         self.assertIn("source_ip", ssh["targets"][0]["expr"])
         self.assertIn("source_ip", fail2ban["targets"][0]["expr"])
+        self.assertIn("geo_country", fail2ban["targets"][0]["expr"])
 
     def test_gateway_tables_are_chinese_and_sorted(self):
         client = panel_by_id(self.gateway, 6)
@@ -58,8 +75,17 @@ class DashboardTableTest(unittest.TestCase):
             {"inbound": "入站", "port": "端口", "protocol": "协议"},
         )
         self.assert_sorted_and_renamed(
-            source, "Value #A", "连接次数", {"source_ip": "来源 IP"}
+            source,
+            "Value #A",
+            "连接次数",
+            {
+                "source_ip": "来源 IP",
+                "geo_country": "国家/地区",
+                "geo_region": "省份",
+                "geo_city": "城市",
+            },
         )
+        self.assertIn("geo_country", source["targets"][0]["expr"])
 
 
 if __name__ == "__main__":
