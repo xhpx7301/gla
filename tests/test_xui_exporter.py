@@ -31,15 +31,19 @@ class ExporterTest(unittest.TestCase):
             return ["user\"one"] if method == "POST" else inbounds
 
         with mock.patch.object(EXPORTER, "API_URL", "https://panel.example.com/panel/api/inbounds/list"), \
+                mock.patch.object(EXPORTER, "SERVER_NAME", "HY-248"), \
                 mock.patch.object(EXPORTER, "request_json", side_effect=fake_request):
             output = EXPORTER.collect()
 
-        self.assertIn("xui_exporter_up 1", output)
+        self.assertIn('xui_exporter_up{server="HY-248"} 1', output)
         self.assertIn('direction="uplink"', output)
         self.assertIn('email="user\\"one"', output)
         self.assertIn("xui_client_online{", output)
         self.assertIn("} 1\n", output)
         self.assertIn("1725000000.000", output)
+        metric_lines = [line for line in output.splitlines() if line.startswith("xui_")]
+        self.assertTrue(metric_lines)
+        self.assertTrue(all('server="HY-248"' in line for line in metric_lines))
 
 
 if __name__ == "__main__":

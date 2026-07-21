@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 API_URL = os.environ.get("XUI_API_URL", "").rstrip("/")
 TOKEN_FILE = os.environ.get("XUI_API_TOKEN_FILE", "/run/secrets/xui_api_token")
 TIMEOUT = float(os.environ.get("XUI_API_TIMEOUT", "10"))
+SERVER_NAME = os.environ.get("SERVER_NAME", "").strip() or "unknown"
 
 
 def metric_escape(value):
@@ -61,7 +62,7 @@ def collect():
     lines = [
         "# HELP xui_exporter_up 3x-ui Panel API 是否可访问。",
         "# TYPE xui_exporter_up gauge",
-        "xui_exporter_up 1",
+        f"xui_exporter_up{{{labels(server=SERVER_NAME)}}} 1",
         "# HELP xui_client_traffic_bytes_total 3x-ui 客户端累计流量字节数。",
         "# TYPE xui_client_traffic_bytes_total counter",
         "# HELP xui_inbound_traffic_bytes_total 3x-ui 入站累计流量字节数。",
@@ -74,6 +75,7 @@ def collect():
 
     for inbound in inbounds:
         inbound_labels = {
+            "server": SERVER_NAME,
             "inbound_id": inbound.get("id", 0),
             "inbound": inbound.get("remark") or inbound.get("tag") or "unnamed",
             "port": inbound.get("port", 0),
@@ -115,7 +117,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
             body = (
                 "# HELP xui_exporter_up 3x-ui Panel API 是否可访问。\n"
                 "# TYPE xui_exporter_up gauge\n"
-                "xui_exporter_up 0\n"
+                f"xui_exporter_up{{{labels(server=SERVER_NAME)}}} 0\n"
             ).encode("utf-8")
             status = 200
         self.send_response(status)

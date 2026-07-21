@@ -131,6 +131,7 @@ prometheus.scrape "xui" {
     server      = "${SERVER_NAME}",
   }]
   scrape_interval = "30s"
+  honor_labels    = true
   forward_to      = [prometheus.remote_write.local.receiver]
 }
 EOF
@@ -628,6 +629,12 @@ note "正在启动 Grafana、Loki、VictoriaMetrics 和 Alloy"
 cd "$STACK_DIR"
 "${COMPOSE[@]}" pull
 "${COMPOSE[@]}" up -d
+if [ -n "$XUI_API_URL" ]; then
+  "${COMPOSE[@]}" restart xui-exporter
+else
+  docker rm -f gla-xui-exporter >/dev/null 2>&1 || true
+fi
+"${COMPOSE[@]}" restart alloy
 
 note "正在验证容器状态"
 "${COMPOSE[@]}" ps
@@ -656,7 +663,7 @@ install_manager() {
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-GLA_VERSION="2.0.0"
+GLA_VERSION="2.0.1"
 STACK_DIR="${STACK_DIR:-/opt/xray-log-dashboard}"
 COMPOSE_FILE="$STACK_DIR/compose.yaml"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
@@ -694,7 +701,7 @@ show_header() {
   printf 'GLA %s - 轻量服务器观测平台\n\n' "$GLA_VERSION"
   printf 'Grafana         %s    Loki             %s\n' "$(container_state xray-grafana)" "$(container_state xray-loki)"
   printf 'VictoriaMetrics %s    Alloy            %s\n' "$(container_state gla-victoriametrics)" "$(container_state xray-alloy)"
-  printf '3x-ui 流量采集  %s\n' "$(xui_state)"
+  printf '本机 3x-ui 采集 %s\n' "$(xui_state)"
 }
 
 compose() {
@@ -736,7 +743,7 @@ show_status() {
 }
 
 show_logs() {
-  printf '\n服务日志\n\n1. Grafana\n2. Loki\n3. VictoriaMetrics\n4. Alloy\n5. 3x-ui 流量采集\n0. 返回\n'
+  printf '\n服务日志\n\n1. Grafana\n2. Loki\n3. VictoriaMetrics\n4. Alloy\n5. 本机 3x-ui 流量采集\n0. 返回\n'
   read -rp "请选择服务: " choice
   case "$choice" in
     1) compose logs -f --tail=100 grafana || true ;;
@@ -771,7 +778,7 @@ service_control_menu() {
 5. 仅重启 Loki
 6. 仅重启 VictoriaMetrics
 7. 仅重启 Alloy
-8. 仅重启 3x-ui 流量采集
+8. 仅重启本机 3x-ui 流量采集
 MENU
     read -rp "请输入操作编号 [0-8]: " choice
     case "$choice" in
@@ -835,9 +842,9 @@ show_access_info() {
   [ -f "$STACK_DIR/grafana/dashboards/server-security.json" ] && printf '  - 服务器安全与系统\n'
 
   if [ -n "$xui_api_url" ]; then
-    printf '\n3x-ui API：    已配置（Token 不显示）\n'
+    printf '\n本机 3x-ui API：已配置（Token 不显示）\n'
   else
-    printf '\n3x-ui API：    未启用\n'
+    printf '\n本机 3x-ui API：未启用\n'
   fi
   printf 'Xray 日志：    %s\n' "$enable_xray"
 }
@@ -853,13 +860,50 @@ download_installer() {
 }
 
 update_script_and_deploy() {
+  local xui_api_url_is_set="${XUI_API_URL+x}" xui_api_url_override="${XUI_API_URL-}"
   [ -r "$INSTALL_SETTINGS_FILE" ] || die "未找到安装配置：$INSTALL_SETTINGS_FILE"
   printf '正在从 GitHub 下载最新版脚本并重新部署，服务可能短暂重建。\n'
   set -a
   # This file is created locally by the installer and contains no password.
   . "$INSTALL_SETTINGS_FILE"
   set +a
+  if [ "$xui_api_url_is_set" = x ]; then
+    XUI_API_URL="$xui_api_url_override"
+    export XUI_API_URL
+  fi
   GLA_ACTION=install bash <(download_installer)
+}
+
+configure_xui_api() {
+  local current_url="" answer
+  if [ -r "$INSTALL_SETTINGS_FILE" ]; then
+    set +u
+    . "$INSTALL_SETTINGS_FILE"
+    set -u
+    current_url="${XUI_API_URL:-}"
+  fi
+
+  printf '\n中央服务器 3x-ui API 流量采集配置\n'
+  if [ -n "$current_url" ]; then
+    printf '当前地址：%s\n' "$current_url"
+  else
+    printf '当前状态：未启用\n'
+  fi
+  printf '\n请输入中央服务器本机 3x-ui 的完整 HTTPS API 地址。\n'
+  printf '格式：https://面板域名/面板路径/panel/api/inbounds/list\n'
+  printf '输入 0 可关闭，直接按 Enter 取消。\n'
+  read -rp "3x-ui API 地址: " answer
+  if [ -z "$answer" ]; then
+    printf '已取消。\n'
+    return 1
+  fi
+  if [ "$answer" = 0 ]; then
+    XUI_API_URL=""
+  else
+    XUI_API_URL="$answer"
+  fi
+  export XUI_API_URL
+  update_script_and_deploy
 }
 
 update_stack() {
@@ -896,8 +940,9 @@ while true; do
 5. 查看访问地址、凭据与模块
 6. 更新容器镜像
 7. 卸载并删除全部数据
+8. 配置或关闭本机 3x-ui API 流量采集
 MENU
-  read -rp "请输入操作编号 [0-7]: " choice
+  read -rp "请输入操作编号 [0-8]: " choice
   case "$choice" in
     0) exit 0 ;;
     1) update_script_and_deploy; exit $? ;;
@@ -907,6 +952,13 @@ MENU
     5) show_access_info; pause ;;
     6) update_stack; pause ;;
     7) uninstall_everything ;;
+    8)
+      if configure_xui_api; then
+        exit 0
+      else
+        pause
+      fi
+      ;;
     *) printf '无效选择。\n'; pause ;;
   esac
 done
@@ -918,7 +970,7 @@ show_installer_menu() {
   while true; do
     clear
     cat <<'MENU'
-GLA 2.0.0 - 轻量服务器观测平台
+GLA 2.0.1 - 轻量服务器观测平台
 
 当前状态：[尚未安装或需要重新部署]
 

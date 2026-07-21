@@ -354,6 +354,7 @@ prometheus.scrape "xui" {
     server      = "$SERVER_NAME",
   }]
   scrape_interval = "30s"
+  honor_labels    = true
   forward_to      = [prometheus.remote_write.central.receiver]
 }
 EOF
@@ -380,6 +381,12 @@ note "正在启动 Alloy 采集器"
 cd "$STACK_DIR"
 compose pull
 compose up -d
+if [ -n "$XUI_API_URL" ]; then
+  compose restart xui-exporter
+else
+  docker rm -f gla-xui-exporter >/dev/null 2>&1 || true
+fi
+compose restart alloy
 
 note "正在验证采集器状态"
 compose ps
@@ -414,7 +421,7 @@ install_manager() {
 # GLA Alloy Collector Manager
 set -Eeuo pipefail
 
-GLA_VERSION="2.0.0"
+GLA_VERSION="2.0.1"
 STACK_DIR="${STACK_DIR:-/opt/xray-alloy-collector}"
 COMPOSE_FILE="$STACK_DIR/compose.yaml"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
