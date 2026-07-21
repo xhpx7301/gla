@@ -62,11 +62,11 @@ class DashboardTableTest(unittest.TestCase):
         self.assertIn("geo_country", fail2ban["targets"][0]["expr"])
         self.assertEqual(
             panel_by_id(self.security, 8)["gridPos"],
-            {"x": 0, "y": 32, "w": 24, "h": 9},
+            {"x": 0, "y": 38, "w": 24, "h": 9},
         )
         self.assertEqual(
             panel_by_id(self.security, 9)["gridPos"],
-            {"x": 0, "y": 41, "w": 24, "h": 9},
+            {"x": 0, "y": 47, "w": 24, "h": 9},
         )
 
     def test_gateway_tables_are_chinese_and_sorted(self):
@@ -124,19 +124,24 @@ class DashboardTableTest(unittest.TestCase):
 
     def test_security_dashboard_shows_the_latest_parseable_ssh_failure(self):
         latest_ssh = panel_by_id(self.security, 12)
-        self.assertEqual(latest_ssh["title"], "最新 SSH 失败记录")
-        self.assertEqual(latest_ssh["gridPos"], {"x": 0, "y": 5, "w": 24, "h": 4})
+        self.assertEqual(latest_ssh["title"], "最近 20 次 SSH 失败记录")
+        self.assertEqual(latest_ssh["type"], "table")
+        self.assertEqual(latest_ssh["gridPos"], {"x": 0, "y": 5, "w": 24, "h": 10})
+        self.assertEqual(latest_ssh["targets"][0]["maxLines"], 20)
         expression = latest_ssh["targets"][0]["expr"]
         for field in ("source_ip", "source_port", "attempted_user", "geo_country", "geo_region", "geo_city"):
             self.assertIn(field, expression)
         self.assertIn("尝试用户名", expression)
         self.assertNotIn("流量使用量", expression)
+        self.assertEqual(latest_ssh["transformations"][0]["id"], "extractFields")
+        self.assertEqual(latest_ssh["transformations"][1]["id"], "sortBy")
+        self.assertEqual(latest_ssh["transformations"][2]["id"], "organize")
 
     def test_security_dashboard_has_aggregate_ssh_and_ufw_traffic(self):
         ssh_traffic = panel_by_id(self.security, 13)
         ufw_traffic = panel_by_id(self.security, 14)
-        self.assertEqual(ssh_traffic["gridPos"], {"x": 0, "y": 25, "w": 12, "h": 7})
-        self.assertEqual(ufw_traffic["gridPos"], {"x": 12, "y": 25, "w": 12, "h": 7})
+        self.assertEqual(ssh_traffic["gridPos"], {"x": 0, "y": 31, "w": 12, "h": 7})
+        self.assertEqual(ufw_traffic["gridPos"], {"x": 12, "y": 31, "w": 12, "h": 7})
         self.assertIn("gla_ssh_inbound_bytes_total", ssh_traffic["targets"][0]["expr"])
         self.assertIn("gla_ufw_default_denied_bytes_total", ufw_traffic["targets"][0]["expr"])
 
