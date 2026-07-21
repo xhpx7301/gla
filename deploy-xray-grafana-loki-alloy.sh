@@ -90,7 +90,76 @@ download_asset() {
   fi
 }
 
+install_geoip_database() {
+  local source_path="$1"
+  [ -r "$source_path" ] || die "无法读取数据库文件：$source_path"
+  install -d -m 0750 "$STACK_DIR/geoip"
+  install -m 0640 "$source_path" "$STACK_DIR/geoip/GeoLite2-City.mmdb"
+  GEOIP_DB_PATH="$STACK_DIR/geoip/GeoLite2-City.mmdb"
+  ENABLE_GEOIP=true
+  printf 'GeoIP 数据库已放置并启用：%s\n' "$GEOIP_DB_PATH"
+}
+
+download_geoip_database() {
+  local account_id license_key tmp_dir archive netrc db_file
+  command -v curl >/dev/null 2>&1 || die "从 MaxMind 下载需要 curl。请先安装 curl，或选择使用已有文件。"
+  command -v tar >/dev/null 2>&1 || die "解压 GeoIP 数据库需要 tar。"
+
+  read -rp "MaxMind Account ID: " account_id
+  read -rsp "MaxMind License Key（输入内容不会显示）: " license_key
+  printf '\n'
+  [ -n "$account_id" ] || die "Account ID 不能为空。"
+  [ -n "$license_key" ] || die "License Key 不能为空。"
+
+  tmp_dir="$(mktemp -d)"
+  archive="$tmp_dir/GeoLite2-City.tar.gz"
+  netrc="$tmp_dir/.netrc"
+  printf 'machine download.maxmind.com login %s password %s\n' "$account_id" "$license_key" >"$netrc"
+  chmod 0600 "$netrc"
+  curl -fsSL --retry 2 --netrc-file "$netrc" \
+    'https://download.maxmind.com/geoip/databases/GeoLite2-City/download?suffix=tar.gz' \
+    -o "$archive" || { rm -rf "$tmp_dir"; die "MaxMind 数据库下载失败，请检查 Account ID、License Key 和网络。"; }
+  tar -xzf "$archive" -C "$tmp_dir" || { rm -rf "$tmp_dir"; die "GeoIP 压缩包解压失败。"; }
+  db_file="$(find "$tmp_dir" -type f -name 'GeoLite2-City.mmdb' -print -quit)"
+  [ -n "$db_file" ] || { rm -rf "$tmp_dir"; die "下载包中未找到 GeoLite2-City.mmdb。"; }
+  install_geoip_database "$db_file"
+  rm -rf "$tmp_dir"
+}
+
+prepare_geoip_database() {
+  local source_path choice
+
+  if [ "$ENABLE_GEOIP" = false ]; then
+    return
+  fi
+  if [ -r "$GEOIP_DB_PATH" ]; then
+    ENABLE_GEOIP=true
+    return
+  fi
+
+  printf '\n未检测到 GeoIP 数据库。\n'
+  printf 'GeoIP 可为来源 IP 添加国家/地区、省份和城市。\n\n'
+  printf '1. 从 MaxMind 官方下载（需要 Account ID 和 License Key）\n'
+  printf '2. 使用服务器上已有的 GeoLite2-City.mmdb\n'
+  printf '0. 跳过 GeoIP\n'
+  read -rp "请选择 [0-2]: " choice
+  case "$choice" in
+    1) download_geoip_database ;;
+    2)
+      read -rp "已有 GeoLite2-City.mmdb 文件路径: " source_path
+      [ -n "$source_path" ] || { [ "$ENABLE_GEOIP" = true ] && die "已要求启用 GeoIP，但没有提供数据库文件。"; ENABLE_GEOIP=false; return; }
+      install_geoip_database "$source_path"
+      ;;
+    0|"")
+      [ "$ENABLE_GEOIP" = true ] && die "已要求启用 GeoIP，但没有提供数据库文件。"
+      ENABLE_GEOIP=false
+      ;;
+    *) die "无效选择。" ;;
+  esac
+}
+
 install_stack() {
+  prepare_geoip_database
   require_install_prerequisites
   docker network inspect "$NPM_NETWORK" >/dev/null 2>&1 || docker network create "$NPM_NETWORK" >/dev/null
 
@@ -942,6 +1011,10 @@ update_script_and_deploy() {
   fi
   if [ "$enable_geoip_is_set" = x ]; then
     ENABLE_GEOIP="$enable_geoip_override"
+    export ENABLE_GEOIP
+  else
+    # Menu option 1 offers GeoIP setup again when the previous deployment skipped it.
+    ENABLE_GEOIP=auto
     export ENABLE_GEOIP
   fi
   if [ "$geoip_db_path_is_set" = x ]; then

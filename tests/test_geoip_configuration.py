@@ -19,6 +19,12 @@ class GeoIpConfigurationTest(unittest.TestCase):
             self.assertIn("geoip_subdivision_name", script)
             self.assertIn("geoip_city_name", script)
             self.assertIn("source_ip", script)
+            self.assertIn("prepare_geoip_database", script)
+            self.assertIn("download_geoip_database", script)
+            self.assertIn("download.maxmind.com/geoip/databases/GeoLite2-City/download", script)
+            self.assertIn("--netrc-file", script)
+            self.assertIn("已有 GeoLite2-City.mmdb 文件路径", script)
+            self.assertIn("install -m 0640", script)
 
     def test_ip_is_not_promoted_to_a_loki_label(self):
         collector = (ROOT / "deploy-xray-alloy-collector.sh").read_text(

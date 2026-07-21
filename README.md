@@ -217,17 +217,15 @@ alloy
 
 项目不会自动下载 GeoLite2 数据库。请按 MaxMind 许可取得 `GeoLite2-City.mmdb`，然后在对应服务器执行：
 
-采集服务器：
+运行 `alloy` 或 `gla`，选择菜单 `1`。部署时如果没有检测到数据库，脚本会提供三个选项：
 
-```bash
-sudo install -d -m 0750 /opt/xray-alloy-collector/geoip
-sudo install -m 0640 GeoLite2-City.mmdb /opt/xray-alloy-collector/geoip/GeoLite2-City.mmdb
-sudo env ENABLE_GEOIP=true \
-  GEOIP_DB_PATH=/opt/xray-alloy-collector/geoip/GeoLite2-City.mmdb \
-  alloy
+```text
+1. 从 MaxMind 官方下载（需要 Account ID 和 License Key）
+2. 使用服务器上已有的 GeoLite2-City.mmdb
+0. 跳过 GeoIP
 ```
 
-进入菜单后选择 `1` 重新部署。中心服务器使用相同方式，将路径改为 `/opt/xray-log-dashboard/geoip/GeoLite2-City.mmdb`，然后运行 `gla` 选择 `1`。重新部署后，新的 SSH、Fail2ban 和 Xray 日志会带有国家/地区、省份和城市字段；历史日志不会自动补齐。
+选择 `1` 时，脚本通过 MaxMind 官方下载接口下载并解压数据库；Account ID 和 License Key 仅用于本次下载，不写入 GLA 配置。选择 `2` 时，输入服务器上已有文件路径，例如 `/tmp/GeoLite2-City.mmdb`，脚本会自动复制到采集端 `/opt/xray-alloy-collector/geoip/` 或中心端 `/opt/xray-log-dashboard/geoip/`。选择 `0` 可跳过。重新部署后，新的 SSH、Fail2ban 和 Xray 日志会带有国家/地区、省份和城市字段；历史日志不会自动补齐。
 
 中心服务器：
 
