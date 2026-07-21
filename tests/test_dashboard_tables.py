@@ -135,6 +135,8 @@ class DashboardTableTest(unittest.TestCase):
         self.assertNotIn("流量使用量", expression)
         self.assertIn("label_format", expression)
         self.assertIn("line_format", expression)
+        self.assertIn("尝试用户名={{ .attempted_user }}", expression)
+        self.assertIn("位置={{ .geo_country }} / {{ .geo_region }} / {{ .geo_city }}", expression)
         self.assertEqual(latest_ssh["options"]["sortOrder"], "Descending")
 
     def test_security_dashboard_has_aggregate_ssh_and_ufw_traffic(self):
