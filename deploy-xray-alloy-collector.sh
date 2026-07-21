@@ -21,6 +21,7 @@ ASSET_BASE_URL="${ASSET_BASE_URL:-https://raw.githubusercontent.com/xhpx7301/gla
 MANAGER_PATH="/usr/local/bin/alloy"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
 GEOIP_DB_PATH="${GEOIP_DB_PATH:-$STACK_DIR/geoip/GeoLite2-City.mmdb}"
+GEOIP_MIRROR_URL="${GEOIP_MIRROR_URL:-https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb}"
 
 die() { printf '错误: %s\n' "$*" >&2; exit 1; }
 note() { printf '\n==> %s\n' "$*"; }
@@ -35,6 +36,7 @@ write_install_settings() {
     printf 'ENABLE_SECURITY=%q\n' "$ENABLE_SECURITY"
     printf 'ENABLE_GEOIP=%q\n' "$ENABLE_GEOIP"
     printf 'GEOIP_DB_PATH=%q\n' "$GEOIP_DB_PATH"
+    printf 'GEOIP_MIRROR_URL=%q\n' "$GEOIP_MIRROR_URL"
     printf 'SERVER_NAME=%q\n' "$SERVER_NAME"
     printf 'LOKI_URL=%q\n' "$LOKI_URL"
     printf 'LOKI_USERNAME=%q\n' "$LOKI_USERNAME"
@@ -115,27 +117,20 @@ install_geoip_database() {
 }
 
 download_geoip_database() {
-  local account_id license_key tmp_dir archive netrc db_file
-  command -v curl >/dev/null 2>&1 || die "从 MaxMind 下载需要 curl。请先安装 curl，或选择使用已有文件。"
-  command -v tar >/dev/null 2>&1 || die "解压 GeoIP 数据库需要 tar。"
-
-  read -rp "MaxMind Account ID: " account_id
-  read -rsp "MaxMind License Key（输入内容不会显示）: " license_key
-  printf '\n'
-  [ -n "$account_id" ] || die "Account ID 不能为空。"
-  [ -n "$license_key" ] || die "License Key 不能为空。"
+  local tmp_dir db_file http_code size_bytes
+  command -v curl >/dev/null 2>&1 || die "从 GitHub 镜像下载需要 curl。请先安装 curl，或选择使用已有文件。"
 
   tmp_dir="$(mktemp -d)"
-  archive="$tmp_dir/GeoLite2-City.tar.gz"
-  netrc="$tmp_dir/.netrc"
-  printf 'machine download.maxmind.com login %s password %s\n' "$account_id" "$license_key" >"$netrc"
-  chmod 0600 "$netrc"
-  curl -fsSL --retry 2 --netrc-file "$netrc" \
-    'https://download.maxmind.com/geoip/databases/GeoLite2-City/download?suffix=tar.gz' \
-    -o "$archive" || { rm -rf "$tmp_dir"; die "MaxMind 数据库下载失败，请检查 Account ID、License Key 和网络。"; }
-  tar -xzf "$archive" -C "$tmp_dir" || { rm -rf "$tmp_dir"; die "GeoIP 压缩包解压失败。"; }
-  db_file="$(find "$tmp_dir" -type f -name 'GeoLite2-City.mmdb' -print -quit)"
-  [ -n "$db_file" ] || { rm -rf "$tmp_dir"; die "下载包中未找到 GeoLite2-City.mmdb。"; }
+  db_file="$tmp_dir/GeoLite2-City.mmdb"
+  http_code="$(curl -sSL --retry 2 "$GEOIP_MIRROR_URL" -o "$db_file" -w '%{http_code}')" || { rm -rf "$tmp_dir"; die "无法连接 GeoIP 镜像，请检查网络。"; }
+  case "$http_code" in
+    200) ;;
+    404) rm -rf "$tmp_dir"; die "GeoIP 镜像中未找到 GeoLite2-City.mmdb。" ;;
+    429) rm -rf "$tmp_dir"; die "GitHub 请求过于频繁，请稍后再试。" ;;
+    *) rm -rf "$tmp_dir"; die "GeoIP 镜像下载失败，HTTP 状态码：$http_code" ;;
+  esac
+  size_bytes="$(wc -c <"$db_file")"
+  [ "$size_bytes" -gt 1048576 ] || { rm -rf "$tmp_dir"; die "下载文件过小，可能不是有效的 GeoLite2-City.mmdb。"; }
   install_geoip_database "$db_file"
   rm -rf "$tmp_dir"
 }
@@ -153,7 +148,7 @@ prepare_geoip_database() {
 
   printf '\n未检测到 GeoIP 数据库。\n'
   printf 'GeoIP 可为来源 IP 添加国家/地区、省份和城市。\n\n'
-  printf '1. 从 MaxMind 官方下载（需要 Account ID 和 License Key）\n'
+  printf '1. 从 GitHub GeoLite.mmdb 镜像下载（无需 MaxMind 密钥）\n'
   printf '2. 使用服务器上已有的 GeoLite2-City.mmdb\n'
   printf '0. 跳过 GeoIP\n'
   read -rp "请选择 [0-2]: " choice

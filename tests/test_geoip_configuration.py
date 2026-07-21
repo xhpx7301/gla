@@ -21,8 +21,10 @@ class GeoIpConfigurationTest(unittest.TestCase):
             self.assertIn("source_ip", script)
             self.assertIn("prepare_geoip_database", script)
             self.assertIn("download_geoip_database", script)
-            self.assertIn("download.maxmind.com/geoip/databases/GeoLite2-City/download", script)
-            self.assertIn("--netrc-file", script)
+            self.assertIn("raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb", script)
+            self.assertIn("GEOIP_MIRROR_URL", script)
+            self.assertIn("下载文件过小", script)
+            self.assertIn("GitHub GeoLite.mmdb 镜像下载", script)
             self.assertIn("已有 GeoLite2-City.mmdb 文件路径", script)
             self.assertIn("install -m 0640", script)
 

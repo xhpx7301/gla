@@ -207,7 +207,8 @@ alloy
 | `METRICS_USERNAME` | `alloy-agent` | 指标反向代理认证用户名 |
 | `XUI_API_URL` | 无 | 3x-ui `/panel/api/inbounds/list` 完整 HTTPS 地址 |
 | `ENABLE_GEOIP` | `auto` | `auto`、`true` 或 `false`；检测到本地数据库时自动启用 |
-| `GEOIP_DB_PATH` | 采集端为 `/opt/xray-alloy-collector/geoip/GeoLite2-City.mmdb`，中心端为 `/opt/xray-log-dashboard/geoip/GeoLite2-City.mmdb` | 本地 MaxMind GeoLite2-City 数据库路径 |
+| `GEOIP_DB_PATH` | 采集端为 `/opt/xray-alloy-collector/geoip/GeoLite2-City.mmdb`，中心端为 `/opt/xray-log-dashboard/geoip/GeoLite2-City.mmdb` | 本地 GeoLite2-City 数据库路径 |
+| `GEOIP_MIRROR_URL` | `https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb` | 菜单自动下载使用的 GitHub 镜像地址 |
 | `LOKI_RETENTION` | `168h` | 中心端 Loki 日志保留时间 |
 | `METRICS_RETENTION` | `14d` | 中心端指标保留时间 |
 
@@ -215,17 +216,17 @@ alloy
 
 ### 启用第一阶段 GeoIP
 
-项目不会自动下载 GeoLite2 数据库。请按 MaxMind 许可取得 `GeoLite2-City.mmdb`，然后在对应服务器执行：
+项目支持通过 GitHub 镜像自动下载 `GeoLite2-City.mmdb`，也支持使用本地已有文件。
 
 运行 `alloy` 或 `gla`，选择菜单 `1`。部署时如果没有检测到数据库，脚本会提供三个选项：
 
 ```text
-1. 从 MaxMind 官方下载（需要 Account ID 和 License Key）
+1. 从 GitHub GeoLite.mmdb 镜像下载（无需 MaxMind 密钥）
 2. 使用服务器上已有的 GeoLite2-City.mmdb
 0. 跳过 GeoIP
 ```
 
-选择 `1` 时，脚本通过 MaxMind 官方下载接口下载并解压数据库；Account ID 和 License Key 仅用于本次下载，不写入 GLA 配置。选择 `2` 时，输入服务器上已有文件路径，例如 `/tmp/GeoLite2-City.mmdb`，脚本会自动复制到采集端 `/opt/xray-alloy-collector/geoip/` 或中心端 `/opt/xray-log-dashboard/geoip/`。选择 `0` 可跳过。重新部署后，新的 SSH、Fail2ban 和 Xray 日志会带有国家/地区、省份和城市字段；历史日志不会自动补齐。
+选择 `1` 时，脚本从 `GEOIP_MIRROR_URL` 下载数据库，检查 HTTP 状态和文件大小后复制到 GLA 默认目录。该镜像不是 MaxMind 官方源，数据新鲜度、完整性和授权条款需要自行确认。选择 `2` 时，输入服务器上已有文件路径，例如 `/tmp/GeoLite2-City.mmdb`，脚本会自动复制到采集端 `/opt/xray-alloy-collector/geoip/` 或中心端 `/opt/xray-log-dashboard/geoip/`。选择 `0` 可跳过。重新部署后，新的 SSH、Fail2ban 和 Xray 日志会带有国家/地区、省份和城市字段；历史日志不会自动补齐。
 
 中心服务器：
 
@@ -260,7 +261,7 @@ docker logs --tail=100 xray-alloy
 - `30G` 中心服务器建议先保持默认，不要长期保存大量 Debug 日志。
 - 采集端不会运行 Grafana、Loki 或 VictoriaMetrics，适合 `1C / 1G` 小型服务器。
 - 3x-ui 指标默认每 30 秒采集一次，不会记录 API Token，也不会把来源 IP 设为 Loki Label。
-- GeoIP 默认关闭；将 MaxMind GeoLite2-City 数据库放到 `GEOIP_DB_PATH` 后，用 `ENABLE_GEOIP=true` 重新部署即可。国家、省份和城市来自本地离线数据库，不会把 IP 发给第三方查询服务。
+- GeoIP 默认关闭；可通过菜单 `1` 从 GitHub 镜像下载，或将 `GeoLite2-City.mmdb` 放到 `GEOIP_DB_PATH` 后重新部署。国家、省份和城市来自本地离线数据库，不会把 IP 发给在线查询服务。
 - GeoIP 只适合展示来源归属参考，代理、VPN、移动网络和云服务器的城市级结果可能不准确。Xray access log 仍统计连接次数，不会凭空产生 IP 级精确流量。
 
 ## 安全说明
@@ -284,4 +285,4 @@ tests/test_xui_exporter.py         3x-ui 导出器测试
 tests/test_generated_alloy_regex.sh Bash 到 Alloy 的正则转义测试
 ```
 
-原始来源 IP 会直接显示在表格中。第一阶段支持在采集阶段使用 MaxMind GeoLite2-City 本地数据库离线解析国家/地区、省份和城市；数据库不随项目自动下载，需要按 MaxMind 许可自行取得并放置到 `GEOIP_DB_PATH`。如果未配置数据库，相关地理列会为空，原有 IP、失败次数、封禁次数和连接次数统计仍可用。
+原始来源 IP 会直接显示在表格中。第一阶段支持在采集阶段使用 GeoLite2-City 本地数据库离线解析国家/地区、省份和城市。默认下载地址是用户指定的 `P3TERX/GeoLite.mmdb` GitHub 镜像；如果未配置数据库，相关地理列会为空，原有 IP、失败次数、封禁次数和连接次数统计仍可用。
