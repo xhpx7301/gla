@@ -257,6 +257,7 @@ assets/xui_exporter.py             3x-ui API Prometheus 导出器
 dashboards/xray-gateway.json       Xray / 3x-ui 流量仪表盘
 dashboards/server-security.json    服务器安全与系统仪表盘
 tests/test_xui_exporter.py         3x-ui 导出器测试
+tests/test_generated_alloy_regex.sh Bash 到 Alloy 的正则转义测试
 ```
 
 国家地图需要单独配置 MaxMind GeoLite2 等本地 GeoIP 数据库。本版本不会把来源 IP 发送给第三方在线查询服务。
