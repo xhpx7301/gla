@@ -237,13 +237,18 @@ if [ "$ENABLE_GEOIP" = true ]; then
     db      = "/var/lib/gla/geoip/GeoLite2-City.mmdb"
     source  = "source_ip"
     db_type = "city"
+    custom_lookups = {
+      geo_country_localized = "country.names.\"zh-CN\" || country.names.en",
+      geo_region_localized  = "subdivisions[0].names.\"zh-CN\" || subdivisions[0].names.en",
+      geo_city_localized    = "city.names.\"zh-CN\" || city.names.en",
+    }
   }
 
   stage.labels {
     values = {
-      geo_country = "geoip_country_name",
-      geo_region  = "geoip_subdivision_name",
-      geo_city    = "geoip_city_name",
+      geo_country = "geo_country_localized",
+      geo_region  = "geo_region_localized",
+      geo_city    = "geo_city_localized",
     }
   }
 EOF

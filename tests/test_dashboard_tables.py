@@ -60,6 +60,14 @@ class DashboardTableTest(unittest.TestCase):
         self.assertIn("source_ip", ssh["targets"][0]["expr"])
         self.assertIn("source_ip", fail2ban["targets"][0]["expr"])
         self.assertIn("geo_country", fail2ban["targets"][0]["expr"])
+        self.assertEqual(
+            panel_by_id(self.security, 8)["gridPos"],
+            {"x": 0, "y": 13, "w": 24, "h": 8},
+        )
+        self.assertEqual(
+            panel_by_id(self.security, 9)["gridPos"],
+            {"x": 0, "y": 21, "w": 24, "h": 8},
+        )
 
     def test_gateway_tables_are_chinese_and_sorted(self):
         client = panel_by_id(self.gateway, 6)
