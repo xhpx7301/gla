@@ -36,6 +36,11 @@ grep -Fq 'cleanup_security_traffic' "$ROOT/deploy-xray-alloy-collector.sh"
 grep -Fq '__path__ = "/host$SECURITY_LOG_PATH"' "$ROOT/deploy-xray-alloy-collector.sh"
 grep -Fq 'nftables-suf' "$COLLECTOR"
 
+# Configuration redeploys reuse local images; menu option 8 updates Alloy only.
+! grep -Fxq 'compose pull' "$ROOT/deploy-xray-alloy-collector.sh"
+grep -Fq 'compose pull alloy' "$ROOT/deploy-xray-alloy-collector.sh"
+grep -Fq 'compose up -d --no-deps alloy' "$ROOT/deploy-xray-alloy-collector.sh"
+
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 mkdir -p "$tmp_dir/bin" "$tmp_dir/textfile"

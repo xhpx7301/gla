@@ -83,6 +83,9 @@ install_manager
 bash -n "$MANAGER_PATH"
 grep -Fq 'cleanup_security_traffic' "$MANAGER_PATH"
 grep -Fq 'rc-service gla-security-traffic stop' "$MANAGER_PATH"
+! grep -Fxq '  compose pull' "$MANAGER_PATH"
+grep -Fq '  compose pull alloy' "$MANAGER_PATH"
+grep -Fq '  compose up -d --no-deps alloy' "$MANAGER_PATH"
 SERVER_NAME=alpine-test
 LOKI_URL=https://loki.example.com/loki/api/v1/push
 LOKI_USERNAME=alloy-agent
@@ -124,6 +127,8 @@ grep -Fq 'server   = "alpine-test"' "$config"
 ! grep -Fq '/host/var/log/ufw.log' "$config"
 
 grep -Fq '/var/log:/host/var/log:ro' "$compose_file"
+grep -Fq -- '- /:/host/root:ro' "$compose_file"
+! grep -Fq 'rslave' "$compose_file"
 ! grep -Fq '/var/log/journal' "$compose_file"
 ! grep -Fq '/etc/machine-id' "$compose_file"
 grep -Fq 'HOST_PLATFORM=alpine' "$settings"
@@ -149,5 +154,6 @@ grep -Fq '/host/var/log/ufw.log' "$config"
 ! grep -Fq 'ssh_alpine' "$config"
 grep -Fq '/run/log/journal:/var/log/journal:ro' "$compose_file"
 grep -Fq '/etc/machine-id:/etc/machine-id:ro' "$compose_file"
+grep -Fq -- '- /:/host/root:ro,rslave' "$compose_file"
 
 printf 'Alpine 与 systemd 采集器配置生成验证通过。\n'

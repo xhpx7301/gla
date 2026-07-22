@@ -192,6 +192,8 @@ alloy
 
 升级会保留 Grafana、Loki、VictoriaMetrics 数据卷以及已保存的 3x-ui API Token。远程写入密码不会写入 `.install.env`，更新时需要重新输入。
 
+采集端 `alloy` 菜单的编号 `1` 只更新脚本与配置，并复用本地已有镜像；首次安装或本地缺少镜像时，Docker Compose 仍会自动拉取所需镜像。编号 `8` 才会从镜像仓库拉取并单独重建 Alloy，不会更新或重建 3x-ui API 导出器。
+
 ## `gla` 菜单说明
 
 运行 `gla` 后，顶部会直接显示 Grafana、Loki、VictoriaMetrics、Alloy 和中央服务器本机 3x-ui 流量采集的状态。这里的“本机 3x-ui”不代表远程采集服务器；远程服务器的 3x-ui API 状态应在“Xray 网关流量与连接”仪表盘中查看。

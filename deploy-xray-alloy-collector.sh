@@ -423,6 +423,11 @@ install -d -m 0750 "$STACK_DIR/alloy" "$STACK_DIR/assets" "$STACK_DIR/secrets" "
   download_asset assets/xui_exporter.py "$STACK_DIR/assets/xui_exporter.py"
 fi
 
+ROOTFS_VOLUME="/:/host/root:ro"
+if [ "$HOST_PLATFORM" = systemd ]; then
+  ROOTFS_VOLUME="$ROOTFS_VOLUME,rslave"
+fi
+
 cat >"$STACK_DIR/compose.yaml" <<EOF
 services:
   alloy:
@@ -435,7 +440,7 @@ services:
       - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
-      - /:/host/root:ro,rslave
+      - $ROOTFS_VOLUME
       - alloy-data:/var/lib/alloy/data
 EOF
 
@@ -854,14 +859,21 @@ chmod 0600 "$STACK_DIR/compose.yaml" "$STACK_DIR/alloy/config.alloy" "$INSTALL_S
 
 note "正在启动 Alloy 采集器"
 cd "$STACK_DIR"
-compose pull
+alloy_id_before="$(docker inspect -f '{{.Id}}' xray-alloy 2>/dev/null || true)"
+xui_exporter_id_before="$(docker inspect -f '{{.Id}}' gla-xui-exporter 2>/dev/null || true)"
 compose up -d
 if [ -n "$XUI_API_URL" ]; then
-  compose restart xui-exporter
+  xui_exporter_id_after="$(docker inspect -f '{{.Id}}' gla-xui-exporter 2>/dev/null || true)"
+  if [ -n "$xui_exporter_id_before" ] && [ "$xui_exporter_id_before" = "$xui_exporter_id_after" ]; then
+    compose restart xui-exporter
+  fi
 else
   docker rm -f gla-xui-exporter >/dev/null 2>&1 || true
 fi
-compose restart alloy
+alloy_id_after="$(docker inspect -f '{{.Id}}' xray-alloy 2>/dev/null || true)"
+if [ -n "$alloy_id_before" ] && [ "$alloy_id_before" = "$alloy_id_after" ]; then
+  compose restart alloy
+fi
 
 note "正在验证采集器状态"
 compose ps
@@ -1140,8 +1152,8 @@ configure_xui_api() {
 
 update_collector() {
   printf '正在拉取 Alloy 最新镜像，采集器可能短暂重建。\n'
-  compose pull
-  compose up -d
+  compose pull alloy
+  compose up -d --no-deps alloy
   printf '采集器更新完成。\n'
 }
 
