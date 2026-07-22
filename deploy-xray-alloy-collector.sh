@@ -24,11 +24,44 @@ MANAGER_PATH="/usr/local/bin/alloy"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
 GEOIP_DB_PATH="${GEOIP_DB_PATH:-$STACK_DIR/geoip/GeoLite2-City.mmdb}"
 GEOIP_MIRROR_URL="${GEOIP_MIRROR_URL:-https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb}"
+HOST_PLATFORM=""
+SECURITY_LOG_PATH=""
+SECURITY_TRAFFIC_BACKEND=""
+SYSTEMD_UNIT_DIR="${GLA_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+OPENRC_INIT_DIR="${GLA_OPENRC_INIT_DIR:-/etc/init.d}"
 
 die() { printf '错误: %s\n' "$*" >&2; exit 1; }
 note() { printf '\n==> %s\n' "$*"; }
 hcl_escape() { sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 compose() { "${COMPOSE[@]}" "$@"; }
+
+detect_host_platform() {
+  local os_id=""
+  if [ -r /etc/os-release ]; then
+    os_id="$(sed -n 's/^ID=//p' /etc/os-release | head -n 1 | tr -d '"')"
+  fi
+  if [ "$os_id" = alpine ]; then
+    HOST_PLATFORM=alpine
+  else
+    # Preserve the existing systemd behavior for Debian, Ubuntu, and prior
+    # unofficial deployments on other distributions.
+    HOST_PLATFORM=systemd
+  fi
+}
+
+prepare_security_log_source() {
+  [ "$ENABLE_SECURITY" = true ] || return
+  if [ "$HOST_PLATFORM" = alpine ]; then
+    [ -r /var/log/messages ] || die "未找到 Alpine 安全日志 /var/log/messages。请先运行 suf 配置 syslog 和 Fail2ban。"
+    SECURITY_LOG_PATH=/var/log/messages
+  elif [ -d /var/log/journal ] && [ -n "$(find /var/log/journal -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+    JOURNAL_PATH_HOST=/var/log/journal
+  elif [ -d /run/log/journal ]; then
+    JOURNAL_PATH_HOST=/run/log/journal
+  else
+    die "未找到 systemd journal 目录，无法采集 SSH 日志。"
+  fi
+}
 
 write_install_settings() {
   {
@@ -48,12 +81,22 @@ write_install_settings() {
     printf 'METRICS_USERNAME=%q\n' "$METRICS_USERNAME"
     printf 'XUI_API_URL=%q\n' "$XUI_API_URL"
     printf 'ALLOY_IMAGE=%q\n' "$ALLOY_IMAGE"
+    printf 'HOST_PLATFORM=%q\n' "$HOST_PLATFORM"
   } >"$INSTALL_SETTINGS_FILE"
   chmod 0600 "$INSTALL_SETTINGS_FILE"
 }
 
 require_install_prerequisites() {
-  [ "$(id -u)" -eq 0 ] || die "请使用 root 执行：sudo bash $0"
+  detect_host_platform
+  if [ "$(id -u)" -ne 0 ]; then
+    [ "$HOST_PLATFORM" = alpine ] && die "请使用 root 或 doas 执行：doas bash $0"
+    die "请使用 root 执行：sudo bash $0"
+  fi
+  if [ "$HOST_PLATFORM" = alpine ]; then
+    command -v apk >/dev/null 2>&1 || die "Alpine 系统未找到 apk。"
+    command -v rc-service >/dev/null 2>&1 || die "Alpine 采集需要 OpenRC rc-service。"
+    command -v rc-update >/dev/null 2>&1 || die "Alpine 采集需要 OpenRC rc-update。"
+  fi
   case "$ENABLE_XRAY" in
     auto) [ -r "$XRAY_LOG" ] && ENABLE_XRAY=true || ENABLE_XRAY=false ;;
     true) [ -r "$XRAY_LOG" ] || die "已要求采集 Xray，但无法读取日志：$XRAY_LOG" ;;
@@ -95,18 +138,35 @@ require_install_prerequisites() {
   fi
   case "$ENABLE_SECURITY_TRAFFIC" in
     auto)
-      if [ "$ENABLE_SECURITY" = true ] && [ -n "$METRICS_URL" ] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active$' && command -v iptables >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
-        ENABLE_SECURITY_TRAFFIC=true
+      if [ "$HOST_PLATFORM" = alpine ]; then
+        if [ "$ENABLE_SECURITY" = true ] && [ -n "$METRICS_URL" ] && command -v nft >/dev/null 2>&1 && nft list chain inet suf input >/dev/null 2>&1; then
+          ENABLE_SECURITY_TRAFFIC=true
+          SECURITY_TRAFFIC_BACKEND=nftables-suf
+        else
+          ENABLE_SECURITY_TRAFFIC=false
+        fi
       else
-        ENABLE_SECURITY_TRAFFIC=false
+        if [ "$ENABLE_SECURITY" = true ] && [ -n "$METRICS_URL" ] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active$' && command -v iptables >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
+          ENABLE_SECURITY_TRAFFIC=true
+          SECURITY_TRAFFIC_BACKEND=iptables-ufw
+        else
+          ENABLE_SECURITY_TRAFFIC=false
+        fi
       fi
       ;;
     true)
       [ "$ENABLE_SECURITY" = true ] || die "ENABLE_SECURITY_TRAFFIC=true 需要 ENABLE_SECURITY=true。"
       [ -n "$METRICS_URL" ] || die "ENABLE_SECURITY_TRAFFIC=true 需要 METRICS_URL。"
-      command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active$' || die "ENABLE_SECURITY_TRAFFIC=true 需要已启用的 UFW。"
-      command -v iptables >/dev/null 2>&1 || die "ENABLE_SECURITY_TRAFFIC=true 需要 iptables。"
-      command -v systemctl >/dev/null 2>&1 || die "ENABLE_SECURITY_TRAFFIC=true 需要 systemd。"
+      if [ "$HOST_PLATFORM" = alpine ]; then
+        command -v nft >/dev/null 2>&1 || die "Alpine 的安全流量采集需要 nftables。"
+        nft list chain inet suf input >/dev/null 2>&1 || die "未找到 SUF nftables 链 inet/suf/input。请先通过 suf-alpine 启用防火墙。"
+        SECURITY_TRAFFIC_BACKEND=nftables-suf
+      else
+        command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active$' || die "ENABLE_SECURITY_TRAFFIC=true 需要已启用的 UFW。"
+        command -v iptables >/dev/null 2>&1 || die "ENABLE_SECURITY_TRAFFIC=true 需要 iptables。"
+        command -v systemctl >/dev/null 2>&1 || die "ENABLE_SECURITY_TRAFFIC=true 需要 systemd。"
+        SECURITY_TRAFFIC_BACKEND=iptables-ufw
+      fi
       ;;
     false) ;;
     *) die "ENABLE_SECURITY_TRAFFIC 只能是 auto、true 或 false。" ;;
@@ -126,12 +186,20 @@ require_install_prerequisites() {
 }
 
 setup_security_traffic_collector() {
-  local service_file=/etc/systemd/system/gla-security-traffic.service
-  local timer_file=/etc/systemd/system/gla-security-traffic.timer
+  local service_file="$SYSTEMD_UNIT_DIR/gla-security-traffic.service"
+  local timer_file="$SYSTEMD_UNIT_DIR/gla-security-traffic.timer"
+  local openrc_file="$OPENRC_INIT_DIR/gla-security-traffic"
   local environment_file="$STACK_DIR/security-traffic.env"
   local collector_file="$STACK_DIR/assets/security_traffic_collector.sh"
+  local loop_file="$STACK_DIR/assets/security_traffic_loop.sh"
 
   if [ "$ENABLE_SECURITY_TRAFFIC" = false ]; then
+    if [ "$HOST_PLATFORM" = alpine ]; then
+      rc-service gla-security-traffic stop >/dev/null 2>&1 || true
+      rc-update del gla-security-traffic default >/dev/null 2>&1 || true
+    elif command -v systemctl >/dev/null 2>&1; then
+      systemctl disable --now gla-security-traffic.timer >/dev/null 2>&1 || true
+    fi
     if [ -r "$environment_file" ] && [ -x "$collector_file" ]; then
       set -a
       # shellcheck disable=SC1090
@@ -139,11 +207,10 @@ setup_security_traffic_collector() {
       set +a
       "$collector_file" --cleanup || true
     fi
-    if command -v systemctl >/dev/null 2>&1; then
-      systemctl disable --now gla-security-traffic.timer >/dev/null 2>&1 || true
+    rm -f "$service_file" "$timer_file" "$openrc_file" "$loop_file" "$environment_file"
+    if [ "$HOST_PLATFORM" = systemd ] && command -v systemctl >/dev/null 2>&1; then
       systemctl daemon-reload
     fi
-    rm -f "$service_file" "$timer_file" "$environment_file"
     return
   fi
 
@@ -152,8 +219,45 @@ setup_security_traffic_collector() {
     printf 'GLA_TEXTFILE_DIR=%q\n' "$STACK_DIR/textfile"
     printf 'GLA_SERVER_NAME=%q\n' "$SERVER_NAME"
     printf 'GLA_SSH_PORT=%q\n' "$SSH_PORT"
+    printf 'GLA_FIREWALL_BACKEND=%q\n' "$SECURITY_TRAFFIC_BACKEND"
   } >"$environment_file"
   chmod 0600 "$environment_file"
+
+  if [ "$HOST_PLATFORM" = alpine ]; then
+    cat >"$loop_file" <<EOF
+#!/usr/bin/env bash
+set -u
+set -a
+. "$environment_file"
+set +a
+while true; do
+  "$collector_file" || true
+  sleep 30
+done
+EOF
+    chmod 0750 "$loop_file"
+    cat >"$openrc_file" <<EOF
+#!/sbin/openrc-run
+description="GLA aggregate SSH and SUF nftables traffic collector"
+command="$loop_file"
+command_background="yes"
+pidfile="/run/\${RC_SVCNAME}.pid"
+
+depend() {
+  need net
+  after nftables
+}
+EOF
+    chmod 0755 "$openrc_file"
+    set -a
+    # shellcheck disable=SC1090
+    . "$environment_file"
+    set +a
+    "$collector_file"
+    rc-update add gla-security-traffic default >/dev/null
+    rc-service gla-security-traffic restart
+    return
+  fi
 
   cat >"$service_file" <<EOF
 [Unit]
@@ -295,15 +399,7 @@ install_collector() {
     esac
   fi
 
-  if [ "$ENABLE_SECURITY" = true ]; then
-    if [ -d /var/log/journal ] && [ -n "$(find /var/log/journal -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
-      JOURNAL_PATH_HOST=/var/log/journal
-    elif [ -d /run/log/journal ]; then
-      JOURNAL_PATH_HOST=/run/log/journal
-    else
-      die "未找到 systemd journal 目录，无法采集 SSH 日志。"
-    fi
-  fi
+  prepare_security_log_source
 
   LOKI_URL_HCL="$(printf '%s' "$LOKI_URL" | hcl_escape)"
   LOKI_USERNAME_HCL="$(printf '%s' "$LOKI_USERNAME" | hcl_escape)"
@@ -352,9 +448,13 @@ if [ "$ENABLE_GEOIP" = true ]; then
 fi
 
 if [ "$ENABLE_SECURITY" = true ]; then
-  cat >>"$STACK_DIR/compose.yaml" <<EOF
+  if [ "$HOST_PLATFORM" = systemd ]; then
+    cat >>"$STACK_DIR/compose.yaml" <<EOF
       - $JOURNAL_PATH_HOST:/var/log/journal:ro
       - /etc/machine-id:/etc/machine-id:ro
+EOF
+  fi
+  cat >>"$STACK_DIR/compose.yaml" <<EOF
       - /var/log:/host/var/log:ro
 EOF
 fi
@@ -466,7 +566,7 @@ EOF
 EOF
 fi
 
-if [ "$ENABLE_SECURITY" = true ]; then
+if [ "$ENABLE_SECURITY" = true ] && [ "$HOST_PLATFORM" = systemd ]; then
   cat >>"$STACK_DIR/alloy/config.alloy" <<EOF
 
 loki.source.journal "ssh" {
@@ -583,6 +683,116 @@ loki.source.file "ufw" {
 EOF
 fi
 
+if [ "$ENABLE_SECURITY" = true ] && [ "$HOST_PLATFORM" = alpine ]; then
+  cat >>"$STACK_DIR/alloy/config.alloy" <<EOF
+
+local.file_match "ssh_alpine" {
+  path_targets = [{
+    __path__ = "/host$SECURITY_LOG_PATH",
+    job      = "ssh-journal",
+    server   = "$SERVER_NAME",
+  }]
+}
+
+loki.source.file "ssh_alpine" {
+  targets    = local.file_match.ssh_alpine.targets
+  forward_to = [loki.process.ssh_alpine.receiver]
+}
+
+loki.process "ssh_alpine" {
+  forward_to = [loki.write.central.receiver]
+
+  stage.match {
+    selector            = "{job=\"ssh-journal\"} !~ \"sshd\""
+    action              = "drop"
+    drop_counter_reason = "non_sshd_log"
+  }
+
+  stage.regex {
+    expression = "sshd.*from (?P<source_ip>(?:\\\\[[0-9A-Fa-f:]+\\\\]|[0-9A-Fa-f:.]+))"
+  }
+
+EOF
+  if [ "$ENABLE_GEOIP" = true ]; then
+    cat >>"$STACK_DIR/alloy/config.alloy" <<'EOF'
+  stage.geoip {
+    db      = "/var/lib/gla/geoip/GeoLite2-City.mmdb"
+    source  = "source_ip"
+    db_type = "city"
+    custom_lookups = {
+      geo_country_localized = "country.names.\"zh-CN\" || country.names.en",
+      geo_region_localized  = "subdivisions[0].names.\"zh-CN\" || subdivisions[0].names.en",
+      geo_city_localized    = "city.names.\"zh-CN\" || city.names.en",
+    }
+  }
+
+  stage.labels {
+    values = {
+      geo_country = "geo_country_localized",
+      geo_region  = "geo_region_localized",
+      geo_city    = "geo_city_localized",
+    }
+  }
+EOF
+  fi
+  cat >>"$STACK_DIR/alloy/config.alloy" <<EOF
+}
+
+local.file_match "fail2ban_alpine" {
+  path_targets = [{
+    __path__ = "/host/var/log/fail2ban.log",
+    job      = "fail2ban",
+    server   = "$SERVER_NAME",
+  }]
+}
+
+loki.source.file "fail2ban_alpine" {
+  targets    = local.file_match.fail2ban_alpine.targets
+  forward_to = [loki.process.fail2ban_alpine.receiver]
+}
+EOF
+  cat >>"$STACK_DIR/alloy/config.alloy" <<EOF
+
+loki.process "fail2ban_alpine" {
+  forward_to = [loki.write.central.receiver]
+
+  stage.regex {
+    expression = "^(?P<timestamp>\\\\d{4}-\\\\d{2}-\\\\d{2} \\\\d{2}:\\\\d{2}:\\\\d{2},\\\\d+).*?(?:Found|Ban|Unban) (?P<source_ip>(?:\\\\[[0-9A-Fa-f:]+\\\\]|[0-9A-Fa-f:.]+))"
+  }
+
+EOF
+  if [ "$ENABLE_GEOIP" = true ]; then
+    cat >>"$STACK_DIR/alloy/config.alloy" <<'EOF'
+  stage.geoip {
+    db      = "/var/lib/gla/geoip/GeoLite2-City.mmdb"
+    source  = "source_ip"
+    db_type = "city"
+    custom_lookups = {
+      geo_country_localized = "country.names.\"zh-CN\" || country.names.en",
+      geo_region_localized  = "subdivisions[0].names.\"zh-CN\" || subdivisions[0].names.en",
+      geo_city_localized    = "city.names.\"zh-CN\" || city.names.en",
+    }
+  }
+
+  stage.labels {
+    values = {
+      geo_country = "geo_country_localized",
+      geo_region  = "geo_region_localized",
+      geo_city    = "geo_city_localized",
+    }
+  }
+EOF
+  fi
+  cat >>"$STACK_DIR/alloy/config.alloy" <<'EOF'
+
+  stage.timestamp {
+    source = "timestamp"
+    format = "2006-01-02 15:04:05,000"
+  }
+}
+EOF
+fi
+
 if [ -n "$METRICS_URL" ]; then
   cat >>"$STACK_DIR/alloy/config.alloy" <<EOF
 
@@ -663,6 +873,7 @@ cat <<EOF
 模块化采集器部署完成。
 
 服务器标签：$SERVER_NAME
+宿主平台：$HOST_PLATFORM
 中心 Loki：$LOKI_URL
 Xray 日志：$ENABLE_XRAY
 安全日志：$ENABLE_SECURITY
@@ -686,7 +897,7 @@ install_manager() {
 # GLA Alloy Collector Manager
 set -Eeuo pipefail
 
-GLA_VERSION="2.1.0"
+GLA_VERSION="2.2.0"
 STACK_DIR="${STACK_DIR:-/opt/xray-alloy-collector}"
 COMPOSE_FILE="$STACK_DIR/compose.yaml"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
@@ -818,6 +1029,34 @@ show_config() {
   printf '\n为安全起见，不会显示 Loki 密码。\n'
 }
 
+cleanup_security_traffic() {
+  local host_platform=systemd environment_file="$STACK_DIR/security-traffic.env"
+  local collector_file="$STACK_DIR/assets/security_traffic_collector.sh"
+  if [ -r "$INSTALL_SETTINGS_FILE" ]; then
+    set +u
+    . "$INSTALL_SETTINGS_FILE"
+    set -u
+    host_platform="${HOST_PLATFORM:-systemd}"
+  fi
+
+  if [ "$host_platform" = alpine ]; then
+    rc-service gla-security-traffic stop >/dev/null 2>&1 || true
+    rc-update del gla-security-traffic default >/dev/null 2>&1 || true
+    rm -f /etc/init.d/gla-security-traffic
+  elif command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now gla-security-traffic.timer >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/gla-security-traffic.service /etc/systemd/system/gla-security-traffic.timer
+    systemctl daemon-reload
+  fi
+
+  if [ -r "$environment_file" ] && [ -x "$collector_file" ]; then
+    set -a
+    . "$environment_file"
+    set +a
+    "$collector_file" --cleanup || true
+  fi
+}
+
 download_installer() {
   if command -v wget >/dev/null 2>&1; then
     wget -qO- "$INSTALLER_URL"
@@ -911,6 +1150,7 @@ uninstall_keep_data() {
     printf '已取消。\n'
     return
   fi
+  cleanup_security_traffic
   [ -f "$COMPOSE_FILE" ] && compose down
   rm -rf "$STACK_DIR"
   printf '已删除采集器容器和配置，Alloy 数据卷已保留。\n'
@@ -921,6 +1161,7 @@ uninstall_everything() {
     printf '已取消。\n'
     return
   fi
+  cleanup_security_traffic
   [ -f "$COMPOSE_FILE" ] && compose down -v || true
   docker volume ls -q --filter label=com.docker.compose.project=xray-alloy-collector | xargs -r docker volume rm
   docker image rm grafana/alloy:latest python:3.12-alpine 2>/dev/null || true
@@ -1002,8 +1243,14 @@ MENU
   done
 }
 
-case "${ALLOY_ACTION:-menu}" in
-  install) install_collector ;;
-  menu) show_installer_menu ;;
-  *) die "未知操作：${ALLOY_ACTION}" ;;
-esac
+main() {
+  case "${ALLOY_ACTION:-menu}" in
+    install) install_collector ;;
+    menu) show_installer_menu ;;
+    *) die "未知操作：${ALLOY_ACTION}" ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
