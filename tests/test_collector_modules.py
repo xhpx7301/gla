@@ -106,6 +106,26 @@ class CollectorModuleConfigurationTest(unittest.TestCase):
         self.assertIn("show_xui_current_config", self.script)
         self.assertNotIn("grep -E 'server   =|url =|__path__ ='", self.script)
 
+    def test_manager_can_diagnose_central_write_health(self):
+        for text in (
+            "7. 检测中央写入状态",
+            "中央写入状态检测",
+            "最近 10 分钟未发现写入错误",
+            "认证失败（HTTP %s），请检查用户名和密码",
+            "Loki 最近数据",
+            "VictoriaMetrics 最近数据",
+            "最新样本约 %.0f 秒前",
+            "密码仅用于本次检测，不保存、不回显",
+        ):
+            self.assertIn(text, self.script)
+        self.assertIn("loki.write.central", self.script)
+        self.assertIn("prometheus.remote_write.central", self.script)
+        self.assertIn("node_time_seconds", self.script)
+        self.assertIn("xui_exporter_up", self.script)
+        self.assertIn("curl --config -", self.script)
+        self.assertIn("请输入操作编号 [0-12]", self.script)
+        self.assertIn('[[ "$age" =~ ^[0-9]+([.][0-9]+)?$ ]]', self.script)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -708,7 +708,7 @@ install_manager() {
 # GLA Alloy Collector Manager
 set -Eeuo pipefail
 
-GLA_VERSION="2.2.2"
+GLA_VERSION="2.3.0"
 STACK_DIR="${STACK_DIR:-/opt/xray-alloy-collector}"
 COMPOSE_FILE="$STACK_DIR/compose.yaml"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
@@ -902,6 +902,137 @@ show_config() {
   print_setting "3x-ui API Token（已保存）" "$(secret_state "$STACK_DIR/secrets/xui-api-token")"
 
   printf '\n说明：密码和 Token 不会回显；“已配置”表示部署配置中已使用对应凭据。\n'
+  printf '需要验证实际写入时，请选择主菜单 7. 检测中央写入状态。\n'
+}
+
+curl_config_escape() {
+  sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+authenticated_request() {
+  local url="$1" username="$2" password="$3" credentials response
+  shift 3
+  credentials="$(printf '%s:%s' "$username" "$password" | curl_config_escape)"
+  if ! response="$({ printf 'user = "%s"\n' "$credentials"; } | curl --config - --silent --show-error --connect-timeout 5 --max-time 10 -w $'\n%{http_code}' "$@" "$url" 2>/dev/null)"; then
+    AUTH_HTTP_STATUS=000
+    AUTH_HTTP_BODY=""
+    return 1
+  fi
+  AUTH_HTTP_STATUS="${response##*$'\n'}"
+  AUTH_HTTP_BODY="${response%$'\n'*}"
+}
+
+print_http_health() {
+  local label="$1" status="$2"
+  case "$status" in
+    200|204) printf '  %s：正常（HTTP %s）\n' "$label" "$status" ;;
+    401|403) printf '  %s：认证失败（HTTP %s），请检查用户名和密码\n' "$label" "$status" ;;
+    404) printf '  %s：路径不可用（HTTP 404），请检查反向代理是否转发完整路径\n' "$label" ;;
+    000) printf '  %s：连接失败或超时\n' "$label" ;;
+    *) printf '  %s：异常（HTTP %s）\n' "$label" "$status" ;;
+  esac
+}
+
+show_recent_write_errors() {
+  local logs="$1" label="$2" component="$3" matched
+  matched="$(printf '%s\n' "$logs" | grep -F "$component" | grep -Ei '(^|[^0-9])(401|403)([^0-9]|$)|error|failed|timeout|refused|unauthorized|non-recoverable' | tail -n 3 || true)"
+  if [ -n "$matched" ]; then
+    printf '  %s：发现最近写入异常\n' "$label"
+    printf '%s\n' "$matched" | sed 's/^/    /'
+  else
+    printf '  %s：最近 10 分钟未发现写入错误\n' "$label"
+  fi
+}
+
+check_loki_write() {
+  local password ready_url query_url
+  [ -n "${LOKI_URL:-}" ] || { printf '  Loki：未配置，跳过\n'; return; }
+  read -rsp "请输入 Loki Basic Auth 密码（直接按 Enter 跳过主动检测）: " password
+  printf '\n'
+  [ -n "$password" ] || { printf '  Loki：已跳过主动检测\n'; return; }
+  ready_url="${LOKI_URL%/loki/api/v1/push}/ready"
+  authenticated_request "$ready_url" "${LOKI_USERNAME:-}" "$password" || true
+  print_http_health "Loki 连接与认证" "$AUTH_HTTP_STATUS"
+  [ "$AUTH_HTTP_STATUS" = 200 ] || return
+
+  query_url="${LOKI_URL%/push}/query_range"
+  authenticated_request "$query_url" "${LOKI_USERNAME:-}" "$password" \
+    --get --data-urlencode "query={server=\"${SERVER_NAME:-}\"}" \
+    --data-urlencode 'since=10m' --data-urlencode 'limit=1' --data-urlencode 'direction=backward' || true
+  if [ "$AUTH_HTTP_STATUS" = 200 ] && printf '%s' "$AUTH_HTTP_BODY" | grep -Eq '"result"[[:space:]]*:[[:space:]]*\[[^]]'; then
+    printf '  Loki 最近数据：中央端已查询到本服务器最近 10 分钟的日志\n'
+  elif [ "$AUTH_HTTP_STATUS" = 200 ]; then
+    printf '  Loki 最近数据：最近 10 分钟无日志；日志源安静时属于正常情况\n'
+  else
+    print_http_health "Loki 数据查询" "$AUTH_HTTP_STATUS"
+  fi
+}
+
+check_metrics_write() {
+  local password ready_url query_url query age
+  if [ "$ENABLE_HOST_METRICS" != true ] && [ -z "${XUI_API_URL:-}" ]; then
+    printf '  VictoriaMetrics：没有启用指标模块，跳过\n'
+    return
+  fi
+  [ -n "${METRICS_URL:-}" ] || { printf '  VictoriaMetrics：指标模块已启用但未配置写入地址\n'; return; }
+  read -rsp "请输入指标接口 Basic Auth 密码（直接按 Enter 跳过主动检测）: " password
+  printf '\n'
+  [ -n "$password" ] || { printf '  VictoriaMetrics：已跳过主动检测\n'; return; }
+  ready_url="${METRICS_URL%/api/v1/write}/-/healthy"
+  authenticated_request "$ready_url" "${METRICS_USERNAME:-}" "$password" || true
+  print_http_health "VictoriaMetrics 连接与认证" "$AUTH_HTTP_STATUS"
+  [ "$AUTH_HTTP_STATUS" = 200 ] || return
+
+  if [ "$ENABLE_HOST_METRICS" = true ]; then
+    query="time() - max(timestamp(node_time_seconds{server=\"${SERVER_NAME:-}\"}))"
+  else
+    query="time() - max(timestamp(xui_exporter_up{server=\"${SERVER_NAME:-}\"}))"
+  fi
+  query_url="${METRICS_URL%/write}/query"
+  authenticated_request "$query_url" "${METRICS_USERNAME:-}" "$password" --get --data-urlencode "query=$query" || true
+  if [ "$AUTH_HTTP_STATUS" != 200 ]; then
+    print_http_health "VictoriaMetrics 数据查询" "$AUTH_HTTP_STATUS"
+    return
+  fi
+  age="$(printf '%s' "$AUTH_HTTP_BODY" | sed -n 's/.*"value":[[:space:]]*\[[^,]*,[[:space:]]*"\([^"]*\)"\].*/\1/p')"
+  if ! [[ "$age" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    printf '  VictoriaMetrics 最近数据：中央端未查询到本服务器指标\n'
+  elif awk -v age="$age" 'BEGIN { exit !(age <= 120) }'; then
+    printf '  VictoriaMetrics 最近数据：正常，最新样本约 %.0f 秒前\n' "$age"
+  else
+    printf '  VictoriaMetrics 最近数据：已过期，最新样本约 %.0f 秒前\n' "$age"
+  fi
+}
+
+check_central_write_status() {
+  local collector_state recent_logs
+  load_module_settings
+  printf '\n中央写入状态检测\n\n'
+  collector_state="$(container_state xray-alloy)"
+  print_setting "Alloy 容器" "$collector_state"
+  if [ "$collector_state" != '[运行中]' ]; then
+    printf '\nAlloy 未运行，无法继续检测。请先启动采集器。\n'
+    return
+  fi
+
+  recent_logs="$(docker logs --since 10m xray-alloy 2>&1 || true)"
+  printf '\n最近写入错误\n'
+  show_recent_write_errors "$recent_logs" "Loki" "loki.write.central"
+  if [ "$ENABLE_HOST_METRICS" = true ] || [ -n "${XUI_API_URL:-}" ]; then
+    show_recent_write_errors "$recent_logs" "VictoriaMetrics" "prometheus.remote_write.central"
+  else
+    printf '  VictoriaMetrics：没有启用指标模块\n'
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    printf '\n未安装 curl，只完成了本地日志检查。安装 curl 后可验证中央连接和最新数据。\n'
+    return
+  fi
+  printf '\n主动连接与数据查询\n'
+  printf '密码仅用于本次检测，不保存、不回显。直接按 Enter 可跳过对应服务。\n'
+  check_loki_write
+  check_metrics_write
+  printf '\n判断建议：认证失败应检查用户名/密码；连接正常但无最新指标时，再查看上面的 remote_write 错误。\n'
 }
 
 download_installer() {
@@ -1304,13 +1435,14 @@ while true; do
 4. 停止采集器
 5. 重启采集器
 6. 查看采集器状态与磁盘占用
-7. 查看采集器日志
-8. 查看采集器设置
-9. 更新 Alloy
-10. 卸载但保留采集器数据
-11. 完整卸载并删除所有数据
+7. 检测中央写入状态
+8. 查看采集器日志
+9. 查看采集器设置
+10. 更新 Alloy
+11. 卸载但保留采集器数据
+12. 完整卸载并删除所有数据
 MENU
-  read -rp "请输入操作编号 [0-11]: " choice
+  read -rp "请输入操作编号 [0-12]: " choice
   case "$choice" in
     0) exit 0 ;;
     1) update_script_and_deploy; exit $? ;;
@@ -1325,11 +1457,12 @@ MENU
     4) compose stop; pause ;;
     5) compose restart; pause ;;
     6) show_status; pause ;;
-    7) show_logs; pause ;;
-    8) show_config; pause ;;
-    9) update_collector; pause ;;
-    10) uninstall_keep_data; pause ;;
-    11) uninstall_everything ;;
+    7) check_central_write_status; pause ;;
+    8) show_logs; pause ;;
+    9) show_config; pause ;;
+    10) update_collector; pause ;;
+    11) uninstall_keep_data; pause ;;
+    12) uninstall_everything ;;
     *) printf '无效选择。\n'; pause ;;
   esac
 done
