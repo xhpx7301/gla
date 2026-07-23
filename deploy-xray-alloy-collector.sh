@@ -708,7 +708,7 @@ install_manager() {
 # GLA Alloy Collector Manager
 set -Eeuo pipefail
 
-GLA_VERSION="2.2.1"
+GLA_VERSION="2.2.2"
 STACK_DIR="${STACK_DIR:-/opt/xray-alloy-collector}"
 COMPOSE_FILE="$STACK_DIR/compose.yaml"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
@@ -785,6 +785,36 @@ show_header() {
   printf '3x-ui 流量采集 %s\n' "$(xui_state "$xui_api_url")"
 }
 
+configured_value() {
+  if [ -n "$1" ]; then
+    printf '%s' "$1"
+  else
+    printf '未配置'
+  fi
+}
+
+secret_state() {
+  if [ -f "$1" ] && [ -s "$1" ]; then
+    printf '已配置（内容已隐藏）'
+  else
+    printf '未配置'
+  fi
+}
+
+current_journal_path() {
+  if [ -d /var/log/journal ] && [ -n "$(find /var/log/journal -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+    printf '/var/log/journal'
+  elif [ -d /run/log/journal ]; then
+    printf '/run/log/journal'
+  else
+    printf '未检测到'
+  fi
+}
+
+print_setting() {
+  printf '  %s %s\n' "$1：" "$2"
+}
+
 compose() {
   [ -f "$COMPOSE_FILE" ] || die "采集器未安装：$STACK_DIR"
   if docker compose version >/dev/null 2>&1; then
@@ -840,9 +870,38 @@ show_logs() {
 }
 
 show_config() {
-  [ -f "$STACK_DIR/alloy/config.alloy" ] || die "未找到采集器配置。"
-  grep -E 'server   =|url =|__path__ =' "$STACK_DIR/alloy/config.alloy" || true
-  printf '\n为安全起见，不会显示 Loki 密码。\n'
+  local metrics_write_active=false
+  load_module_settings
+  grep -q '^prometheus.remote_write "central"' "$STACK_DIR/alloy/config.alloy" 2>/dev/null && metrics_write_active=true
+  printf '\n采集器当前设置\n\n'
+  print_setting "服务器标识" "${SERVER_NAME:-未配置}"
+  print_setting "安装目录" "$STACK_DIR"
+  print_setting "Alloy 镜像" "${ALLOY_IMAGE:-grafana/alloy:latest}"
+
+  printf '\n日志写入\n'
+  print_setting "Loki 地址" "$(configured_value "${LOKI_URL:-}")"
+  print_setting "认证用户名" "$(configured_value "${LOKI_USERNAME:-}")"
+  print_setting "认证密码" "已配置（内容已隐藏）"
+
+  printf '\n指标写入\n'
+  print_setting "VictoriaMetrics 地址" "$(configured_value "${METRICS_URL:-}")"
+  print_setting "认证用户名" "$(configured_value "${METRICS_USERNAME:-}")"
+  if [ "$metrics_write_active" = true ]; then
+    print_setting "认证密码" "已配置（内容已隐藏）"
+  else
+    print_setting "认证密码" "当前未使用"
+  fi
+
+  printf '\n采集模块\n'
+  print_setting "Xray 日志" "$(boolean_state "$ENABLE_XRAY")，路径：$(configured_value "${XRAY_LOG:-}")"
+  print_setting "安全日志" "$(boolean_state "$ENABLE_SECURITY")，Journal：$(current_journal_path)"
+  print_setting "主机指标" "$(boolean_state "$ENABLE_HOST_METRICS")，采集间隔：30 秒"
+  print_setting "GeoIP 归属解析" "$(boolean_state "$ENABLE_GEOIP")，数据库：$(configured_value "${GEOIP_DB_PATH:-}")"
+  print_setting "SSH/UFW 聚合流量" "$(boolean_state "$ENABLE_SECURITY_TRAFFIC")，SSH 端口：${SSH_PORT:-自动检测}，采集间隔：30 秒"
+  print_setting "3x-ui API 流量" "$([ -n "${XUI_API_URL:-}" ] && printf '[已启用]' || printf '[未启用]')，API：$(configured_value "${XUI_API_URL:-}")"
+  print_setting "3x-ui API Token（已保存）" "$(secret_state "$STACK_DIR/secrets/xui-api-token")"
+
+  printf '\n说明：密码和 Token 不会回显；“已配置”表示部署配置中已使用对应凭据。\n'
 }
 
 download_installer() {
@@ -960,9 +1019,65 @@ configure_metrics_endpoint() {
   printf '重新部署时将安全询问指标接口密码。\n'
 }
 
+show_xray_current_config() {
+  print_setting "访问日志路径" "$(configured_value "${XRAY_LOG:-}")"
+  print_setting "写入 Loki" "$(configured_value "${LOKI_URL:-}")"
+  print_setting "Loki 用户名" "$(configured_value "${LOKI_USERNAME:-}")"
+  print_setting "GeoIP 增强" "$(boolean_state "$ENABLE_GEOIP")"
+}
+
+show_security_current_config() {
+  print_setting "SSH Journal" "$(current_journal_path)"
+  print_setting "Fail2ban 日志" "/var/log/fail2ban.log"
+  print_setting "UFW 日志" "/var/log/ufw.log"
+  print_setting "写入 Loki" "$(configured_value "${LOKI_URL:-}")"
+  print_setting "GeoIP 增强" "$(boolean_state "$ENABLE_GEOIP")"
+}
+
+show_host_metrics_current_config() {
+  print_setting "写入地址" "$(configured_value "${METRICS_URL:-}")"
+  print_setting "认证用户名" "$(configured_value "${METRICS_USERNAME:-}")"
+  print_setting "采集间隔" "30 秒"
+}
+
+show_geoip_current_config() {
+  local database_state="未检测到"
+  [ -r "${GEOIP_DB_PATH:-}" ] && database_state="可读取"
+  print_setting "数据库路径" "$(configured_value "${GEOIP_DB_PATH:-}")"
+  print_setting "数据库状态" "$database_state"
+  print_setting "增强 Xray 日志" "$(boolean_state "$ENABLE_XRAY")"
+  print_setting "增强安全日志" "$(boolean_state "$ENABLE_SECURITY")"
+}
+
+show_security_traffic_current_config() {
+  local ufw_state="未安装"
+  if command -v ufw >/dev/null 2>&1; then
+    ufw status 2>/dev/null | grep -q '^Status: active$' && ufw_state="已启用" || ufw_state="未启用"
+  fi
+  print_setting "SSH 端口" "${SSH_PORT:-自动检测}"
+  print_setting "UFW 状态" "$ufw_state"
+  print_setting "主机指标依赖" "$(boolean_state "$ENABLE_HOST_METRICS")"
+  print_setting "安全日志依赖" "$(boolean_state "$ENABLE_SECURITY")"
+  print_setting "写入地址" "$(configured_value "${METRICS_URL:-}")"
+  print_setting "采集间隔" "30 秒"
+}
+
+show_xui_current_config() {
+  print_setting "Panel API 地址" "$(configured_value "${XUI_API_URL:-}")"
+  print_setting "API Token" "$(secret_state "$STACK_DIR/secrets/xui-api-token")"
+  print_setting "写入地址" "$(configured_value "${METRICS_URL:-}")"
+  print_setting "认证用户名" "$(configured_value "${METRICS_USERNAME:-}")"
+  print_setting "采集间隔" "30 秒"
+}
+
 read_module_action() {
-  local title="$1" current="$2"
-  printf '\n%s\n当前状态：%s\n\n1. 启用或更新配置\n2. 关闭\n0. 返回\n' "$title" "$(boolean_state "$current")"
+  local title="$1" current="$2" details_function="${3:-}"
+  printf '\n%s\n当前状态：%s\n' "$title" "$(boolean_state "$current")"
+  if [ -n "$details_function" ]; then
+    printf '\n当前使用配置\n'
+    "$details_function"
+  fi
+  printf '\n1. 启用或更新配置\n2. 关闭\n0. 返回\n'
   read -rp "请选择 [0-2]: " MODULE_ACTION
   case "$MODULE_ACTION" in
     0|1|2) ;;
@@ -974,7 +1089,7 @@ configure_host_metrics() {
   local current
   load_module_settings
   current="$ENABLE_HOST_METRICS"
-  read_module_action "主机指标配置" "$current" || return 1
+  read_module_action "主机指标配置" "$current" show_host_metrics_current_config || return 1
   case "$MODULE_ACTION" in
     0) return 1 ;;
     1)
@@ -1000,7 +1115,7 @@ configure_xray_logs() {
   local answer current
   load_module_settings
   current="$ENABLE_XRAY"
-  read_module_action "Xray 日志配置" "$current" || return 1
+  read_module_action "Xray 日志配置" "$current" show_xray_current_config || return 1
   case "$MODULE_ACTION" in
     0) return 1 ;;
     1)
@@ -1025,7 +1140,7 @@ configure_security_logs() {
   local current
   load_module_settings
   current="$ENABLE_SECURITY"
-  read_module_action "安全日志配置（SSH、Fail2ban、UFW）" "$current" || return 1
+  read_module_action "安全日志配置（SSH、Fail2ban、UFW）" "$current" show_security_current_config || return 1
   case "$MODULE_ACTION" in
     0) return 1 ;;
     1)
@@ -1052,7 +1167,7 @@ configure_geoip() {
   local current
   load_module_settings
   current="$ENABLE_GEOIP"
-  read_module_action "GeoIP 归属解析配置" "$current" || return 1
+  read_module_action "GeoIP 归属解析配置" "$current" show_geoip_current_config || return 1
   case "$MODULE_ACTION" in
     0) return 1 ;;
     1)
@@ -1072,7 +1187,7 @@ configure_security_traffic() {
   local current
   load_module_settings
   current="$ENABLE_SECURITY_TRAFFIC"
-  read_module_action "SSH/UFW 聚合流量配置" "$current" || return 1
+  read_module_action "SSH/UFW 聚合流量配置" "$current" show_security_traffic_current_config || return 1
   case "$MODULE_ACTION" in
     0) return 1 ;;
     1)
@@ -1091,14 +1206,12 @@ configure_security_traffic() {
 }
 
 configure_xui_api() {
-  local current_url answer
+  local current_url current_enabled=false answer
   load_module_settings
   current_url="${XUI_API_URL:-}"
-  printf '\n3x-ui API 流量采集配置\n当前状态：%s\n' "$([ -n "$current_url" ] && printf '[已启用]' || printf '[未启用]')"
-  [ -n "$current_url" ] && printf '当前地址：%s\n' "$current_url"
-  printf '\n1. 启用或更新配置\n2. 关闭\n0. 返回\n'
-  read -rp "请选择 [0-2]: " answer
-  case "$answer" in
+  [ -n "$current_url" ] && current_enabled=true
+  read_module_action "3x-ui API 流量采集配置" "$current_enabled" show_xui_current_config || return 1
+  case "$MODULE_ACTION" in
     0) return 1 ;;
     1)
       printf '3x-ui 流量需要 Panel API、API Token 和 VictoriaMetrics 写入服务。\n'

@@ -84,6 +84,28 @@ class CollectorModuleConfigurationTest(unittest.TestCase):
         ):
             self.assertIn(reminder, self.script)
 
+    def test_settings_and_module_details_are_human_readable_and_safe(self):
+        for label in (
+            "采集器当前设置",
+            "日志写入",
+            "指标写入",
+            "当前使用配置",
+            "访问日志路径",
+            "SSH Journal",
+            "数据库状态",
+            "主机指标依赖",
+            "Panel API 地址",
+            "内容已隐藏",
+        ):
+            self.assertIn(label, self.script)
+        self.assertIn("show_xray_current_config", self.script)
+        self.assertIn("show_security_current_config", self.script)
+        self.assertIn("show_host_metrics_current_config", self.script)
+        self.assertIn("show_geoip_current_config", self.script)
+        self.assertIn("show_security_traffic_current_config", self.script)
+        self.assertIn("show_xui_current_config", self.script)
+        self.assertNotIn("grep -E 'server   =|url =|__path__ ='", self.script)
+
 
 if __name__ == "__main__":
     unittest.main()
