@@ -1,0 +1,72 @@
+import pathlib
+import unittest
+
+
+ROOT = pathlib.Path(__file__).parents[1]
+
+
+class CollectorModuleConfigurationTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.script = (ROOT / "deploy-xray-alloy-collector.sh").read_text(
+            encoding="utf-8"
+        )
+
+    def test_host_metrics_has_an_explicit_backward_compatible_switch(self):
+        self.assertIn(
+            'ENABLE_HOST_METRICS="${ENABLE_HOST_METRICS:-auto}"', self.script
+        )
+        self.assertIn("printf 'ENABLE_HOST_METRICS=%q", self.script)
+        self.assertIn(
+            'auto) [ -n "$METRICS_URL" ] && ENABLE_HOST_METRICS=true',
+            self.script,
+        )
+        self.assertIn("2.1.x and earlier inferred host metrics", self.script)
+
+    def test_host_and_xui_metrics_are_independently_generated(self):
+        self.assertIn(
+            'if [ "$ENABLE_HOST_METRICS" = true ]; then\n'
+            '  cat >>"$STACK_DIR/alloy/config.alloy"',
+            self.script,
+        )
+        self.assertIn(
+            'if [ -n "$XUI_API_URL" ]; then\n'
+            '  cat >>"$STACK_DIR/alloy/config.alloy"',
+            self.script,
+        )
+        self.assertIn('if [ "$METRICS_REQUIRED" = true ]; then', self.script)
+        self.assertIn(
+            'if [ "$ENABLE_HOST_METRICS" = true ] || [ -n "$XUI_API_URL" ]',
+            self.script,
+        )
+
+    def test_manager_exposes_all_collection_modules(self):
+        self.assertIn("11. 配置采集模块", self.script)
+        self.assertIn("configure_modules()", self.script)
+        for module in (
+            "主机指标",
+            "Xray 日志",
+            "安全日志（SSH/Fail2ban/UFW）",
+            "GeoIP 归属解析",
+            "3x-ui API 流量",
+            "SSH/UFW 聚合流量",
+        ):
+            self.assertIn(module, self.script)
+
+    def test_dependency_failures_are_explained_before_redeploy(self):
+        for reminder in (
+            "该模块需要 VictoriaMetrics Remote Write 服务",
+            "地址无效：必须使用 HTTPS 并以 /api/v1/write 结尾",
+            "地址无效：必须使用 HTTPS 并以 /panel/api/inbounds/list 结尾",
+            "无法启用：请先启用主机指标和 VictoriaMetrics 写入",
+            "无法启用：请先启用安全日志",
+            "无法启用：系统需要 iptables",
+            "无法启用：请先启用 UFW",
+            "未找到 systemd journal，无法启用安全日志",
+            "请确认 3x-ui/Xray 已启用访问日志及路径权限",
+        ):
+            self.assertIn(reminder, self.script)
+
+
+if __name__ == "__main__":
+    unittest.main()

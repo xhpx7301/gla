@@ -7,6 +7,11 @@ COLLECTOR="$ROOT/assets/security_traffic_collector.sh"
 bash -n "$COLLECTOR"
 bash -n "$ROOT/deploy-xray-grafana-loki-alloy.sh"
 bash -n "$ROOT/deploy-xray-alloy-collector.sh"
+awk '
+  /cat >.*MANAGER_PATH.*EOF/ { capture=1; next }
+  capture && $0 == "EOF" { exit }
+  capture { print }
+' "$ROOT/deploy-xray-alloy-collector.sh" | bash -n
 
 grep -Fq 'GLA_SSH_INBOUND' "$COLLECTOR"
 grep -Fq 'GLA_UFW_DEFAULT_DENIED' "$COLLECTOR"

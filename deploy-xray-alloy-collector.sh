@@ -7,6 +7,7 @@ XRAY_LOG="${XRAY_LOG:-/var/log/x-ui/access.log}"
 ENABLE_XRAY="${ENABLE_XRAY:-auto}"
 ENABLE_SECURITY="${ENABLE_SECURITY:-true}"
 ENABLE_GEOIP="${ENABLE_GEOIP:-auto}"
+ENABLE_HOST_METRICS="${ENABLE_HOST_METRICS:-auto}"
 ENABLE_SECURITY_TRAFFIC="${ENABLE_SECURITY_TRAFFIC:-auto}"
 SSH_PORT="${SSH_PORT:-}"
 SERVER_NAME="${SERVER_NAME:-}"
@@ -37,6 +38,7 @@ write_install_settings() {
     printf 'ENABLE_XRAY=%q\n' "$ENABLE_XRAY"
     printf 'ENABLE_SECURITY=%q\n' "$ENABLE_SECURITY"
     printf 'ENABLE_GEOIP=%q\n' "$ENABLE_GEOIP"
+    printf 'ENABLE_HOST_METRICS=%q\n' "$ENABLE_HOST_METRICS"
     printf 'ENABLE_SECURITY_TRAFFIC=%q\n' "$ENABLE_SECURITY_TRAFFIC"
     printf 'SSH_PORT=%q\n' "$SSH_PORT"
     printf 'GEOIP_DB_PATH=%q\n' "$GEOIP_DB_PATH"
@@ -67,6 +69,12 @@ require_install_prerequisites() {
     false) ;;
     *) die "ENABLE_GEOIP 只能是 auto、true 或 false。" ;;
   esac
+  case "$ENABLE_HOST_METRICS" in
+    auto) [ -n "$METRICS_URL" ] && ENABLE_HOST_METRICS=true || ENABLE_HOST_METRICS=false ;;
+    true) [ -n "$METRICS_URL" ] || die "启用主机指标需要 VictoriaMetrics 写入地址，请设置 METRICS_URL。" ;;
+    false) ;;
+    *) die "ENABLE_HOST_METRICS 只能是 auto、true 或 false。" ;;
+  esac
   command -v docker >/dev/null 2>&1 || die "未找到 Docker。"
   docker info >/dev/null 2>&1 || die "Docker 服务未运行或当前用户无权限访问。"
 
@@ -84,7 +92,12 @@ require_install_prerequisites() {
   [[ "$LOKI_URL" =~ ^https://.+/loki/api/v1/push$ ]] || die "LOKI_URL 必须是以 /loki/api/v1/push 结尾的 HTTPS Loki 推送地址。"
   [ -n "$LOKI_USERNAME" ] || die "LOKI_USERNAME 不能为空。"
 
-  if [ -n "$METRICS_URL" ]; then
+  METRICS_REQUIRED=false
+  if [ "$ENABLE_HOST_METRICS" = true ] || [ -n "$XUI_API_URL" ]; then
+    METRICS_REQUIRED=true
+  fi
+  if [ "$METRICS_REQUIRED" = true ]; then
+    [ -n "$METRICS_URL" ] || die "所选指标模块需要 VictoriaMetrics 写入地址，请设置 METRICS_URL。"
     [[ "$METRICS_URL" =~ ^https://.+/api/v1/write$ ]] || die "METRICS_URL 必须是以 /api/v1/write 结尾的 HTTPS 地址。"
     [ -n "$METRICS_USERNAME" ] || die "METRICS_USERNAME 不能为空。"
   fi
@@ -95,7 +108,7 @@ require_install_prerequisites() {
   fi
   case "$ENABLE_SECURITY_TRAFFIC" in
     auto)
-      if [ "$ENABLE_SECURITY" = true ] && [ -n "$METRICS_URL" ] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active$' && command -v iptables >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
+      if [ "$ENABLE_SECURITY" = true ] && [ "$ENABLE_HOST_METRICS" = true ] && [ -n "$METRICS_URL" ] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active$' && command -v iptables >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
         ENABLE_SECURITY_TRAFFIC=true
       else
         ENABLE_SECURITY_TRAFFIC=false
@@ -103,6 +116,7 @@ require_install_prerequisites() {
       ;;
     true)
       [ "$ENABLE_SECURITY" = true ] || die "ENABLE_SECURITY_TRAFFIC=true 需要 ENABLE_SECURITY=true。"
+      [ "$ENABLE_HOST_METRICS" = true ] || die "启用 SSH/UFW 聚合流量需要先启用主机指标。"
       [ -n "$METRICS_URL" ] || die "ENABLE_SECURITY_TRAFFIC=true 需要 METRICS_URL。"
       command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active$' || die "ENABLE_SECURITY_TRAFFIC=true 需要已启用的 UFW。"
       command -v iptables >/dev/null 2>&1 || die "ENABLE_SECURITY_TRAFFIC=true 需要 iptables。"
@@ -270,11 +284,11 @@ install_collector() {
     *$'\n'*|*$'\r'*) die "LOKI_PASSWORD 不能包含换行符。" ;;
   esac
 
-  if [ -n "$METRICS_URL" ] && [ -z "$METRICS_PASSWORD" ]; then
+  if [ "$METRICS_REQUIRED" = true ] && [ -z "$METRICS_PASSWORD" ]; then
     read -rsp "请输入指标接口 Basic Auth 密码: " METRICS_PASSWORD
     printf '\n'
   fi
-  if [ -n "$METRICS_URL" ]; then
+  if [ "$METRICS_REQUIRED" = true ]; then
     [ -n "$METRICS_PASSWORD" ] || die "METRICS_PASSWORD 不能为空。"
     case "$METRICS_PASSWORD" in
       *$'\n'*|*$'\r'*) die "METRICS_PASSWORD 不能包含换行符。" ;;
@@ -337,11 +351,16 @@ services:
     command: run --storage.path=/var/lib/alloy/data /etc/alloy/config.alloy
     volumes:
       - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - alloy-data:/var/lib/alloy/data
+EOF
+
+if [ "$ENABLE_HOST_METRICS" = true ]; then
+  cat >>"$STACK_DIR/compose.yaml" <<'EOF'
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /:/host/root:ro,rslave
-      - alloy-data:/var/lib/alloy/data
 EOF
+fi
 
 if [ "$ENABLE_XRAY" = true ]; then
   printf '      - %s:%s:ro\n' "$XRAY_LOG" "$XRAY_LOG" >>"$STACK_DIR/compose.yaml"
@@ -583,7 +602,7 @@ loki.source.file "ufw" {
 EOF
 fi
 
-if [ -n "$METRICS_URL" ]; then
+if [ "$ENABLE_HOST_METRICS" = true ]; then
   cat >>"$STACK_DIR/alloy/config.alloy" <<EOF
 
 prometheus.exporter.unix "host" {
@@ -609,8 +628,10 @@ prometheus.scrape "host" {
 }
 EOF
 
-  if [ -n "$XUI_API_URL" ]; then
-    cat >>"$STACK_DIR/alloy/config.alloy" <<EOF
+fi
+
+if [ -n "$XUI_API_URL" ]; then
+  cat >>"$STACK_DIR/alloy/config.alloy" <<EOF
 
 prometheus.scrape "xui" {
   targets = [{
@@ -623,8 +644,9 @@ prometheus.scrape "xui" {
   forward_to      = [prometheus.remote_write.central.receiver]
 }
 EOF
-  fi
+fi
 
+if [ "$METRICS_REQUIRED" = true ]; then
   cat >>"$STACK_DIR/alloy/config.alloy" <<EOF
 
 prometheus.remote_write "central" {
@@ -666,7 +688,7 @@ cat <<EOF
 中心 Loki：$LOKI_URL
 Xray 日志：$ENABLE_XRAY
 安全日志：$ENABLE_SECURITY
-主机指标：$([ -n "$METRICS_URL" ] && printf '已启用' || printf '未启用')
+主机指标：$([ "$ENABLE_HOST_METRICS" = true ] && printf '已启用' || printf '未启用')
 3x-ui API：$([ -n "$XUI_API_URL" ] && printf '已启用' || printf '未启用')
 
 管理命令：
@@ -686,7 +708,7 @@ install_manager() {
 # GLA Alloy Collector Manager
 set -Eeuo pipefail
 
-GLA_VERSION="2.1.0"
+GLA_VERSION="2.2.0"
 STACK_DIR="${STACK_DIR:-/opt/xray-alloy-collector}"
 COMPOSE_FILE="$STACK_DIR/compose.yaml"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
@@ -720,14 +742,6 @@ boolean_state() {
   fi
 }
 
-configured_state() {
-  if [ -n "$1" ]; then
-    printf '[已启用]'
-  else
-    printf '[未启用]'
-  fi
-}
-
 xui_state() {
   if [ -z "$1" ]; then
     printf '[未启用]'
@@ -737,7 +751,11 @@ xui_state() {
 }
 
 show_header() {
-  local server_name="未知服务器" enable_xray="" enable_security="" enable_geoip="" metrics_url="" xui_api_url=""
+  local server_name="未知服务器" enable_xray="" enable_security="" enable_geoip=""
+  local enable_host_metrics="" enable_security_traffic="" metrics_url="" xui_api_url=""
+  local STACK_DIR XRAY_LOG ENABLE_XRAY ENABLE_SECURITY ENABLE_GEOIP ENABLE_HOST_METRICS
+  local ENABLE_SECURITY_TRAFFIC SSH_PORT GEOIP_DB_PATH GEOIP_MIRROR_URL SERVER_NAME
+  local LOKI_URL LOKI_USERNAME METRICS_URL METRICS_USERNAME XUI_API_URL ALLOY_IMAGE
   if [ -r "$INSTALL_SETTINGS_FILE" ]; then
     set +u
     # Generated locally by GLA and restricted to root.
@@ -749,12 +767,21 @@ show_header() {
     enable_geoip="${ENABLE_GEOIP:-}"
     metrics_url="${METRICS_URL:-}"
     xui_api_url="${XUI_API_URL:-}"
+    enable_security_traffic="${ENABLE_SECURITY_TRAFFIC:-false}"
+    if grep -q '^ENABLE_HOST_METRICS=' "$INSTALL_SETTINGS_FILE"; then
+      enable_host_metrics="$ENABLE_HOST_METRICS"
+    elif [ -n "$metrics_url" ]; then
+      # 2.1.x and earlier inferred host metrics from METRICS_URL.
+      enable_host_metrics=true
+    else
+      enable_host_metrics=false
+    fi
   fi
 
   printf 'GLA Alloy %s - %s\n\n' "$GLA_VERSION" "$server_name"
   printf 'Alloy          %s    Xray 日志      %s\n' "$(container_state xray-alloy)" "$(boolean_state "$enable_xray")"
-  printf '安全日志       %s    主机指标       %s\n' "$(boolean_state "$enable_security")" "$(configured_state "$metrics_url")"
-  printf 'GeoIP 归属解析  %s\n' "$(boolean_state "$enable_geoip")"
+  printf '安全日志       %s    主机指标       %s\n' "$(boolean_state "$enable_security")" "$(boolean_state "$enable_host_metrics")"
+  printf 'GeoIP 归属解析  %s    SSH/UFW 流量   %s\n' "$(boolean_state "$enable_geoip")" "$(boolean_state "$enable_security_traffic")"
   printf '3x-ui 流量采集 %s\n' "$(xui_state "$xui_api_url")"
 }
 
@@ -832,8 +859,13 @@ update_script_and_deploy() {
   local xui_api_url_is_set="${XUI_API_URL+x}" xui_api_url_override="${XUI_API_URL-}"
   local metrics_url_is_set="${METRICS_URL+x}" metrics_url_override="${METRICS_URL-}"
   local metrics_username_is_set="${METRICS_USERNAME+x}" metrics_username_override="${METRICS_USERNAME-}"
+  local enable_xray_is_set="${ENABLE_XRAY+x}" enable_xray_override="${ENABLE_XRAY-}"
+  local xray_log_is_set="${XRAY_LOG+x}" xray_log_override="${XRAY_LOG-}"
+  local enable_security_is_set="${ENABLE_SECURITY+x}" enable_security_override="${ENABLE_SECURITY-}"
   local enable_geoip_is_set="${ENABLE_GEOIP+x}" enable_geoip_override="${ENABLE_GEOIP-}"
   local geoip_db_path_is_set="${GEOIP_DB_PATH+x}" geoip_db_path_override="${GEOIP_DB_PATH-}"
+  local enable_host_metrics_is_set="${ENABLE_HOST_METRICS+x}" enable_host_metrics_override="${ENABLE_HOST_METRICS-}"
+  local enable_security_traffic_is_set="${ENABLE_SECURITY_TRAFFIC+x}" enable_security_traffic_override="${ENABLE_SECURITY_TRAFFIC-}"
   [ -r "$INSTALL_SETTINGS_FILE" ] || die "未找到安装配置：$INSTALL_SETTINGS_FILE"
   printf '正在从 GitHub 下载最新版脚本并重新部署。请输入现有 Loki 密码以保留连接配置。\n'
   set -a
@@ -852,11 +884,24 @@ update_script_and_deploy() {
     METRICS_USERNAME="$metrics_username_override"
     export METRICS_USERNAME
   fi
+  if [ "$enable_xray_is_set" = x ]; then
+    ENABLE_XRAY="$enable_xray_override"
+    export ENABLE_XRAY
+  fi
+  if [ "$xray_log_is_set" = x ]; then
+    XRAY_LOG="$xray_log_override"
+    export XRAY_LOG
+  fi
+  if [ "$enable_security_is_set" = x ]; then
+    ENABLE_SECURITY="$enable_security_override"
+    export ENABLE_SECURITY
+  fi
   if [ "$enable_geoip_is_set" = x ]; then
     ENABLE_GEOIP="$enable_geoip_override"
     export ENABLE_GEOIP
+  elif grep -q '^ENABLE_GEOIP=' "$INSTALL_SETTINGS_FILE"; then
+    export ENABLE_GEOIP
   else
-    # Menu option 1 offers GeoIP setup again when the previous deployment skipped it.
     ENABLE_GEOIP=auto
     export ENABLE_GEOIP
   fi
@@ -864,39 +909,243 @@ update_script_and_deploy() {
     GEOIP_DB_PATH="$geoip_db_path_override"
     export GEOIP_DB_PATH
   fi
+  if [ "$enable_host_metrics_is_set" = x ]; then
+    ENABLE_HOST_METRICS="$enable_host_metrics_override"
+  elif grep -q '^ENABLE_HOST_METRICS=' "$INSTALL_SETTINGS_FILE"; then
+    : # Keep the explicit value loaded from the current settings file.
+  elif [ -n "${METRICS_URL:-}" ]; then
+    # Preserve the behavior of settings written before ENABLE_HOST_METRICS existed.
+    ENABLE_HOST_METRICS=true
+  else
+    ENABLE_HOST_METRICS=false
+  fi
+  export ENABLE_HOST_METRICS
+  if [ "$enable_security_traffic_is_set" = x ]; then
+    ENABLE_SECURITY_TRAFFIC="$enable_security_traffic_override"
+    export ENABLE_SECURITY_TRAFFIC
+  fi
   ALLOY_ACTION=install bash <(download_installer)
 }
 
-configure_xui_api() {
-  local current_url="" answer
-  if [ -r "$INSTALL_SETTINGS_FILE" ]; then
-    set +u
-    . "$INSTALL_SETTINGS_FILE"
-    set -u
-    current_url="${XUI_API_URL:-}"
+load_module_settings() {
+  [ -r "$INSTALL_SETTINGS_FILE" ] || die "未找到安装配置：$INSTALL_SETTINGS_FILE"
+  set +u
+  . "$INSTALL_SETTINGS_FILE"
+  set -u
+  ENABLE_XRAY="${ENABLE_XRAY:-false}"
+  ENABLE_SECURITY="${ENABLE_SECURITY:-false}"
+  ENABLE_GEOIP="${ENABLE_GEOIP:-false}"
+  ENABLE_SECURITY_TRAFFIC="${ENABLE_SECURITY_TRAFFIC:-false}"
+  if ! grep -q '^ENABLE_HOST_METRICS=' "$INSTALL_SETTINGS_FILE"; then
+    [ -n "${METRICS_URL:-}" ] && ENABLE_HOST_METRICS=true || ENABLE_HOST_METRICS=false
   fi
+}
 
-  printf '\n3x-ui API 流量采集配置\n'
+configure_metrics_endpoint() {
+  local answer current_url="${METRICS_URL:-}" current_username="${METRICS_USERNAME:-alloy-agent}"
+  printf '\n该模块需要 VictoriaMetrics Remote Write 服务。\n'
+  printf '地址格式：https://指标域名/api/v1/write\n'
   if [ -n "$current_url" ]; then
     printf '当前地址：%s\n' "$current_url"
+    read -rp "新地址（直接按 Enter 保留）: " answer
+    [ -n "$answer" ] && METRICS_URL="$answer"
   else
-    printf '当前状态：未启用\n'
+    read -rp "指标写入地址: " METRICS_URL
+    [ -n "$METRICS_URL" ] || { printf '未配置指标写入地址，无法启用。\n'; return 1; }
   fi
-  printf '\n请输入完整的 HTTPS API 地址。\n'
-  printf '格式：https://面板域名/面板路径/panel/api/inbounds/list\n'
-  printf '输入 0 可关闭，直接按 Enter 取消。\n'
-  read -rp "3x-ui API 地址: " answer
-  if [ -z "$answer" ]; then
-    printf '已取消。\n'
-    return 1
-  fi
-  if [ "$answer" = 0 ]; then
-    XUI_API_URL=""
-  else
-    XUI_API_URL="$answer"
-  fi
+  [[ "$METRICS_URL" =~ ^https://.+/api/v1/write$ ]] || { printf '地址无效：必须使用 HTTPS 并以 /api/v1/write 结尾。\n'; return 1; }
+  read -rp "指标认证用户名 [${current_username}]: " answer
+  METRICS_USERNAME="${answer:-$current_username}"
+  export METRICS_URL METRICS_USERNAME
+  printf '重新部署时将安全询问指标接口密码。\n'
+}
+
+read_module_action() {
+  local title="$1" current="$2"
+  printf '\n%s\n当前状态：%s\n\n1. 启用或更新配置\n2. 关闭\n0. 返回\n' "$title" "$(boolean_state "$current")"
+  read -rp "请选择 [0-2]: " MODULE_ACTION
+  case "$MODULE_ACTION" in
+    0|1|2) ;;
+    *) printf '无效选择。\n'; return 1 ;;
+  esac
+}
+
+configure_host_metrics() {
+  local current
+  load_module_settings
+  current="$ENABLE_HOST_METRICS"
+  read_module_action "主机指标配置" "$current" || return 1
+  case "$MODULE_ACTION" in
+    0) return 1 ;;
+    1)
+      configure_metrics_endpoint || return 1
+      ENABLE_HOST_METRICS=true
+      ;;
+    2)
+      ENABLE_HOST_METRICS=false
+      if [ "$ENABLE_SECURITY_TRAFFIC" != false ]; then
+        ENABLE_SECURITY_TRAFFIC=false
+        printf '提醒：SSH/UFW 聚合流量依赖主机指标，已同时关闭。\n'
+      fi
+      if [ -n "${XUI_API_URL:-}" ]; then
+        printf '提醒：3x-ui 流量仍使用当前 VictoriaMetrics 地址，地址将被保留。\n'
+      fi
+      ;;
+  esac
+  export ENABLE_HOST_METRICS ENABLE_SECURITY_TRAFFIC
+  update_script_and_deploy
+}
+
+configure_xray_logs() {
+  local answer current
+  load_module_settings
+  current="$ENABLE_XRAY"
+  read_module_action "Xray 日志配置" "$current" || return 1
+  case "$MODULE_ACTION" in
+    0) return 1 ;;
+    1)
+      printf 'Xray 日志需要可读取的 access.log，并通过 Loki 写入。\n'
+      if [ -n "${XRAY_LOG:-}" ]; then
+        printf '当前路径：%s\n' "$XRAY_LOG"
+        read -rp "新路径（直接按 Enter 保留）: " answer
+        [ -n "$answer" ] && XRAY_LOG="$answer"
+      else
+        read -rp "Xray access.log 路径: " XRAY_LOG
+      fi
+      [ -r "$XRAY_LOG" ] || { printf '无法读取 Xray 日志：%s\n请确认 3x-ui/Xray 已启用访问日志及路径权限。\n' "$XRAY_LOG"; return 1; }
+      ENABLE_XRAY=true
+      ;;
+    2) ENABLE_XRAY=false ;;
+  esac
+  export ENABLE_XRAY XRAY_LOG
+  update_script_and_deploy
+}
+
+configure_security_logs() {
+  local current
+  load_module_settings
+  current="$ENABLE_SECURITY"
+  read_module_action "安全日志配置（SSH、Fail2ban、UFW）" "$current" || return 1
+  case "$MODULE_ACTION" in
+    0) return 1 ;;
+    1)
+      printf '安全日志需要 systemd journal；Fail2ban/UFW 未安装时对应日志为空。\n'
+      if ! { [ -d /var/log/journal ] && [ -n "$(find /var/log/journal -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; } && [ ! -d /run/log/journal ]; then
+        printf '未找到 systemd journal，无法启用安全日志。\n'
+        return 1
+      fi
+      ENABLE_SECURITY=true
+      ;;
+    2)
+      ENABLE_SECURITY=false
+      if [ "$ENABLE_SECURITY_TRAFFIC" != false ]; then
+        ENABLE_SECURITY_TRAFFIC=false
+        printf '提醒：SSH/UFW 聚合流量依赖安全日志，已同时关闭。\n'
+      fi
+      ;;
+  esac
+  export ENABLE_SECURITY ENABLE_SECURITY_TRAFFIC
+  update_script_and_deploy
+}
+
+configure_geoip() {
+  local current
+  load_module_settings
+  current="$ENABLE_GEOIP"
+  read_module_action "GeoIP 归属解析配置" "$current" || return 1
+  case "$MODULE_ACTION" in
+    0) return 1 ;;
+    1)
+      if [ "$ENABLE_XRAY" != true ] && [ "$ENABLE_SECURITY" != true ]; then
+        printf '提醒：GeoIP 只增强 Xray 或安全日志；当前两个日志模块都未启用。\n'
+      fi
+      ENABLE_GEOIP=true
+      printf '如果本机没有 GeoLite2-City.mmdb，重新部署时会提示下载或选择文件。\n'
+      ;;
+    2) ENABLE_GEOIP=false ;;
+  esac
+  export ENABLE_GEOIP
+  update_script_and_deploy
+}
+
+configure_security_traffic() {
+  local current
+  load_module_settings
+  current="$ENABLE_SECURITY_TRAFFIC"
+  read_module_action "SSH/UFW 聚合流量配置" "$current" || return 1
+  case "$MODULE_ACTION" in
+    0) return 1 ;;
+    1)
+      [ "$ENABLE_HOST_METRICS" = true ] || { printf '无法启用：请先启用主机指标和 VictoriaMetrics 写入。\n'; return 1; }
+      [ "$ENABLE_SECURITY" = true ] || { printf '无法启用：请先启用安全日志。\n'; return 1; }
+      command -v systemctl >/dev/null 2>&1 || { printf '无法启用：系统需要 systemd。\n'; return 1; }
+      command -v iptables >/dev/null 2>&1 || { printf '无法启用：系统需要 iptables。\n'; return 1; }
+      command -v ufw >/dev/null 2>&1 || { printf '无法启用：系统需要安装 UFW。\n'; return 1; }
+      ufw status 2>/dev/null | grep -q '^Status: active$' || { printf '无法启用：请先启用 UFW。\n'; return 1; }
+      ENABLE_SECURITY_TRAFFIC=true
+      ;;
+    2) ENABLE_SECURITY_TRAFFIC=false ;;
+  esac
+  export ENABLE_SECURITY_TRAFFIC
+  update_script_and_deploy
+}
+
+configure_xui_api() {
+  local current_url answer
+  load_module_settings
+  current_url="${XUI_API_URL:-}"
+  printf '\n3x-ui API 流量采集配置\n当前状态：%s\n' "$([ -n "$current_url" ] && printf '[已启用]' || printf '[未启用]')"
+  [ -n "$current_url" ] && printf '当前地址：%s\n' "$current_url"
+  printf '\n1. 启用或更新配置\n2. 关闭\n0. 返回\n'
+  read -rp "请选择 [0-2]: " answer
+  case "$answer" in
+    0) return 1 ;;
+    1)
+      printf '3x-ui 流量需要 Panel API、API Token 和 VictoriaMetrics 写入服务。\n'
+      printf '格式：https://面板域名/面板路径/panel/api/inbounds/list\n'
+      if [ -n "$current_url" ]; then
+        read -rp "新 API 地址（直接按 Enter 保留）: " answer
+        [ -n "$answer" ] && XUI_API_URL="$answer"
+      else
+        read -rp "3x-ui API 地址: " XUI_API_URL
+        [ -n "$XUI_API_URL" ] || { printf '未配置 API 地址，无法启用。\n'; return 1; }
+      fi
+      [[ "$XUI_API_URL" =~ ^https://.+/panel/api/inbounds/list$ ]] || { printf '地址无效：必须使用 HTTPS 并以 /panel/api/inbounds/list 结尾。\n'; return 1; }
+      configure_metrics_endpoint || return 1
+      ;;
+    2) XUI_API_URL="" ;;
+    *) printf '无效选择。\n'; return 1 ;;
+  esac
   export XUI_API_URL
   update_script_and_deploy
+}
+
+configure_modules() {
+  local choice enable_host_metrics
+  while true; do
+    load_module_settings
+    enable_host_metrics="$ENABLE_HOST_METRICS"
+    printf '\n采集模块配置\n\n'
+    printf '1. 主机指标                    %s\n' "$(boolean_state "$enable_host_metrics")"
+    printf '2. Xray 日志                   %s\n' "$(boolean_state "$ENABLE_XRAY")"
+    printf '3. 安全日志（SSH/Fail2ban/UFW）%s\n' "$(boolean_state "$ENABLE_SECURITY")"
+    printf '4. GeoIP 归属解析              %s\n' "$(boolean_state "$ENABLE_GEOIP")"
+    printf '5. 3x-ui API 流量              %s\n' "$([ -n "${XUI_API_URL:-}" ] && printf '[已启用]' || printf '[未启用]')"
+    printf '6. SSH/UFW 聚合流量            %s\n' "$(boolean_state "$ENABLE_SECURITY_TRAFFIC")"
+    printf '0. 返回\n'
+    read -rp "请选择模块 [0-6]: " choice
+    case "$choice" in
+      0) return 1 ;;
+      1) configure_host_metrics && return 0 ;;
+      2) configure_xray_logs && return 0 ;;
+      3) configure_security_logs && return 0 ;;
+      4) configure_geoip && return 0 ;;
+      5) configure_xui_api && return 0 ;;
+      6) configure_security_traffic && return 0 ;;
+      *) printf '无效选择。\n' ;;
+    esac
+    pause
+  done
 }
 
 update_collector() {
@@ -946,7 +1195,7 @@ while true; do
 8. 更新 Alloy
 9. 卸载但保留采集器数据
 10. 完整卸载并删除所有数据
-11. 配置或关闭 3x-ui API 流量采集
+11. 配置采集模块
 MENU
   read -rp "请输入操作编号 [0-11]: " choice
   case "$choice" in
@@ -962,7 +1211,7 @@ MENU
     9) uninstall_keep_data; pause ;;
     10) uninstall_everything ;;
     11)
-      if configure_xui_api; then
+      if configure_modules; then
         exit 0
       else
         pause
