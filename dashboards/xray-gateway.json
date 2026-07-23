@@ -1,7 +1,7 @@
 {
   "uid": "xray-gateway",
   "title": "Xray 网关流量与连接",
-  "timezone": "browser",
+  "timezone": "Asia/Shanghai",
   "schemaVersion": 41,
   "version": 8,
   "refresh": "30s",

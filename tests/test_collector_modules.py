@@ -112,6 +112,7 @@ class CollectorModuleConfigurationTest(unittest.TestCase):
             "中央写入状态检测",
             "最近 10 分钟未发现写入错误",
             "认证失败（HTTP %s），请检查用户名和密码",
+            "中央服务未就绪或上游不可用（HTTP %s）",
             "Loki 最近数据",
             "VictoriaMetrics 最近数据",
             "最新样本约 %.0f 秒前",
@@ -125,6 +126,36 @@ class CollectorModuleConfigurationTest(unittest.TestCase):
         self.assertIn("curl --config -", self.script)
         self.assertIn("请输入操作编号 [0-12]", self.script)
         self.assertIn('[[ "$age" =~ ^[0-9]+([.][0-9]+)?$ ]]', self.script)
+        self.assertIn("grep -Eiv 'without error'", self.script)
+        self.assertIn('GLA_VERSION="2.4.0"', self.script)
+
+    def test_write_errors_have_chinese_diagnosis_and_source_checks(self):
+        for text in (
+            "中文诊断：认证失败",
+            "中文诊断：服务器拒绝访问",
+            "中文诊断：写入路径不存在",
+            "中文诊断：中央服务未就绪或反向代理上游不可用",
+            "中文诊断：域名解析失败",
+            "中文诊断：HTTPS 证书校验失败",
+            "中文诊断：目标端口拒绝连接",
+            "中文诊断：连接超时",
+            "本地采集源",
+            "在 3x-ui/Xray 中启用访问日志",
+            "文件可读，但最近 10 分钟没有更新",
+            "采集配置已生成，等待中央最新样本验证",
+        ):
+            self.assertIn(text, self.script)
+
+    def test_user_facing_times_are_utc8(self):
+        central = (ROOT / "deploy-xray-grafana-loki-alloy.sh").read_text(
+            encoding="utf-8"
+        )
+        for script in (self.script, central):
+            self.assertIn('location = "Asia/Shanghai"', script)
+            self.assertIn("TZ=UTC-8 date", script)
+            self.assertIn("UTC+8", script)
+        self.assertIn("format_alloy_log_utc8", self.script)
+        self.assertIn("format_service_log_utc8", central)
 
 
 if __name__ == "__main__":

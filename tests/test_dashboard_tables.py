@@ -104,6 +104,8 @@ class DashboardTableTest(unittest.TestCase):
     def test_dashboard_titles_and_instant_tables_are_compact(self):
         self.assertEqual(self.security["title"], "服务器安全事件与系统资源")
         self.assertEqual(self.gateway["title"], "Xray 网关流量与连接")
+        self.assertEqual(self.security["timezone"], "Asia/Shanghai")
+        self.assertEqual(self.gateway["timezone"], "Asia/Shanghai")
         self.assertEqual([item["name"] for item in self.gateway["templating"]["list"]], ["server"])
 
         for dashboard, panel_ids in ((self.security, (8, 9)), (self.gateway, (6, 7, 8))):
@@ -151,6 +153,7 @@ class DashboardTableTest(unittest.TestCase):
 
     def test_embedded_access_dashboard_uses_full_width_connection_tables(self):
         script = (ROOT / "deploy-xray-grafana-loki-alloy.sh").read_text(encoding="utf-8")
+        self.assertIn('"timezone": "Asia/Shanghai"', script)
         self.assertIn('"title": "匹配连接数"', script)
         self.assertIn('"gridPos": { "x": 0, "y": 18, "w": 24, "h": 7 }', script)
         self.assertIn('"gridPos": { "x": 0, "y": 25, "w": 24, "h": 7 }', script)

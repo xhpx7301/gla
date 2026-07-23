@@ -472,6 +472,7 @@ EOF
   stage.timestamp {
     source = "timestamp"
     format = "2006/01/02 15:04:05.000000"
+    location = "Asia/Shanghai"
   }
 
   stage.labels {
@@ -584,6 +585,7 @@ EOF
   stage.timestamp {
     source = "timestamp"
     format = "2006-01-02 15:04:05,000"
+    location = "Asia/Shanghai"
   }
 }
 
@@ -708,7 +710,7 @@ install_manager() {
 # GLA Alloy Collector Manager
 set -Eeuo pipefail
 
-GLA_VERSION="2.3.0"
+GLA_VERSION="2.4.0"
 STACK_DIR="${STACK_DIR:-/opt/xray-alloy-collector}"
 COMPOSE_FILE="$STACK_DIR/compose.yaml"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
@@ -815,6 +817,24 @@ print_setting() {
   printf '  %s %s\n' "$1：" "$2"
 }
 
+utc8_now() {
+  TZ=UTC-8 date '+%Y-%m-%d %H:%M:%S UTC+8'
+}
+
+format_alloy_log_utc8() {
+  local line timestamp converted prefix remainder
+  while IFS= read -r line; do
+    timestamp="$(printf '%s\n' "$line" | sed -n 's/.*\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]*Z\).*/\1/p')"
+    if [ -n "$timestamp" ] && converted="$(TZ=UTC-8 date -d "$timestamp" '+%Y-%m-%d %H:%M:%S UTC+8' 2>/dev/null)"; then
+      prefix="${line%%"$timestamp"*}"
+      remainder="${line#*"$timestamp"}"
+      printf '%s%s%s\n' "$prefix" "$converted" "$remainder"
+    else
+      printf '%s\n' "$line"
+    fi
+  done
+}
+
 compose() {
   [ -f "$COMPOSE_FILE" ] || die "采集器未安装：$STACK_DIR"
   if docker compose version >/dev/null 2>&1; then
@@ -856,10 +876,10 @@ show_logs() {
   printf '\n采集器日志\n\n1. Alloy\n2. 3x-ui API 流量采集\n0. 返回\n'
   read -rp "请选择服务: " choice
   case "$choice" in
-    1) compose logs -f --tail=100 alloy || true ;;
+    1) compose logs -f --tail=100 alloy 2>&1 | format_alloy_log_utc8 || true ;;
     2)
       if grep -q '^  xui-exporter:' "$COMPOSE_FILE" 2>/dev/null; then
-        compose logs -f --tail=100 xui-exporter || true
+        compose logs -f --tail=100 xui-exporter 2>&1 | format_alloy_log_utc8 || true
       else
         printf '3x-ui API 流量采集未启用。\n'
       fi
@@ -928,6 +948,7 @@ print_http_health() {
     200|204) printf '  %s：正常（HTTP %s）\n' "$label" "$status" ;;
     401|403) printf '  %s：认证失败（HTTP %s），请检查用户名和密码\n' "$label" "$status" ;;
     404) printf '  %s：路径不可用（HTTP 404），请检查反向代理是否转发完整路径\n' "$label" ;;
+    500|502|503|504) printf '  %s：中央服务未就绪或上游不可用（HTTP %s）\n' "$label" "$status" ;;
     000) printf '  %s：连接失败或超时\n' "$label" ;;
     *) printf '  %s：异常（HTTP %s）\n' "$label" "$status" ;;
   esac
@@ -935,12 +956,79 @@ print_http_health() {
 
 show_recent_write_errors() {
   local logs="$1" label="$2" component="$3" matched
-  matched="$(printf '%s\n' "$logs" | grep -F "$component" | grep -Ei '(^|[^0-9])(401|403)([^0-9]|$)|error|failed|timeout|refused|unauthorized|non-recoverable' | tail -n 3 || true)"
+  matched="$(printf '%s\n' "$logs" | grep -F "$component" | grep -Ei 'level=(error|warn)|(^|[^0-9])(401|403)([^0-9]|$)|failed|timeout|refused|unauthorized|non-recoverable|err=' | grep -Eiv 'without error' | tail -n 3 || true)"
   if [ -n "$matched" ]; then
     printf '  %s：发现最近写入异常\n' "$label"
-    printf '%s\n' "$matched" | sed 's/^/    /'
+    if printf '%s' "$matched" | grep -Eqi '(^|[^0-9])401([^0-9]|$)|unauthorized'; then
+      printf '    中文诊断：认证失败，请检查当前配置的用户名和重新部署时输入的密码。\n'
+    elif printf '%s' "$matched" | grep -Eqi '(^|[^0-9])403([^0-9]|$)|forbidden'; then
+      printf '    中文诊断：服务器拒绝访问，请检查 Basic Auth 权限、访问控制或来源 IP 限制。\n'
+    elif printf '%s' "$matched" | grep -Eqi '(^|[^0-9])404([^0-9]|$)'; then
+      printf '    中文诊断：写入路径不存在，请检查 Loki/指标 URL 和反向代理路径。\n'
+    elif printf '%s' "$matched" | grep -Eqi '(^|[^0-9])429([^0-9]|$)'; then
+      printf '    中文诊断：中央服务限流，请检查反向代理限速或中央服务负载。\n'
+    elif printf '%s' "$matched" | grep -Eqi '(^|[^0-9])(500|502|503|504)([^0-9]|$)'; then
+      printf '    中文诊断：中央服务未就绪或反向代理上游不可用，请检查中央容器和代理目标。\n'
+    elif printf '%s' "$matched" | grep -Eqi 'no such host|name resolution|dns'; then
+      printf '    中文诊断：域名解析失败，请检查 DNS 和写入地址域名。\n'
+    elif printf '%s' "$matched" | grep -Eqi 'x509|certificate|tls|ssl'; then
+      printf '    中文诊断：HTTPS 证书校验失败，请检查证书域名、有效期和证书链。\n'
+    elif printf '%s' "$matched" | grep -Eqi 'connection refused|connect: refused'; then
+      printf '    中文诊断：目标端口拒绝连接，请检查中央服务是否运行及反向代理端口。\n'
+    elif printf '%s' "$matched" | grep -Eqi 'timeout|deadline exceeded'; then
+      printf '    中文诊断：连接超时，请检查采集服务器出站网络、DNS、防火墙和代理响应。\n'
+    else
+      printf '    中文诊断：写入组件报告异常，请结合下面的原始信息排查。\n'
+    fi
+    printf '    原始信息（最近最多 3 条）：\n'
+    printf '%s\n' "$matched" | format_alloy_log_utc8 | sed 's/^/      /'
   else
     printf '  %s：最近 10 分钟未发现写入错误\n' "$label"
+  fi
+}
+
+show_local_source_status() {
+  local journal_path
+  printf '\n本地采集源\n'
+  if [ "$ENABLE_XRAY" = true ]; then
+    if [ ! -r "${XRAY_LOG:-}" ]; then
+      printf '  Xray 日志：异常，文件不存在或不可读：%s\n' "${XRAY_LOG:-未配置}"
+      printf '    处理建议：在 3x-ui/Xray 中启用访问日志，并确认日志路径和读取权限。\n'
+    elif find "$XRAY_LOG" -mmin -10 -print -quit 2>/dev/null | grep -q .; then
+      printf '  Xray 日志：文件可读，最近 10 分钟有更新\n'
+    else
+      printf '  Xray 日志：文件可读，但最近 10 分钟没有更新\n'
+      printf '    说明：没有 Xray 访问流量时可能正常；有流量时请检查 3x-ui/Xray 是否生成访问日志。\n'
+    fi
+  else
+    printf '  Xray 日志：未启用\n'
+  fi
+
+  if [ "$ENABLE_SECURITY" = true ]; then
+    journal_path="$(current_journal_path)"
+    if [ "$journal_path" = '未检测到' ]; then
+      printf '  安全日志：异常，未检测到 systemd journal\n'
+    else
+      printf '  安全日志：Journal 可用（%s）；无安全事件时可以没有新日志\n' "$journal_path"
+    fi
+  else
+    printf '  安全日志：未启用\n'
+  fi
+
+  if [ "$ENABLE_HOST_METRICS" = true ]; then
+    if grep -q '^prometheus.scrape "host"' "$STACK_DIR/alloy/config.alloy" 2>/dev/null; then
+      printf '  主机指标：采集配置已生成，等待中央最新样本验证\n'
+    else
+      printf '  主机指标：异常，已启用但 Alloy 配置中没有 host scrape\n'
+    fi
+  else
+    printf '  主机指标：未启用\n'
+  fi
+
+  if [ -n "${XUI_API_URL:-}" ]; then
+    printf '  3x-ui API 指标：%s\n' "$(container_state gla-xui-exporter)"
+  else
+    printf '  3x-ui API 指标：未启用\n'
   fi
 }
 
@@ -953,7 +1041,7 @@ check_loki_write() {
   ready_url="${LOKI_URL%/loki/api/v1/push}/ready"
   authenticated_request "$ready_url" "${LOKI_USERNAME:-}" "$password" || true
   print_http_health "Loki 连接与认证" "$AUTH_HTTP_STATUS"
-  [ "$AUTH_HTTP_STATUS" = 200 ] || return
+  [ "$AUTH_HTTP_STATUS" = 200 ] || return 0
 
   query_url="${LOKI_URL%/push}/query_range"
   authenticated_request "$query_url" "${LOKI_USERNAME:-}" "$password" \
@@ -981,7 +1069,7 @@ check_metrics_write() {
   ready_url="${METRICS_URL%/api/v1/write}/-/healthy"
   authenticated_request "$ready_url" "${METRICS_USERNAME:-}" "$password" || true
   print_http_health "VictoriaMetrics 连接与认证" "$AUTH_HTTP_STATUS"
-  [ "$AUTH_HTTP_STATUS" = 200 ] || return
+  [ "$AUTH_HTTP_STATUS" = 200 ] || return 0
 
   if [ "$ENABLE_HOST_METRICS" = true ]; then
     query="time() - max(timestamp(node_time_seconds{server=\"${SERVER_NAME:-}\"}))"
@@ -1008,6 +1096,7 @@ check_central_write_status() {
   local collector_state recent_logs
   load_module_settings
   printf '\n中央写入状态检测\n\n'
+  print_setting "检测时间" "$(utc8_now)"
   collector_state="$(container_state xray-alloy)"
   print_setting "Alloy 容器" "$collector_state"
   if [ "$collector_state" != '[运行中]' ]; then
@@ -1015,6 +1104,7 @@ check_central_write_status() {
     return
   fi
 
+  show_local_source_status
   recent_logs="$(docker logs --since 10m xray-alloy 2>&1 || true)"
   printf '\n最近写入错误\n'
   show_recent_write_errors "$recent_logs" "Loki" "loki.write.central"

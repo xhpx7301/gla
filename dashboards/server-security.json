@@ -1,7 +1,7 @@
 {
   "uid": "server-security",
   "title": "服务器安全事件与系统资源",
-  "timezone": "browser",
+  "timezone": "Asia/Shanghai",
   "schemaVersion": 41,
   "version": 19,
   "refresh": "30s",

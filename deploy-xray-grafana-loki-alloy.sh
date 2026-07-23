@@ -528,6 +528,7 @@ ${GEOIP_XRAY_STAGES}
   stage.timestamp {
     source = "timestamp"
     format = "2006/01/02 15:04:05.000000"
+    location = "Asia/Shanghai"
   }
 
   stage.labels {
@@ -589,6 +590,7 @@ ${GEOIP_FAIL2BAN_STAGES}
   stage.timestamp {
     source = "timestamp"
     format = "2006-01-02 15:04:05,000"
+    location = "Asia/Shanghai"
   }
 }
 
@@ -683,7 +685,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
 {
   "uid": "xray-access",
   "title": "Xray 访问日志",
-  "timezone": "browser",
+  "timezone": "Asia/Shanghai",
   "schemaVersion": 39,
   "version": 15,
   "refresh": "30s",
@@ -925,7 +927,7 @@ install_manager() {
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-GLA_VERSION="2.1.0"
+GLA_VERSION="2.1.1"
 STACK_DIR="${STACK_DIR:-/opt/xray-log-dashboard}"
 COMPOSE_FILE="$STACK_DIR/compose.yaml"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
@@ -949,6 +951,20 @@ container_state() {
     created|paused) printf '[%s]' "$state" ;;
     *) printf '[未安装]' ;;
   esac
+}
+
+format_service_log_utc8() {
+  local line timestamp converted prefix remainder
+  while IFS= read -r line; do
+    timestamp="$(printf '%s\n' "$line" | sed -n 's/.*\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]*Z\).*/\1/p')"
+    if [ -n "$timestamp" ] && converted="$(TZ=UTC-8 date -d "$timestamp" '+%Y-%m-%d %H:%M:%S UTC+8' 2>/dev/null)"; then
+      prefix="${line%%"$timestamp"*}"
+      remainder="${line#*"$timestamp"}"
+      printf '%s%s%s\n' "$prefix" "$converted" "$remainder"
+    else
+      printf '%s\n' "$line"
+    fi
+  done
 }
 
 xui_state() {
@@ -1013,13 +1029,13 @@ show_logs() {
   printf '\n服务日志\n\n1. Grafana\n2. Loki\n3. VictoriaMetrics\n4. Alloy\n5. 本机 3x-ui 流量采集\n0. 返回\n'
   read -rp "请选择服务: " choice
   case "$choice" in
-    1) compose logs -f --tail=100 grafana || true ;;
-    2) compose logs -f --tail=100 loki || true ;;
-    3) compose logs -f --tail=100 victoriametrics || true ;;
-    4) compose logs -f --tail=100 alloy || true ;;
+    1) compose logs -f --tail=100 grafana 2>&1 | format_service_log_utc8 || true ;;
+    2) compose logs -f --tail=100 loki 2>&1 | format_service_log_utc8 || true ;;
+    3) compose logs -f --tail=100 victoriametrics 2>&1 | format_service_log_utc8 || true ;;
+    4) compose logs -f --tail=100 alloy 2>&1 | format_service_log_utc8 || true ;;
     5)
       if grep -Eq '^COMPOSE_PROFILES=.*xui' "$STACK_DIR/.env" 2>/dev/null; then
-        compose logs -f --tail=100 xui-exporter || true
+        compose logs -f --tail=100 xui-exporter 2>&1 | format_service_log_utc8 || true
       else
         printf '3x-ui API 流量采集未启用。\n'
       fi
