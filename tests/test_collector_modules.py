@@ -41,7 +41,7 @@ class CollectorModuleConfigurationTest(unittest.TestCase):
         )
 
     def test_manager_exposes_all_collection_modules(self):
-        self.assertIn("11. 配置采集模块", self.script)
+        self.assertIn("3. 配置采集模块", self.script)
         self.assertIn("configure_modules()", self.script)
         for module in (
             "主机指标",
@@ -52,6 +52,23 @@ class CollectorModuleConfigurationTest(unittest.TestCase):
             "SSH/UFW 聚合流量",
         ):
             self.assertIn(module, self.script)
+
+        main_start = self.script.index("2. 启动采集器")
+        main_modules = self.script.index("3. 配置采集模块")
+        main_stop = self.script.index("4. 停止采集器")
+        self.assertLess(main_start, main_modules)
+        self.assertLess(main_modules, main_stop)
+
+        module_labels = (
+            "1. Xray 日志",
+            "2. 安全日志（SSH/Fail2ban/UFW）",
+            "3. 主机指标",
+            "4. GeoIP 归属解析",
+            "5. SSH/UFW 聚合流量",
+            "6. 3x-ui API 流量",
+        )
+        positions = [self.script.index(label) for label in module_labels]
+        self.assertEqual(positions, sorted(positions))
 
     def test_dependency_failures_are_explained_before_redeploy(self):
         for reminder in (

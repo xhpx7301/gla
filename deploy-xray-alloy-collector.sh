@@ -708,7 +708,7 @@ install_manager() {
 # GLA Alloy Collector Manager
 set -Eeuo pipefail
 
-GLA_VERSION="2.2.0"
+GLA_VERSION="2.2.1"
 STACK_DIR="${STACK_DIR:-/opt/xray-alloy-collector}"
 COMPOSE_FILE="$STACK_DIR/compose.yaml"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
@@ -1126,22 +1126,22 @@ configure_modules() {
     load_module_settings
     enable_host_metrics="$ENABLE_HOST_METRICS"
     printf '\n采集模块配置\n\n'
-    printf '1. 主机指标                    %s\n' "$(boolean_state "$enable_host_metrics")"
-    printf '2. Xray 日志                   %s\n' "$(boolean_state "$ENABLE_XRAY")"
-    printf '3. 安全日志（SSH/Fail2ban/UFW）%s\n' "$(boolean_state "$ENABLE_SECURITY")"
+    printf '1. Xray 日志                   %s\n' "$(boolean_state "$ENABLE_XRAY")"
+    printf '2. 安全日志（SSH/Fail2ban/UFW）%s\n' "$(boolean_state "$ENABLE_SECURITY")"
+    printf '3. 主机指标                    %s\n' "$(boolean_state "$enable_host_metrics")"
     printf '4. GeoIP 归属解析              %s\n' "$(boolean_state "$ENABLE_GEOIP")"
-    printf '5. 3x-ui API 流量              %s\n' "$([ -n "${XUI_API_URL:-}" ] && printf '[已启用]' || printf '[未启用]')"
-    printf '6. SSH/UFW 聚合流量            %s\n' "$(boolean_state "$ENABLE_SECURITY_TRAFFIC")"
+    printf '5. SSH/UFW 聚合流量            %s\n' "$(boolean_state "$ENABLE_SECURITY_TRAFFIC")"
+    printf '6. 3x-ui API 流量              %s\n' "$([ -n "${XUI_API_URL:-}" ] && printf '[已启用]' || printf '[未启用]')"
     printf '0. 返回\n'
     read -rp "请选择模块 [0-6]: " choice
     case "$choice" in
       0) return 1 ;;
-      1) configure_host_metrics && return 0 ;;
-      2) configure_xray_logs && return 0 ;;
-      3) configure_security_logs && return 0 ;;
+      1) configure_xray_logs && return 0 ;;
+      2) configure_security_logs && return 0 ;;
+      3) configure_host_metrics && return 0 ;;
       4) configure_geoip && return 0 ;;
-      5) configure_xui_api && return 0 ;;
-      6) configure_security_traffic && return 0 ;;
+      5) configure_security_traffic && return 0 ;;
+      6) configure_xui_api && return 0 ;;
       *) printf '无效选择。\n' ;;
     esac
     pause
@@ -1187,36 +1187,36 @@ while true; do
 0. 退出
 1. 安装或更新脚本并重新部署
 2. 启动采集器
-3. 停止采集器
-4. 重启采集器
-5. 查看采集器状态与磁盘占用
-6. 查看采集器日志
-7. 查看采集器设置
-8. 更新 Alloy
-9. 卸载但保留采集器数据
-10. 完整卸载并删除所有数据
-11. 配置采集模块
+3. 配置采集模块
+4. 停止采集器
+5. 重启采集器
+6. 查看采集器状态与磁盘占用
+7. 查看采集器日志
+8. 查看采集器设置
+9. 更新 Alloy
+10. 卸载但保留采集器数据
+11. 完整卸载并删除所有数据
 MENU
   read -rp "请输入操作编号 [0-11]: " choice
   case "$choice" in
     0) exit 0 ;;
     1) update_script_and_deploy; exit $? ;;
     2) compose up -d; pause ;;
-    3) compose stop; pause ;;
-    4) compose restart; pause ;;
-    5) show_status; pause ;;
-    6) show_logs; pause ;;
-    7) show_config; pause ;;
-    8) update_collector; pause ;;
-    9) uninstall_keep_data; pause ;;
-    10) uninstall_everything ;;
-    11)
+    3)
       if configure_modules; then
         exit 0
       else
         pause
       fi
       ;;
+    4) compose stop; pause ;;
+    5) compose restart; pause ;;
+    6) show_status; pause ;;
+    7) show_logs; pause ;;
+    8) show_config; pause ;;
+    9) update_collector; pause ;;
+    10) uninstall_keep_data; pause ;;
+    11) uninstall_everything ;;
     *) printf '无效选择。\n'; pause ;;
   esac
 done
