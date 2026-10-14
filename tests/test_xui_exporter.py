@@ -63,8 +63,8 @@ class ExporterTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as send, \
                 mock.patch.object(EXPORTER.TelegramBot, "report_time", return_value="test-time"), \
                 mock.patch.object(panel, "last_ip_for_client", return_value={
-                    "ip": "203.0.113.1", "time": "2026-10-14 08:30:00"}), \
-                mock.patch.object(EXPORTER, "ip_attribution", return_value="中国深圳 / 中国电信"):
+                    "ip": "203.0.113.1", "time": "2026-10-14 16:30:00（UTC+8）"}), \
+                mock.patch.object(EXPORTER, "ip_attribution", return_value=("中国深圳", "中国电信")):
             bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42],
                                         "notification_cooldown_seconds": 600}, [panel], directory)
             try:
@@ -83,17 +83,20 @@ class ExporterTest(unittest.TestCase):
                 message = send.call_args.args[2]["text"]
                 self.assertIn("🔗 关联入站：\n  • VLESS-443（端口 443 / vless）", message)
                 self.assertIn("🌐 最近记录 IP：203.0.113.1", message)
-                self.assertIn("📍 归属地/网络：中国深圳 / 中国电信", message)
-                self.assertIn("🕒 IP 记录时间：2026-10-14 08:30:00", message)
+                self.assertIn("📍 归属地：中国深圳\n🏢 网络组织：中国电信", message)
+                self.assertIn("🕒 IP 记录时间：2026-10-14 16:30:00（UTC+8）", message)
             finally:
                 bot.db.close()
 
     def test_ip_log_formats_from_supported_panel_versions_are_normalized(self):
         self.assertEqual(EXPORTER.latest_ip_record(["203.0.113.1 (2026-10-14 08:30:00)"]),
-                         {"ip": "203.0.113.1", "time": "2026-10-14 08:30:00"})
+                         {"ip": "203.0.113.1", "time": "2026-10-14 16:30:00（UTC+8）"})
         self.assertEqual(EXPORTER.latest_ip_record([
             {"ip": "2001:4860:4860::8888", "time": "2026-10-14T08:30:00Z", "node": "node-a"}]),
-            {"ip": "2001:4860:4860::8888", "time": "2026-10-14T08:30:00Z"})
+            {"ip": "2001:4860:4860::8888", "time": "2026-10-14 16:30:00（UTC+8）"})
+        self.assertEqual(EXPORTER.latest_ip_record([
+            {"ip": "203.0.113.2", "time": "2026-10-14T08:30:00-04:00"}]),
+            {"ip": "203.0.113.2", "time": "2026-10-14 20:30:00（UTC+8）"})
         self.assertIsNone(EXPORTER.latest_ip_record(["no valid IP"] ))
 
     def test_ip_attribution_uses_local_city_and_asn_records(self):
@@ -102,15 +105,22 @@ class ExporterTest(unittest.TestCase):
                 return {"country": {"iso_code": "CN"}, "city": {"names": {"zh-CN": "深圳"}}}
             return {"autonomous_system_number": 4134, "autonomous_system_organization": "CHINANET"}
         with mock.patch.object(EXPORTER, "mmdb_record", side_effect=lookup):
-            self.assertEqual(EXPORTER.ip_attribution("203.0.113.1"), "中国深圳 / 中国电信")
+            self.assertEqual(EXPORTER.ip_attribution("203.0.113.1"), ("中国深圳", "中国电信"))
         with mock.patch.object(EXPORTER, "mmdb_record", side_effect=[
                 {}, {"autonomous_system_number": 4837, "autonomous_system_organization": "CHINA169"}]):
-            self.assertEqual(EXPORTER.ip_attribution("203.0.113.1"), "中国大陆 / 中国联通")
+            self.assertEqual(EXPORTER.ip_attribution("203.0.113.1"), ("中国大陆", "中国联通"))
         with mock.patch.object(EXPORTER, "mmdb_record", side_effect=[
                 {"country": {"iso_code": "US", "names": {"en": "United States"}},
                  "city": {"names": {"en": "Los Angeles"}}},
                 {"autonomous_system_organization": "Example Networks"}]):
-            self.assertEqual(EXPORTER.ip_attribution("203.0.113.1"), "美国·Los Angeles / Example Networks")
+            self.assertEqual(EXPORTER.ip_attribution("203.0.113.1"), ("美国·Los Angeles", "Example Networks"))
+        with mock.patch.object(EXPORTER, "mmdb_record", side_effect=[
+                {"country": {"iso_code": "US", "names": {"en": "United States"}}},
+                {"autonomous_system_organization": "Alibaba (US) Technology Co., Ltd."}]) as lookup:
+            location, network = EXPORTER.ip_attribution("203.0.113.1")
+            self.assertEqual(location, "美国")
+            self.assertEqual(network, "Alibaba (US) Technology Co., Ltd.")
+            self.assertEqual(lookup.call_count, 2)
 
     def test_worker_fetches_latest_client_ip_from_panel_api(self):
         worker = EXPORTER.PanelWorker({"name": "node-a", "url": "https://panel.example.com/panel/api/inbounds/list",
@@ -119,7 +129,7 @@ class ExporterTest(unittest.TestCase):
                 mock.patch.object(EXPORTER, "request_json", return_value=[
                     {"ip": "198.51.100.4", "time": "2026-10-14T10:00:00Z"}]) as request:
             self.assertEqual(worker.last_ip_for_client("alice@example.com"),
-                             {"ip": "198.51.100.4", "time": "2026-10-14T10:00:00Z"})
+                             {"ip": "198.51.100.4", "time": "2026-10-14 18:00:00（UTC+8）"})
         self.assertTrue(request.call_args.args[0].endswith("/clients/ips/alice%40example.com"))
         self.assertEqual(request.call_args.args[1], "POST")
 
@@ -534,7 +544,8 @@ class ExporterTest(unittest.TestCase):
                 bot.handle_message(dict(message, text="/online_notify"))
                 settings = request.call_args.args[2]
                 keyboard = json.loads(settings["reply_markup"])
-                self.assertEqual(keyboard["inline_keyboard"][1][0]["callback_data"], "onlinenotify:test")
+                self.assertEqual(keyboard["inline_keyboard"][1][0]["callback_data"], "onlinenotify:groups")
+                self.assertEqual(keyboard["inline_keyboard"][3][0]["callback_data"], "onlinenotify:test")
                 bot.handle_callback({"id": "add", "from": {"id": 42}, "message": message,
                                     "data": "onlinenotify:add"})
                 picker = json.loads(request.call_args.args[2]["reply_markup"])
@@ -552,6 +563,81 @@ class ExporterTest(unittest.TestCase):
                 self.assertIn("最近记录 IP：203.0.113.5", text)
                 self.assertEqual(bot.db.execute("SELECT COUNT(*) FROM notification_cooldowns").fetchone(), (0,))
                 self.assertEqual(bot.db.execute("SELECT COUNT(*) FROM online_confirmations").fetchone(), (0,))
+            finally:
+                bot.db.close()
+
+    def test_online_notification_toggle_persists_and_only_pauses_selected_chat(self):
+        worker = EXPORTER.PanelWorker({"name": "node-a"})
+        clients = [{"email": "alice", "group": "shared", "traffic": {}}]
+        config = {"token": "bot-token", "allowed_user_ids": [42], "notification_cooldown_seconds": 0}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
+            bot = EXPORTER.TelegramBot(config, [worker], directory)
+            try:
+                with bot.db:
+                    bot.db.executemany("INSERT INTO subscriptions VALUES (?, 'shared')", [(420,), (421,)])
+                self.assertIn("上线通知：开启", bot.online_notify_keyboard(420)[0])
+                bot.handle_callback({"id": "off", "from": {"id": 42},
+                                     "message": {"chat": {"id": 420}}, "data": "onlinenotify:toggle:0"})
+                self.assertIn("上线通知：关闭", request.call_args.args[2]["text"])
+                bot.db.close()
+                bot = EXPORTER.TelegramBot(config, [worker], directory)
+                self.assertIn("上线通知：关闭", bot.online_notify_keyboard(420)[0])
+                self.assertEqual(bot.db.execute("SELECT group_name FROM subscriptions WHERE chat_id=420").fetchone(),
+                                 ("shared",))
+
+                def sample(timestamp, online):
+                    with mock.patch.object(EXPORTER.time, "time", return_value=timestamp):
+                        worker.metrics = EXPORTER.render_metrics("node-a", [], ["alice"] if online else [], clients)
+                    bot.process_online()
+
+                request.reset_mock()
+                sample(1000, False)
+                sample(1030, True)
+                sample(1060, True)
+                self.assertEqual([call.args[2]["chat_id"] for call in request.call_args_list], [421])
+                self.assertIsNone(bot.db.execute(
+                    "SELECT notified_at FROM notification_cooldowns WHERE chat_id=420").fetchone())
+                bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/online_notify on"})
+                request.reset_mock()
+                sample(1090, True)  # Enabling does not replay an already confirmed client.
+                request.assert_not_called()
+                sample(1120, False)
+                sample(1150, True)
+                sample(1180, True)
+                self.assertEqual({call.args[2]["chat_id"] for call in request.call_args_list}, {420, 421})
+            finally:
+                bot.db.close()
+
+    def test_notification_group_views_and_my_subscriptions_are_separate(self):
+        config = {"token": "bot-token", "allowed_user_ids": [42]}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
+            bot = EXPORTER.TelegramBot(config, [], directory)
+            try:
+                with bot.db:
+                    bot.db.execute("INSERT INTO subscriptions VALUES (420,'online-group')")
+                    bot.db.execute("INSERT INTO online_notify_settings VALUES (420,0)")
+                    bot.db.execute("INSERT INTO traffic_notify_groups VALUES (420,'traffic-group')")
+                    bot.db.execute("INSERT INTO traffic_notify_settings VALUES (420,1,'20:00')")
+                for prefix, expected, excluded, keyboard in (
+                        ("onlinenotify", "online-group", "traffic-group", bot.online_notify_keyboard(420)[1]),
+                        ("trafficnotify", "traffic-group", "online-group", bot.traffic_notify_keyboard(420)[1])):
+                    actions = [button["callback_data"] for row in keyboard["inline_keyboard"] for button in row]
+                    self.assertLess(actions.index(prefix + ":groups"), actions.index(prefix + ":add"))
+                    self.assertLess(actions.index(prefix + ":groups"), actions.index(prefix + ":remove"))
+                    bot.handle_callback({"id": prefix, "from": {"id": 42},
+                                         "message": {"chat": {"id": 420}}, "data": prefix + ":groups"})
+                    text = request.call_args.args[2]["text"]
+                    self.assertIn(expected, text)
+                    self.assertNotIn(excluded, text)
+                bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/watches"})
+                text = request.call_args.args[2]["text"]
+                self.assertIn("上线通知：关闭\n  online-group", text)
+                self.assertIn("流量通知：开启\n  traffic-group", text)
+                request.reset_mock()
+                bot.handle_callback({"id": "unauthorized", "from": {"id": 99},
+                                     "message": {"chat": {"id": 420}}, "data": "onlinenotify:toggle:1"})
+                self.assertEqual(bot.db.execute("SELECT enabled FROM online_notify_settings").fetchone(), (0,))
+                self.assertEqual(request.call_args.args[1], "answerCallbackQuery")
             finally:
                 bot.db.close()
 

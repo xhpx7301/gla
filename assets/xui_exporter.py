@@ -243,6 +243,7 @@ class TelegramBot:
         self.db = sqlite3.connect(str(Path(state_dir) / "telegram.sqlite"), timeout=10, check_same_thread=False)
         self.db.execute("CREATE TABLE IF NOT EXISTS state (server TEXT, email TEXT, group_name TEXT, online INTEGER, PRIMARY KEY(server,email))")
         self.db.execute("CREATE TABLE IF NOT EXISTS subscriptions (chat_id INTEGER, group_name TEXT, PRIMARY KEY(chat_id,group_name))")
+        self.db.execute("CREATE TABLE IF NOT EXISTS online_notify_settings (chat_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1)")
         self.db.execute("CREATE TABLE IF NOT EXISTS notification_cooldowns (chat_id INTEGER, server TEXT, email TEXT, notified_at REAL NOT NULL, PRIMARY KEY(chat_id,server,email))")
         self.db.execute("CREATE TABLE IF NOT EXISTS online_confirmations (server TEXT, email TEXT, last_sample_at REAL NOT NULL, consecutive_online INTEGER NOT NULL, PRIMARY KEY(server,email))")
         self.db.execute("CREATE TABLE IF NOT EXISTS traffic_notify_settings (chat_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, notify_time TEXT NOT NULL DEFAULT '20:00')")
@@ -371,9 +372,10 @@ class TelegramBot:
                         [{"text": "🔔 开启通知" if not enabled else "🔕 关闭通知",
                           "callback_data": f"trafficnotify:toggle:{0 if enabled else 1}"}],
                         [{"text": f"🕒 修改时间（{notify_time}）", "callback_data": "trafficnotify:time"}],
-                        [{"text": "🧪 发送测试通知", "callback_data": "trafficnotify:test"}],
-                        [{"text": "➕ 添加分组", "callback_data": "trafficnotify:add"},
+                        [{"text": "📋 订阅分组", "callback_data": "trafficnotify:groups"}],
+                        [{"text": "➕ 新增分组", "callback_data": "trafficnotify:add"},
                          {"text": "➖ 移除分组", "callback_data": "trafficnotify:remove"}],
+                        [{"text": "🧪 发送测试通知", "callback_data": "trafficnotify:test"}],
                     ]})
 
     def send_traffic_notify_settings(self, chat_id, prefix=""):
@@ -388,7 +390,7 @@ class TelegramBot:
         groups = [row[0] for row in self.db.execute(
             "SELECT group_name FROM traffic_notify_groups WHERE chat_id=? ORDER BY group_name", (chat_id,))]
         if not groups:
-            self.send(chat_id, "🧪 流量通知测试\n\n尚未设置通知分组，请先添加分组。")
+            self.send(chat_id, "🧪 流量通知测试\n\n尚未设置通知分组，请先新增分组。")
             return
         if not servers_up:
             self.send(chat_id, "🧪 流量通知测试\n\n⚠️ 当前没有可用面板，暂时无法获取流量数据。")
@@ -417,6 +419,8 @@ class TelegramBot:
     def online_notify_keyboard(self, chat_id):
         groups = [item[0] for item in self.db.execute(
             "SELECT group_name FROM subscriptions WHERE chat_id=? ORDER BY group_name", (chat_id,))]
+        setting = self.db.execute("SELECT enabled FROM online_notify_settings WHERE chat_id=?", (chat_id,)).fetchone()
+        enabled = bool(setting[0]) if setting is not None else bool(groups)
         cooldown = self.notification_cooldown_seconds
         if cooldown == 0:
             cooldown_text = "关闭"
@@ -424,11 +428,14 @@ class TelegramBot:
             cooldown_text = f"{cooldown // 60} 分钟"
         else:
             cooldown_text = f"{cooldown} 秒"
-        return (f"🔔 上线通知：{'已开启' if groups else '未设置'}\n"
+        return (f"🔔 上线通知：{'开启' if enabled else '关闭'}\n"
                 f"👥 订阅分组：{'、'.join(groups) if groups else '未设置'}\n"
                 f"⏱️ 通知冷却：{cooldown_text}", {
                     "inline_keyboard": [
-                        [{"text": "➕ 添加分组", "callback_data": "onlinenotify:add"},
+                        [{"text": "🔔 开启通知" if not enabled else "🔕 关闭通知",
+                          "callback_data": f"onlinenotify:toggle:{0 if enabled else 1}"}],
+                        [{"text": "📋 订阅分组", "callback_data": "onlinenotify:groups"}],
+                        [{"text": "➕ 新增分组", "callback_data": "onlinenotify:add"},
                          {"text": "➖ 移除分组", "callback_data": "onlinenotify:remove"}],
                         [{"text": "🧪 发送测试通知", "callback_data": "onlinenotify:test"}],
                     ]})
@@ -437,12 +444,46 @@ class TelegramBot:
         text, keyboard = self.online_notify_keyboard(chat_id)
         self.send(chat_id, prefix + text, keyboard)
 
+    def send_online_notify_groups(self, chat_id):
+        groups = [row[0] for row in self.db.execute(
+            "SELECT group_name FROM subscriptions WHERE chat_id=? ORDER BY group_name", (chat_id,))]
+        text = ("📋 上线通知订阅分组\n\n"
+                + ("\n".join(f"🔔 {group}" for group in groups) if groups else "📭 暂无上线通知订阅分组"))
+        self.send(chat_id, text, self.online_notify_keyboard(chat_id)[1])
+
+    def send_traffic_notify_groups(self, chat_id):
+        groups = [row[0] for row in self.db.execute(
+            "SELECT group_name FROM traffic_notify_groups WHERE chat_id=? ORDER BY group_name", (chat_id,))]
+        text = ("📋 流量通知订阅分组\n\n"
+                + ("\n".join(f"📊 {group}" for group in groups) if groups else "📭 暂无流量通知订阅分组"))
+        self.send(chat_id, text, self.traffic_notify_keyboard(chat_id)[1])
+
+    def send_my_subscriptions(self, chat_id):
+        online = [row[0] for row in self.db.execute(
+            "SELECT group_name FROM subscriptions WHERE chat_id=? ORDER BY group_name", (chat_id,))]
+        traffic = [row[0] for row in self.db.execute(
+            "SELECT group_name FROM traffic_notify_groups WHERE chat_id=? ORDER BY group_name", (chat_id,))]
+        online_setting = self.db.execute(
+            "SELECT enabled FROM online_notify_settings WHERE chat_id=?", (chat_id,)).fetchone()
+        traffic_setting = self.db.execute(
+            "SELECT enabled FROM traffic_notify_settings WHERE chat_id=?", (chat_id,)).fetchone()
+        online_enabled = bool(online_setting[0]) if online_setting is not None else bool(online)
+        traffic_enabled = bool(traffic_setting[0]) if traffic_setting is not None else False
+        text = ("📋 我的订阅\n\n"
+                f"🔔 上线通知：{'开启' if online_enabled else '关闭'}\n"
+                f"  {'、'.join(online) if online else '暂无分组'}\n\n"
+                f"📊 流量通知：{'开启' if traffic_enabled else '关闭'}\n"
+                f"  {'、'.join(traffic) if traffic else '暂无分组'}")
+        self.send(chat_id, text)
+
     def online_notification_text(self, item, test=False):
         worker = next((worker for worker in self.workers
                        if worker.panel["name"] == item["server"]), None)
         ip_record = worker.last_ip_for_client(item["email"]) if worker else None
         if ip_record:
-            ip_text = f"🌐 最近记录 IP：{ip_record['ip']}\n📍 归属地/网络：{ip_attribution(ip_record['ip'])}"
+            location, network = ip_attribution(ip_record["ip"])
+            ip_text = (f"🌐 最近记录 IP：{ip_record['ip']}\n"
+                       f"📍 归属地：{location}\n🏢 网络组织：{network}")
             if ip_record.get("time"):
                 ip_text += f"\n🕒 IP 记录时间：{ip_record['time']}"
         else:
@@ -461,7 +502,7 @@ class TelegramBot:
         subscribed = {row[0] for row in self.db.execute(
             "SELECT group_name FROM subscriptions WHERE chat_id=?", (chat_id,))}
         if not subscribed:
-            self.send(chat_id, "🧪 上线通知测试\n\n尚未设置订阅分组，请先添加分组。")
+            self.send(chat_id, "🧪 上线通知测试\n\n尚未设置订阅分组，请先新增分组。")
             return
         rows = sorted((item for item in series.values()
                        if item["server"] in servers_up
@@ -585,7 +626,10 @@ class TelegramBot:
                 self.db.execute("INSERT INTO metadata VALUES ('baseline','1')")
                 changes.clear()
         for server, email, group, _ in changes:
-            chats = [row[0] for row in self.db.execute("SELECT chat_id FROM subscriptions WHERE group_name=?", (group,))]
+            chats = [row[0] for row in self.db.execute(
+                "SELECT subscriptions.chat_id FROM subscriptions "
+                "LEFT JOIN online_notify_settings ON online_notify_settings.chat_id=subscriptions.chat_id "
+                "WHERE subscriptions.group_name=? AND COALESCE(online_notify_settings.enabled,1)=1", (group,))]
             eligible_chats = []
             for chat_id in chats:
                 now = time.time()
@@ -682,7 +726,7 @@ class TelegramBot:
                      "/online_notify - 管理上线通知分组并发送测试\n"
                      "/watch [分组] - 订阅上线通知\n"
                      "/unwatch [分组] - 取消订阅\n"
-                     "/watches - 查看已订阅分组\n"
+                     "/watches - 查看上线与流量通知的分组订阅\n"
                      "/traffic_notify - 配置每日流量通知\n"
                      "/id - 显示您的 Telegram ID\n\n"
                      "[分组] 可省略；订阅和取消订阅时会显示分组选择按钮。\n"
@@ -698,6 +742,9 @@ class TelegramBot:
             value = value.strip()
             if action == "test" and not value:
                 self.send_traffic_notify_test(chat_id)
+                return
+            if action == "groups" and not value:
+                self.send_traffic_notify_groups(chat_id)
                 return
             if action in ("on", "off") and not value:
                 enabled = int(action == "on")
@@ -732,6 +779,14 @@ class TelegramBot:
         elif command == "/online_notify":
             if argument == "test":
                 self.send_online_notify_test(chat_id)
+            elif argument == "groups":
+                self.send_online_notify_groups(chat_id)
+            elif argument in ("on", "off"):
+                with self.db:
+                    self.db.execute("INSERT INTO online_notify_settings VALUES (?,?) "
+                                    "ON CONFLICT(chat_id) DO UPDATE SET enabled=excluded.enabled",
+                                    (chat_id, int(argument == "on")))
+                self.send_online_notify_settings(chat_id, "✅ 上线通知设置已更新\n\n")
             else:
                 self.send_online_notify_settings(chat_id)
             return
@@ -798,8 +853,8 @@ class TelegramBot:
                 with self.db: self.db.execute("DELETE FROM subscriptions WHERE chat_id=? AND group_name=?", (chat_id, argument))
                 reply = f"🔕 已取消订阅：{argument}"
         elif command == "/watches":
-            rows = [row[0] for row in self.db.execute("SELECT group_name FROM subscriptions WHERE chat_id=? ORDER BY group_name", (chat_id,))]
-            reply = "📋 已订阅分组\n\n" + ("\n".join(f"🔔 {group}" for group in rows) if rows else "📭 暂无订阅")
+            self.send_my_subscriptions(chat_id)
+            return
         else:
             reply = "无法识别命令。发送 /help 查看命令。"
         self.send(chat_id, reply)
@@ -825,9 +880,25 @@ class TelegramBot:
             telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
             self.handle_message({"chat": {"id": chat_id}, "from": {"id": user_id}, "text": menu_commands[data]})
             return
-        match = re.fullmatch(r"onlinenotify:(add|remove|test)(?::(\d+))?", data)
+        match = re.fullmatch(r"onlinenotify:(toggle|groups|add|remove|test)(?::(\d+))?", data)
         if match:
             action, index_text = match.groups()
+            if action == "toggle":
+                if index_text not in ("0", "1"):
+                    telegram_request(self.config["token"], "answerCallbackQuery", {
+                        "callback_query_id": callback_id, "text": "无效的通知开关选项。"})
+                    return
+                with self.db:
+                    self.db.execute("INSERT INTO online_notify_settings VALUES (?,?) "
+                                    "ON CONFLICT(chat_id) DO UPDATE SET enabled=excluded.enabled",
+                                    (chat_id, int(index_text)))
+                telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
+                self.send_online_notify_settings(chat_id, "✅ 上线通知设置已更新\n\n")
+                return
+            if action == "groups":
+                telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
+                self.send_online_notify_groups(chat_id)
+                return
             if action == "test":
                 telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
                 self.send_online_notify_test(chat_id)
@@ -869,9 +940,13 @@ class TelegramBot:
             title = "👥 请选择要订阅上线通知的分组：" if action == "add" else "👥 请选择要取消订阅的分组："
             self.send(chat_id, title, {"inline_keyboard": buttons})
             return
-        match = re.fullmatch(r"trafficnotify:(toggle|time|test|add|remove)(?::(\d+))?", data)
+        match = re.fullmatch(r"trafficnotify:(toggle|time|groups|test|add|remove)(?::(\d+))?", data)
         if match:
             action, index_text = match.groups()
+            if action == "groups":
+                telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
+                self.send_traffic_notify_groups(chat_id)
+                return
             if action == "test":
                 telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
                 self.send_traffic_notify_test(chat_id)
@@ -1035,8 +1110,23 @@ def latest_ip_record(records):
             address = ipaddress.ip_address(candidate)
         except ValueError:
             continue
-        return {"ip": str(address), "time": timestamp}
+        return {"ip": str(address), "time": format_ip_record_time(timestamp)}
     return None
+
+
+def format_ip_record_time(value):
+    if not value:
+        return ""
+    raw = str(value).strip()
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw
+    # 3X-UI timestamps without an offset are treated as UTC, as on a default Linux host.
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    beijing = parsed.astimezone(timezone(timedelta(hours=8)))
+    return beijing.strftime("%Y-%m-%d %H:%M:%S") + "（UTC+8）"
 
 
 def mmdb_record(path, address):
@@ -1104,7 +1194,7 @@ def ip_attribution(address):
         network = network or "运营商未知"
     else:
         network = organization or (f"AS{asn}" if asn else "网络组织未知")
-    return f"{location} / {network}"
+    return location, network
 
 
 def online_url():
