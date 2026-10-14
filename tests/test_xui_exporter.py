@@ -14,6 +14,39 @@ SPEC.loader.exec_module(EXPORTER)
 
 
 class ExporterTest(unittest.TestCase):
+    def test_update_retains_unprovided_fields_token_and_list_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "panels.json"
+            with mock.patch.object(EXPORTER, "PANELS_FILE", str(path)):
+                for name in ("first", "second"):
+                    with mock.patch("sys.stdin", io.StringIO(name + "-token")):
+                        EXPORTER.panels_cli(["add", "--name", name, "--url",
+                            "https://panel.example.com/panel/api/inbounds/list",
+                            "--logs", "false", "--interval", "77", "--log-count", "4321"])
+                panels = EXPORTER.load_config(path)
+                panels[1]["max_log_age"] = 7200
+                path.write_text(json.dumps(panels), encoding="utf-8")
+                with mock.patch("sys.stdin", io.StringIO("")):
+                    EXPORTER.panels_cli(["update", "--name", "second"])
+                    self.assertEqual(EXPORTER.load_config(path), panels)
+                    EXPORTER.panels_cli(["update", "--name", "second", "--new-name", "renamed",
+                                        "--logs", "true"])
+                updated = EXPORTER.load_config(path)
+                self.assertEqual([p["name"] for p in updated], ["first", "renamed"])
+                self.assertTrue(updated[1]["logs"])
+                self.assertEqual(updated[1]["interval"], 77)
+                self.assertEqual(updated[1]["max_log_age"], 7200)
+                self.assertEqual((path.parent / "xui-renamed.token").read_text().strip(), "second-token")
+                self.assertFalse((path.parent / "xui-second.token").exists())
+                saved = path.read_bytes()
+                with mock.patch("sys.stdin", io.StringIO("replacement")):
+                    with self.assertRaises(ValueError):
+                        EXPORTER.panels_cli(["add", "--name", "first"])
+                    with self.assertRaises(ValueError):
+                        EXPORTER.panels_cli(["update", "--name", "renamed", "--new-name", "first"])
+                self.assertEqual(path.read_bytes(), saved)
+                self.assertEqual((path.parent / "xui-first.token").read_text().strip(), "first-token")
+
     def test_migration_preserves_existing_panel_and_deletion_stays_deleted(self):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "panels.json"

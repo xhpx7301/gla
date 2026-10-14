@@ -4,6 +4,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -17,6 +18,36 @@ if os.name == "nt":
 
 @unittest.skipUnless(BASH, "Bash is required for installer rendering")
 class ApiOnlyDeploymentTest(unittest.TestCase):
+    def test_numbered_menu_update_with_enter_preserves_each_setting(self):
+        script = (ROOT / "deploy-xray-grafana-loki-alloy.sh").read_text(encoding="utf-8")
+        functions = script[script.index("select_api_panel() {"):script.index("update_stack() {")]
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "panels.json"
+            panels = [{"name": name, "url": "https://panel.example.com/panel/api/inbounds/list",
+                       "token_file": f"/run/secrets/xui-{name}.token", "logs": False,
+                       "interval": 77, "log_count": 4321, "max_log_age": 7200}
+                      for name in ("first", "second")]
+            path.write_text(json.dumps(panels), encoding="utf-8")
+            for name in ("first", "second"):
+                (path.parent / f"xui-{name}.token").write_text(name + "-token\n")
+            env = dict(os.environ, PYTHONUTF8="1", XUI_PANELS_FILE=path.as_posix(),
+                       TEST_PYTHON=pathlib.Path(sys.executable).as_posix(),
+                       TEST_EXPORTER=(ROOT / "assets/xui_exporter.py").as_posix())
+            harness = '''set -Eeuo pipefail
+panels_command() { "$TEST_PYTHON" "$TEST_EXPORTER" panels "$@"; }
+compose() { :; }
+''' + functions + "\nconfigure_api_panels\n"
+            result = subprocess.run([BASH, "-c", harness], input=("2\n2\n" + "\n" * 6 + "0\n").encode(),
+                                    capture_output=True,
+                                    env=env, timeout=30)
+            result.stdout = result.stdout.decode("utf-8")
+            result.stderr = result.stderr.decode("utf-8")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("修改面板：second", result.stdout)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), panels)
+            self.assertEqual((path.parent / "xui-second.token").read_text(), "second-token\n")
+            self.assertNotIn("second-token", result.stdout + result.stderr)
+
     def render(self, filename, function, start, stop, directory, center=False):
         script = (ROOT / filename).read_text(encoding="utf-8")
         prelude = script[:script.index(function + "() {")]

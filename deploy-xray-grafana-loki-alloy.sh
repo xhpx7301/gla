@@ -253,8 +253,7 @@ install_stack() {
       XUI_API_TOKEN="$(cat "$STACK_DIR/secrets/xui-api-token")"
     fi
     if [ -z "$XUI_API_TOKEN" ]; then
-      read -rsp "请输入 3x-ui API Token（输入内容不会显示）: " XUI_API_TOKEN
-      printf '\n'
+      read -rp "请输入 3x-ui API Token（输入可见）: " XUI_API_TOKEN
     fi
     [ -n "$XUI_API_TOKEN" ] || die "XUI_API_TOKEN 不能为空。"
     case "$XUI_API_TOKEN" in *$'\n'*|*$'\r'*) die "XUI_API_TOKEN 不能包含换行符。" ;; esac
@@ -955,14 +954,16 @@ xui_state() {
 
 show_header() {
   printf 'GLA %s - 轻量服务器观测平台\n\n' "$GLA_VERSION"
-  printf 'Grafana         %s    Loki             %s\n' "$(container_state xray-grafana)" "$(container_state xray-loki)"
-  printf 'VictoriaMetrics %s    Alloy            %s\n' "$(container_state gla-victoriametrics)" "$(container_state xray-alloy)"
+  printf 'Grafana 仪表盘展示        %s\n' "$(container_state xray-grafana)"
+  printf 'Loki 日志存储             %s\n' "$(container_state xray-loki)"
+  printf 'VictoriaMetrics 指标存储  %s\n' "$(container_state gla-victoriametrics)"
+  printf 'Alloy 安全与资源采集      %s\n' "$(container_state xray-alloy)"
+  printf '3x-ui API 流量与日志采集  %s\n' "$(xui_state)"
   if grep -Eq '^ENABLE_GEOIP=true$' "$STACK_DIR/.install.env" 2>/dev/null; then
-    printf 'GeoIP 归属解析   [已启用]\n'
+    printf 'GeoIP 归属解析            [已启用]\n'
   else
-    printf 'GeoIP 归属解析   [未启用]\n'
+    printf 'GeoIP 归属解析            [未启用]\n'
   fi
-  printf '3x-ui API 中心采集 %s\n' "$(xui_state)"
 }
 
 compose() {
@@ -1147,39 +1148,99 @@ panels_command() {
     python:3.12-alpine python3 /app/xui_exporter.py panels "$@"
 }
 
+select_api_panel() {
+  local rows choice i=0
+  local -a names=() urls=() logs=() intervals=() counts=()
+  rows="$(panels_command list --format tsv)" || return 1
+  if [ -z "$rows" ]; then
+    printf '尚未配置面板，请先添加。\n'
+    return 1
+  fi
+  while IFS=$'\t' read -r SELECTED_NAME SELECTED_URL SELECTED_LOGS SELECTED_INTERVAL SELECTED_COUNT; do
+    names+=("$SELECTED_NAME"); urls+=("$SELECTED_URL"); logs+=("$SELECTED_LOGS")
+    intervals+=("$SELECTED_INTERVAL"); counts+=("$SELECTED_COUNT")
+    i=$((i + 1))
+    printf '%s. %s  %s\n' "$i" "$SELECTED_NAME" "$SELECTED_URL"
+  done <<<"$rows"
+  while true; do
+    read -rp "选择面板编号 [1-$i]（0 返回）: " choice
+    case "$choice" in 0|"") return 1 ;; esac
+    if [[ "$choice" =~ ^[1-9][0-9]*$ ]] && [ "${#choice}" -le "${#i}" ] && [ "$choice" -le "$i" ]; then
+      choice=$((choice - 1))
+      SELECTED_NAME="${names[$choice]}"; SELECTED_URL="${urls[$choice]}"
+      SELECTED_LOGS="${logs[$choice]}"; SELECTED_INTERVAL="${intervals[$choice]}"
+      SELECTED_COUNT="${counts[$choice]}"
+      return 0
+    fi
+    printf '无效编号，请重新选择。\n'
+  done
+}
+
+edit_api_panel() {
+  local operation="$1" name url token logs interval log_count current_logs
+  local -a args
+  if [ "$operation" = update ]; then
+    select_api_panel || return 1
+    args=(update --name "$SELECTED_NAME")
+    printf '\n修改面板：%s；直接回车保留对应配置。\n' "$SELECTED_NAME"
+    read -rp "服务器名称 [$SELECTED_NAME]: " name
+    [ -z "$name" ] || args+=(--new-name "$name")
+    read -rp "完整 HTTPS API 地址 [$SELECTED_URL]: " url
+    [ -z "$url" ] || args+=(--url "$url")
+    current_logs="$SELECTED_LOGS"
+    interval="$SELECTED_INTERVAL"
+    log_count="$SELECTED_COUNT"
+  else
+    read -rp '服务器名称（唯一，字母/数字/点/下划线/连字符）: ' name
+    read -rp '完整 HTTPS API 地址（以 /panel/api/inbounds/list 结尾）: ' url
+    args=(add --name "$name" --url "$url")
+    current_logs=true; interval=30; log_count=1000
+  fi
+  printf '采集访问日志需要在对应 3x-ui 中开启 access log。\n'
+  if [ "$current_logs" = true ]; then current_logs=开启; else current_logs=关闭; fi
+  while true; do
+    read -rp "采集访问日志？[当前：$current_logs；y 开启 / n 关闭；回车保留]: " logs
+    case "$logs" in
+      "") break ;;
+      y|Y) args+=(--logs true); break ;;
+      n|N) args+=(--logs false); break ;;
+      *) printf '请输入 y 或 n，或直接回车。\n' ;;
+    esac
+  done
+  read -rp "采集间隔（10-3600 秒）[$interval]: " interval
+  [ -z "$interval" ] || args+=(--interval "$interval")
+  read -rp "每次获取日志条数（100-10000）[$log_count]: " log_count
+  [ -z "$log_count" ] || args+=(--log-count "$log_count")
+  if [ "$operation" = update ]; then
+    read -rp 'API Token（输入可见；回车保留已保存的 Token）: ' token
+  else
+    read -rp 'API Token（输入可见；新面板必须填写）: ' token
+  fi
+  if ! printf '%s' "$token" | panels_command "${args[@]}"; then
+    unset token
+    printf '配置失败：请检查名称是否重复、地址、间隔和 Token。\n'
+    return 1
+  fi
+  unset token
+  compose up -d xui-exporter
+  compose restart xui-exporter
+  printf '配置已生效。API 和日志采集状态请在 Grafana 中查看。\n'
+}
+
 configure_api_panels() {
-  local action name url token logs interval log_count
+  local action
   while true; do
     printf '\n3x-ui API 中心采集：流量、在线状态与访问日志\n'
     panels_command list || return 1
-    printf '\n1. 添加或更新面板\n2. 删除面板\n0. 返回\n'
-    read -rp '请选择 [0-2]: ' action
+    printf '\n1. 添加面板\n2. 修改面板\n3. 删除面板\n0. 返回\n'
+    read -rp '请选择 [0-3]: ' action
     case "$action" in
       0) return 0 ;;
-      1)
-        read -rp '服务器名称（唯一，字母/数字/点/下划线/连字符）: ' name
-        read -rp '完整 HTTPS API 地址（以 /panel/api/inbounds/list 结尾）: ' url
-        printf '请在该服务器的 3x-ui 中开启 access log。中心服务器自己的面板也在这里添加。\n'
-        read -rp '采集访问日志？[Y/n]: ' logs
-        case "$logs" in n|N) logs=false ;; *) logs=true ;; esac
-        read -rp '采集间隔（10-3600 秒，默认 30）: ' interval
-        read -rp '每次获取日志条数（100-10000，默认 1000）: ' log_count
-        read -rsp 'API Token（更新已有面板时留空保留原 Token）: ' token
-        printf '\n'
-        if ! printf '%s' "$token" | panels_command set --name "$name" --url "$url" \
-          --logs "$logs" --interval "${interval:-30}" --log-count "${log_count:-1000}"; then
-          unset token
-          printf '配置失败，请检查地址、名称、间隔和 Token。\n'
-          continue
-        fi
-        unset token
-        compose up -d xui-exporter
-        compose restart xui-exporter
-        printf '配置已生效。API 和日志采集状态请在 Grafana 中查看。\n'
-        ;;
-      2)
-        read -rp '要删除的服务器名称: ' name
-        if panels_command delete --name "$name"; then
+      1) edit_api_panel add || continue ;;
+      2) edit_api_panel update || continue ;;
+      3)
+        select_api_panel || continue
+        if panels_command delete --name "$SELECTED_NAME"; then
           compose restart xui-exporter
           printf '已移除采集配置，历史数据保留。\n'
         fi
@@ -1217,25 +1278,25 @@ while true; do
 
 0. 退出
 1. 更新配置、脚本与仪表盘
-2. 服务控制
-3. 查看运行状态与资源占用
-4. 查看服务日志
-5. 查看访问地址、凭据与模块
-6. 更新容器镜像
-7. 卸载并删除全部数据
-8. 管理 3x-ui API 面板（本机与远程的流量、访问日志）
+2. 管理 3x-ui API 面板（本机与远程的流量、访问日志）
+3. 服务控制
+4. 查看运行状态与资源占用
+5. 查看服务日志
+6. 查看访问地址、凭据与模块
+7. 更新容器镜像
+8. 卸载并删除全部数据
 MENU
   read -rp "请输入操作编号 [0-8]: " choice
   case "$choice" in
     0) exit 0 ;;
     1) update_script_and_deploy; exit $? ;;
-    2) service_control_menu ;;
-    3) show_status; pause ;;
-    4) show_logs; pause ;;
-    5) show_access_info; pause ;;
-    6) update_stack; pause ;;
-    7) uninstall_everything ;;
-    8) configure_api_panels; pause ;;
+    2) configure_api_panels; pause ;;
+    3) service_control_menu ;;
+    4) show_status; pause ;;
+    5) show_logs; pause ;;
+    6) show_access_info; pause ;;
+    7) update_stack; pause ;;
+    8) uninstall_everything ;;
     *) printf '无效选择。\n'; pause ;;
   esac
 done

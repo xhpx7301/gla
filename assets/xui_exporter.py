@@ -396,31 +396,53 @@ class MetricsHandler(BaseHTTPRequestHandler):
 
 def panels_cli(argv):
     parser = argparse.ArgumentParser(description="管理中心端 3x-ui 面板；Token 从标准输入读取")
-    parser.add_argument("operation", choices=("list", "set", "delete", "migrate"))
+    parser.add_argument("operation", choices=("list", "add", "update", "set", "delete", "migrate"))
+    parser.add_argument("--format", choices=("display", "tsv"), default="display")
     parser.add_argument("--name")
+    parser.add_argument("--new-name")
     parser.add_argument("--url")
-    parser.add_argument("--logs", choices=("true", "false"), default="true")
-    parser.add_argument("--interval", type=int, default=30)
-    parser.add_argument("--log-count", type=int, default=1000)
+    parser.add_argument("--logs", choices=("true", "false"))
+    parser.add_argument("--interval", type=int)
+    parser.add_argument("--log-count", type=int)
     args = parser.parse_args(argv)
     if not PANELS_FILE:
         raise ValueError("缺少 XUI_PANELS_FILE")
     panels = load_config(PANELS_FILE)
     if args.operation == "list":
-        for panel in panels:
-            print(f'{panel["name"]}\t{panel["url"]}\t日志={panel.get("logs", False)}\t间隔={panel.get("interval", 30)}s\t窗口={panel.get("log_count", 1000)}')
+        for index, panel in enumerate(panels, 1):
+            logs = "true" if panel.get("logs", False) else "false"
+            if args.format == "tsv":
+                print(f'{panel["name"]}\t{panel["url"]}\t{logs}\t{panel.get("interval", 30)}\t{panel.get("log_count", 1000)}')
+            else:
+                state = "开启" if logs == "true" else "关闭"
+                print(f'{index}. {panel["name"]}\t{panel["url"]}\t日志={state}\t间隔={panel.get("interval", 30)}s\t窗口={panel.get("log_count", 1000)}')
         return
     if not args.name or not NAME_RE.fullmatch(args.name):
         raise ValueError("请指定有效的面板名称")
     previous = next((p for p in panels if p["name"] == args.name), None)
+    if args.operation == "add" and previous:
+        raise ValueError("名称已存在，请选择修改面板")
+    if args.operation == "update" and not previous:
+        raise ValueError("要修改的面板不存在")
     remaining = [p for p in panels if p["name"] != args.name]
-    if args.operation in ("set", "migrate"):
+    if args.operation in ("add", "update", "set", "migrate"):
         token = sys.stdin.read().strip()
         if args.operation == "migrate" and previous:
             return  # preserve an already configured panel on repeated upgrades
-        token_path = str(Path(PANELS_FILE).parent / f"xui-{args.name}.token")
-        panel = validate_panel({"name": args.name, "url": args.url or "", "token_file": f"/run/secrets/xui-{args.name}.token",
-                                "logs": args.logs == "true", "interval": args.interval, "log_count": args.log_count})
+        panel = dict(previous) if args.operation == "update" else {}
+        name = args.new_name if args.operation == "update" and args.new_name is not None else args.name
+        if any(p["name"] == name for p in remaining):
+            raise ValueError("名称已存在，请使用其他名称")
+        panel.update(name=name, token_file=f"/run/secrets/xui-{name}.token")
+        for key, value, default in (("url", args.url, ""),
+                                    ("logs", None if args.logs is None else args.logs == "true", True),
+                                    ("interval", args.interval, 30), ("log_count", args.log_count, 1000)):
+            if value is not None:
+                panel[key] = value
+            else:
+                panel.setdefault(key, default)
+        validate_panel(panel)
+        token_path = Path(PANELS_FILE).parent / f"xui-{name}.token"
         if token:
             if "\n" in token or "\r" in token:
                 raise ValueError("Token 不能包含换行符")
@@ -428,9 +450,17 @@ def panels_cli(argv):
         elif not previous:
             raise ValueError("新面板必须提供 Token")
         else:
-            read_token(token_path)
-        remaining.append(panel)
+            old_token_path = Path(PANELS_FILE).parent / Path(previous["token_file"]).name
+            old_token = read_token(old_token_path)
+            if token_path != old_token_path:
+                atomic_write(token_path, old_token + "\n")
+        if previous:
+            remaining = [panel if p["name"] == args.name else p for p in panels]
+        else:
+            remaining.append(panel)
     atomic_write(PANELS_FILE, json.dumps(remaining, ensure_ascii=False, indent=2) + "\n")
+    if args.operation == "update" and previous and panel["name"] != args.name:
+        (Path(PANELS_FILE).parent / Path(previous["token_file"]).name).unlink(missing_ok=True)
     if args.operation == "delete" and previous:
         (Path(PANELS_FILE).parent / f"xui-{args.name}.token").unlink(missing_ok=True)
 
