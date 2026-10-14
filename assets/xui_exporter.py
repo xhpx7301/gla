@@ -383,6 +383,7 @@ class TelegramBot:
                         [{"text": "➕ 新增分组", "callback_data": "trafficnotify:add"},
                          {"text": "➖ 移除分组", "callback_data": "trafficnotify:remove"}],
                         [{"text": "🧪 发送测试通知", "callback_data": "trafficnotify:test"}],
+                        [{"text": "↩️ 返回主菜单", "callback_data": "menu:home"}],
                     ]})
 
     def send_traffic_notify_settings(self, chat_id, prefix=""):
@@ -445,6 +446,7 @@ class TelegramBot:
                         [{"text": "➕ 新增分组", "callback_data": "onlinenotify:add"},
                          {"text": "➖ 移除分组", "callback_data": "onlinenotify:remove"}],
                         [{"text": "🧪 发送测试通知", "callback_data": "onlinenotify:test"}],
+                        [{"text": "↩️ 返回主菜单", "callback_data": "menu:home"}],
                     ]})
 
     def send_online_notify_settings(self, chat_id, prefix=""):
@@ -483,6 +485,18 @@ class TelegramBot:
                 f"  {'、'.join(traffic) if traffic else '暂无分组'}")
         self.send(chat_id, text)
 
+    def inbound_names_for_item(self, item):
+        worker = next((worker for worker in self.workers
+                       if worker.panel["name"] == item["server"]), None)
+        return worker.inbounds_for_client(item["email"]) if worker else []
+
+    def online_client_block(self, item):
+        inbounds = self.inbound_names_for_item(item)
+        inbound_text = "、".join(inbounds) if inbounds else "未找到配置关联"
+        return (f"👤 客户端：{item['email']}\n👥 分组：{item['group']}\n"
+                f"🔗 关联入站：{inbound_text}\n🖥 面板：{item['server']}\n"
+                f"{self.traffic_details(item['up'], item['down'])}")
+
     def online_notification_text(self, item, test=False):
         worker = next((worker for worker in self.workers
                        if worker.panel["name"] == item["server"]), None)
@@ -495,13 +509,13 @@ class TelegramBot:
                 ip_text += f"\n🕒 IP 记录时间：{ip_record['time']}"
         else:
             ip_text = "🌐 最近记录 IP：暂无记录"
-        inbounds = worker.inbounds_for_client(item["email"]) if worker else []
+        inbounds = self.inbound_names_for_item(item)
         inbound_lines = "\n".join(f"  • {inbound}" for inbound in inbounds) or "  未找到配置关联"
         title = "🧪 上线通知测试" if test else "🟢 客户端上线"
         status = "在线" if item.get("online") else "离线"
         suffix = f"\n\nℹ️ 测试样例，客户端当前状态：{status}。不会记录在线状态或通知冷却。" if test else ""
         return (f"{title}\n\n👤 客户端：{item['email']}\n👥 分组：{item['group']}\n"
-                f"🖥 面板：{item['server']}\n{ip_text}\n🔗 关联入站：\n{inbound_lines}\n\n"
+                f"🔗 关联入站：\n{inbound_lines}\n🖥 面板：{item['server']}\n{ip_text}\n\n"
                 f"🕒 检测时间：{self.report_time()}{suffix}")
 
     def send_online_notify_test(self, chat_id):
@@ -815,8 +829,7 @@ class TelegramBot:
             reply = "👥 客户端分组\n\n" + ("\n\n".join(blocks) if blocks else "📭 暂无分组数据") + self.report_footer(servers_up)
         elif command == "/online":
             rows = [item for item in series.values() if item["online"] and (not argument or item["group"] == argument)]
-            blocks = [f"👤 客户端：{item['email']}\n👥 分组：{item['group']}\n🖥 面板：{item['server']}\n"
-                      + self.traffic_details(item['up'], item['down'])
+            blocks = [self.online_client_block(item)
                       for item in sorted(rows, key=lambda item: (item['group'], item['server'], item['email']))]
             reply = (f"🟢 在线客户端：{len(rows)} 个\n👥 筛选分组：{argument or '全部'}\n\n"
                      + ("\n\n".join(blocks) if blocks else "📭 没有匹配的在线客户端")
@@ -876,7 +889,7 @@ class TelegramBot:
         if user_id not in allowed_users and chat_id not in allowed_chats:
             telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id, "text": "未授权"})
             return
-        menu_commands = {"menu:status": "/status", "menu:groups": "/groups",
+        menu_commands = {"menu:home": "/start", "menu:status": "/status", "menu:groups": "/groups",
                          "menu:online": "/online", "menu:traffic": "/traffic",
                          "menu:online_notify": "/online_notify",
                          "menu:watch": "/watch", "menu:unwatch": "/unwatch",
@@ -1243,20 +1256,10 @@ def inbound_client_map(inbounds):
         if not isinstance(stats, list):
             stats = []
         name = inbound.get("remark") or inbound.get("tag") or f"入站 {inbound.get('id', '未知')}"
-        port = inbound.get("port")
-        protocol = inbound.get("protocol")
-        details = str(name)
-        if port:
-            details += f"（端口 {port}"
-            if protocol:
-                details += f" / {protocol}"
-            details += "）"
-        elif protocol:
-            details += f"（{protocol}）"
         emails = {client.get("email") for client in [*clients, *stats]
                   if isinstance(client, dict) and isinstance(client.get("email"), str) and client["email"]}
         for email in emails:
-            result.setdefault(email, set()).add(details)
+            result.setdefault(email, set()).add(str(name))
     return {email: sorted(names) for email, names in result.items()}
 
 

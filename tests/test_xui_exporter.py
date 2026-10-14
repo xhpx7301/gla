@@ -39,9 +39,9 @@ class ExporterTest(unittest.TestCase):
              "clientStats": [{"email": "bob"}]},
         ]
         self.assertEqual(EXPORTER.inbound_client_map(inbounds), {
-            "alice": ["VLESS-main（端口 443 / vless）"],
-            "bob": ["trojan-backup（端口 8443 / trojan）"],
-            "shared": ["VLESS-main（端口 443 / vless）", "trojan-backup（端口 8443 / trojan）"],
+            "alice": ["VLESS-main"],
+            "bob": ["trojan-backup"],
+            "shared": ["VLESS-main", "trojan-backup"],
         })
 
     def test_worker_associates_online_notification_with_configured_inbounds(self):
@@ -59,7 +59,7 @@ class ExporterTest(unittest.TestCase):
         with mock.patch.object(EXPORTER, "read_token", return_value="secret"), \
                 mock.patch.object(EXPORTER, "request_json", side_effect=api):
             panel.poll()
-        self.assertEqual(panel.inbounds_for_client("alice"), ["VLESS-443（端口 443 / vless）"])
+        self.assertEqual(panel.inbounds_for_client("alice"), ["VLESS-443"])
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as send, \
                 mock.patch.object(EXPORTER.TelegramBot, "report_time", return_value="test-time"), \
                 mock.patch.object(panel, "last_ip_for_client", return_value={
@@ -86,7 +86,9 @@ class ExporterTest(unittest.TestCase):
                         panel.metrics = EXPORTER.render_metrics("node-a", [inbound], ["alice"], clients)
                     bot.process_online()
                 message = send.call_args.args[2]["text"]
-                self.assertIn("🔗 关联入站：\n  • VLESS-443（端口 443 / vless）", message)
+                self.assertIn("👤 客户端：alice\n👥 分组：shared\n🔗 关联入站：\n  • VLESS-443\n🖥 面板：node-a", message)
+                self.assertNotIn("端口 443", message)
+                self.assertNotIn("/ vless", message)
                 self.assertIn("🌐 最近记录 IP：203.0.113.1", message)
                 self.assertIn("📍 归属地：中国深圳\n🏢 网络组织：中国电信", message)
                 self.assertIn("🕒 IP 记录时间：2026-10-14 16:30:00（UTC+8）", message)
@@ -489,6 +491,7 @@ class ExporterTest(unittest.TestCase):
 
     def test_telegram_reports_flag_unavailable_panels_and_keep_long_results_complete(self):
         workers = [EXPORTER.PanelWorker({"name": "node-a"}), EXPORTER.PanelWorker({"name": "node-b"})]
+        workers[0].client_inbounds = {"alice": ["HK-443", "fallback"]}
         workers[0].metrics = EXPORTER.render_metrics("node-a", [], ["alice"], [
             {"email": "alice", "group": "Aurora", "traffic": {"up": 1024, "down": 2048}}])
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request, \
@@ -498,7 +501,7 @@ class ExporterTest(unittest.TestCase):
             try:
                 bot.handle_message({"chat": {"id": 42}, "from": {"id": 42}, "text": "/online"})
                 report = request.call_args.args[2]["text"]
-                self.assertIn("👤 客户端：alice\n👥 分组：Aurora\n🖥 面板：node-a", report)
+                self.assertIn("👤 客户端：alice\n👥 分组：Aurora\n🔗 关联入站：HK-443、fallback\n🖥 面板：node-a", report)
                 self.assertIn("📊 总计：3.00 KiB", report)
                 self.assertIn("未计入本次结果：node-b", report)
                 self.assertIn("2026-10-14 08:00:00（UTC+8）", report)
@@ -562,6 +565,7 @@ class ExporterTest(unittest.TestCase):
                 keyboard = json.loads(settings["reply_markup"])
                 self.assertEqual(keyboard["inline_keyboard"][1][0]["callback_data"], "onlinenotify:groups")
                 self.assertEqual(keyboard["inline_keyboard"][3][0]["callback_data"], "onlinenotify:test")
+                self.assertEqual(keyboard["inline_keyboard"][4][0]["callback_data"], "menu:home")
                 bot.handle_callback({"id": "add", "from": {"id": 42}, "message": message,
                                     "data": "onlinenotify:add"})
                 picker = json.loads(request.call_args.args[2]["reply_markup"])
@@ -579,6 +583,25 @@ class ExporterTest(unittest.TestCase):
                 self.assertIn("最近记录 IP：203.0.113.5", text)
                 self.assertEqual(bot.db.execute("SELECT COUNT(*) FROM notification_cooldowns").fetchone(), (0,))
                 self.assertEqual(bot.db.execute("SELECT COUNT(*) FROM online_confirmations").fetchone(), (0,))
+            finally:
+                bot.db.close()
+
+    def test_notification_settings_return_button_opens_main_menu(self):
+        worker = EXPORTER.PanelWorker({"name": "node-a"})
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, [worker], directory)
+            try:
+                message = {"chat": {"id": 420}, "from": {"id": 42}}
+                for command, callback in (("/online_notify", "onlinenotify"), ("/traffic_notify", "trafficnotify")):
+                    bot.handle_message(dict(message, text=command))
+                    keyboard = json.loads(request.call_args.args[2]["reply_markup"])
+                    self.assertEqual(keyboard["inline_keyboard"][-1][0],
+                                     {"text": "↩️ 返回主菜单", "callback_data": "menu:home"})
+                    bot.handle_callback({"id": callback, "from": {"id": 42}, "message": message,
+                                         "data": "menu:home"})
+                    self.assertEqual(request.call_args.args[1], "sendMessage")
+                    self.assertIn("请选择", request.call_args.args[2]["text"])
+                    self.assertIn("inline_keyboard", json.loads(request.call_args.args[2]["reply_markup"]))
             finally:
                 bot.db.close()
 
