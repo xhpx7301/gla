@@ -438,6 +438,7 @@ ${SECURITY_TRAFFIC_VOLUME_LINE}
       XUI_PANELS_FILE: /run/secrets/xui-panels.json
       XUI_STATE_DIR: /var/lib/xui
       XUI_LOKI_URL: http://alloy:3500/loki/api/v1/push
+      XUI_TELEGRAM_CONFIG_FILE: /run/secrets/telegram-config.json
 ${XUI_EXTRA_HOST_LINE}
     volumes:
       - ./assets/xui_exporter.py:/app/xui_exporter.py:ro
@@ -664,7 +665,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
   "title": "Xray 访问日志",
   "timezone": "Asia/Shanghai",
   "schemaVersion": 39,
-  "version": 15,
+  "version": 16,
   "refresh": "30s",
   "time": { "from": "now-1h", "to": "now" },
   "templating": {
@@ -683,13 +684,14 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
         "options": [],
         "current": { "selected": true, "text": "全部", "value": "$__all" }
       },
+      {"name": "group", "label": "客户端分组", "type": "query", "datasource": {"type": "loki", "uid": "loki"}, "definition": "label_values({job=\"xray-access\",server=~\"$server\",group=~\".+\"}, group)", "query": "label_values({job=\"xray-access\",server=~\"$server\",group=~\".+\"}, group)", "refresh": 2, "includeAll": true, "allValue": ".*", "multi": true, "options": [], "sort": 1, "current": {"selected": true, "text": "全部", "value": "$__all"}},
       {
         "name": "client",
         "label": "客户端",
         "type": "query",
         "datasource": { "type": "loki", "uid": "loki" },
-        "definition": "label_values({job=\"xray-access\", server=~\"$server\", email=~\".+\"}, email)",
-        "query": "label_values({job=\"xray-access\", server=~\"$server\", email=~\".+\"}, email)",
+        "definition": "label_values({job=\"xray-access\", server=~\"$server\", group=~\"$group\", email=~\".+\"}, email)",
+        "query": "label_values({job=\"xray-access\", server=~\"$server\", group=~\"$group\", email=~\".+\"}, email)",
         "refresh": 1,
         "includeAll": true,
         "allValue": ".*",
@@ -730,7 +732,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "title": "全部已采集访问记录",
       "description": "访问记录统一来自 3x-ui API，返回解析记录且排除 api -> api；日志可能因轮转或采集窗口不足而缺失。",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", server=~\"$server\"}" }],
+      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", server=~\"$server\", group=~\"$group\"}" }],
       "gridPos": { "x": 0, "y": 42, "w": 24, "h": 10 },
       "options": { "dedupStrategy": "none", "enableLogDetails": true, "showCommonLabels": false, "wrapLogMessage": true, "sortOrder": "Descending" }
     },
@@ -739,7 +741,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "type": "logs",
       "title": "真实访问日志（已排除 API）",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", server=~\"$server\"} != \"[api -> api]\"" }],
+      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", server=~\"$server\", group=~\"$group\"} != \"[api -> api]\"" }],
       "gridPos": { "x": 0, "y": 32, "w": 24, "h": 10 },
       "options": { "dedupStrategy": "none", "enableLogDetails": true, "showCommonLabels": false, "wrapLogMessage": true, "sortOrder": "Descending" }
     },
@@ -749,7 +751,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "title": "所选客户端的访问记录",
       "description": "选择客户端后，可在顶部“访问目标关键词”输入域名或 IP；留空则显示该客户端全部访问记录。",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", server=~\"$server\", email=~\"$client\"} != \"[api -> api]\" |= \"$site\"" }],
+      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", server=~\"$server\", group=~\"$group\", email=~\"$client\"} != \"[api -> api]\" |= \"$site\"" }],
       "gridPos": { "x": 0, "y": 0, "w": 16, "h": 9 },
       "options": { "dedupStrategy": "none", "enableLogDetails": true, "showCommonLabels": false, "wrapLogMessage": true, "sortOrder": "Descending" }
     },
@@ -759,7 +761,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "title": "匹配连接数",
       "description": "统计所选客户端和访问目标关键词在当前时间范围内匹配到的 Xray 连接记录数。",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "sum(count_over_time({job=\"xray-access\", server=~\"$server\", email=~\"$client\"} != \"[api -> api]\" |= \"$site\" [$__range]))", "instant": true }],
+      "targets": [{ "refId": "A", "expr": "sum(count_over_time({job=\"xray-access\", server=~\"$server\", group=~\"$group\", email=~\"$client\"} != \"[api -> api]\" |= \"$site\" [$__range]))", "instant": true }],
       "gridPos": { "x": 16, "y": 0, "w": 8, "h": 4 },
       "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" }, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "none", "justifyMode": "auto" }
     },
@@ -769,7 +771,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "title": "最新访问日志",
       "description": "显示 Loki 收到的最新一条真实访问记录。没有新访问不代表采集异常。",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", server=~\"$server\"} != \"[api -> api]\"", "maxLines": 1 }],
+      "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", server=~\"$server\", group=~\"$group\"} != \"[api -> api]\"", "maxLines": 1 }],
       "gridPos": { "x": 16, "y": 4, "w": 8, "h": 5 },
       "options": { "dedupStrategy": "none", "enableLogDetails": false, "showCommonLabels": false, "wrapLogMessage": false, "sortOrder": "Descending" }
     },
@@ -779,7 +781,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "title": "所选客户端近 $period 访问目标 Top 20",
       "description": "按目标域名或 IP 聚合。选择“客户端”和“统计周期”后自动更新。",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "topk(20, sum by (destination) (count_over_time({job=\"xray-access\", server=~\"$server\", email=~\"$client\"} != \"[api -> api]\" | pattern `<_> accepted <_>:<destination>:<port> [<_>` [$period])))", "instant": true, "format": "table" }],
+      "targets": [{ "refId": "A", "expr": "topk(20, sum by (destination) (count_over_time({job=\"xray-access\", server=~\"$server\", group=~\"$group\", email=~\"$client\"} != \"[api -> api]\" | pattern `<_> accepted <_>:<destination>:<port> [<_>` [$period])))", "instant": true, "format": "table" }],
       "gridPos": { "x": 0, "y": 9, "w": 24, "h": 9 },
       "fieldConfig": {
         "defaults": {},
@@ -812,7 +814,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "type": "table",
       "title": "按客户端连接数",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "sum by (email) (count_over_time({job=\"xray-access\", server=~\"$server\", email=~\".+\"} != \"[api -> api]\" [$__range]))", "instant": true, "format": "table" }],
+      "targets": [{ "refId": "A", "expr": "sum by (email) (count_over_time({job=\"xray-access\", server=~\"$server\", group=~\"$group\", email=~\".+\"} != \"[api -> api]\" [$__range]))", "instant": true, "format": "table" }],
       "gridPos": { "x": 0, "y": 18, "w": 24, "h": 7 },
       "fieldConfig": {
         "defaults": {},
@@ -839,7 +841,7 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
       "type": "table",
       "title": "按入站连接数",
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "refId": "A", "expr": "sum by (inbound) (count_over_time({job=\"xray-access\", server=~\"$server\", inbound=~\".+\"} != \"[api -> api]\" [$__range]))", "instant": true, "format": "table" }],
+      "targets": [{ "refId": "A", "expr": "sum by (inbound) (count_over_time({job=\"xray-access\", server=~\"$server\", group=~\"$group\", inbound=~\".+\"} != \"[api -> api]\" [$__range]))", "instant": true, "format": "table" }],
       "gridPos": { "x": 0, "y": 25, "w": 24, "h": 7 },
       "fieldConfig": {
         "defaults": {},
@@ -1098,6 +1100,8 @@ show_access_info() {
 
   printf '\n中心端管理的 API 面板（Token 不显示）：\n'
   panels_command list
+  printf '\nTelegram Bot：\n'
+  telegram_command show || true
 }
 
 download_installer() {
@@ -1146,6 +1150,48 @@ panels_command() {
     -v "$STACK_DIR/secrets:/run/secrets" \
     -v "$STACK_DIR/assets/xui_exporter.py:/app/xui_exporter.py:ro" \
     python:3.12-alpine python3 /app/xui_exporter.py panels "$@"
+}
+
+telegram_command() {
+  docker run --rm -i --network none \
+    -e XUI_TELEGRAM_CONFIG_FILE=/run/secrets/telegram-config.json \
+    -v "$STACK_DIR/secrets:/run/secrets" \
+    -v "$STACK_DIR/assets/xui_exporter.py:/app/xui_exporter.py:ro" \
+    python:3.12-alpine python3 /app/xui_exporter.py telegram "$@"
+}
+
+configure_telegram() {
+  local action token ids
+  while true; do
+    printf '\nTelegram Bot：分组上线通知与在线流量查询\n'
+    telegram_command show || true
+    printf '\n1. 配置或更新 Bot\n2. 删除 Bot 配置\n0. 返回\n'
+    read -rp '请选择 [0-2]: ' action
+    case "$action" in
+      0) return 0 ;;
+      1)
+        read -rp 'Bot Token（输入可见）: ' token
+        read -rp '允许访问的 Telegram 用户 ID（逗号分隔）: ' ids
+        [ -n "$token" ] && [ -n "$ids" ] || { printf 'Token 和用户 ID 都不能为空。\n'; continue; }
+        if printf '%s' "$token" | telegram_command set --user-ids "$ids"; then
+          unset token
+          compose up -d xui-exporter
+          compose restart xui-exporter
+          printf 'Telegram Bot 配置已生效。\n'
+        else
+          unset token
+          printf '配置失败，请检查 Token 和用户 ID。\n'
+        fi
+        ;;
+      2)
+        if telegram_command delete; then
+          compose restart xui-exporter
+          printf 'Telegram Bot 配置已删除。\n'
+        fi
+        ;;
+      *) printf '无效选择。\n' ;;
+    esac
+  done
 }
 
 select_api_panel() {
@@ -1279,24 +1325,26 @@ while true; do
 0. 退出
 1. 更新配置、脚本与仪表盘
 2. 管理 3x-ui API 面板（本机与远程的流量、访问日志）
-3. 服务控制
-4. 查看运行状态与资源占用
-5. 查看服务日志
-6. 查看访问地址、凭据与模块
-7. 更新容器镜像
-8. 卸载并删除全部数据
+3. 管理 Telegram Bot（分组通知与在线查询）
+4. 服务控制
+5. 查看运行状态与资源占用
+6. 查看服务日志
+7. 查看访问地址、凭据与模块
+8. 更新容器镜像
+9. 卸载并删除全部数据
 MENU
-  read -rp "请输入操作编号 [0-8]: " choice
+  read -rp "请输入操作编号 [0-9]: " choice
   case "$choice" in
     0) exit 0 ;;
     1) update_script_and_deploy; exit $? ;;
     2) configure_api_panels; pause ;;
-    3) service_control_menu ;;
-    4) show_status; pause ;;
-    5) show_logs; pause ;;
-    6) show_access_info; pause ;;
-    7) update_stack; pause ;;
-    8) uninstall_everything ;;
+    3) configure_telegram; pause ;;
+    4) service_control_menu ;;
+    5) show_status; pause ;;
+    6) show_logs; pause ;;
+    7) show_access_info; pause ;;
+    8) update_stack; pause ;;
+    9) uninstall_everything ;;
     *) printf '无效选择。\n'; pause ;;
   esac
 done

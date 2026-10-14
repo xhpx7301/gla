@@ -14,6 +14,60 @@ SPEC.loader.exec_module(EXPORTER)
 
 
 class ExporterTest(unittest.TestCase):
+    def test_client_groups_are_scoped_per_panel_and_escape_metric_labels(self):
+        clients_a = [{"email": "alice", "group": "shared", "traffic": {"up": 1}},
+                     {"email": "same-email", "group": 'A"组\\线路', "traffic": {}},
+                     {"email": "ungrouped", "group": "", "traffic": {}}]
+        clients_b = [{"email": "bob", "group": "shared", "traffic": {"up": 2}},
+                     {"email": "same-email", "group": "B组", "traffic": {}}]
+        a = EXPORTER.render_metrics("panel-a", [], ["alice"], clients_a)
+        b = EXPORTER.render_metrics("panel-b", [], ["bob"], clients_b)
+        self.assertIn('xui_client_online{server="panel-a",email="alice",group="shared"} 1', a)
+        self.assertIn('xui_client_online{server="panel-b",email="bob",group="shared"} 1', b)
+        self.assertIn('group="A\\"组\\\\线路"', "\n".join(a))
+        self.assertNotIn('group="B组"', "\n".join(a))
+        self.assertIn('group="未分组"', "\n".join(a))
+        self.assertEqual(EXPORTER.client_group_map(clients_b)["same-email"], "B组")
+
+    def test_log_groups_and_group_changes_do_not_replay_seen_records(self):
+        panel = {"name": "panel-a", "url": "https://panel.example.com/panel/api/inbounds/list"}
+        entry = {"DateTime": "2026-10-14T00:00:00Z", "FromAddress": "1.2.3.4:1234",
+                 "ToAddress": "tcp:example.com:443", "Email": "alice"}
+        self.assertEqual(EXPORTER.normalize_log(entry, "panel-a", {"alice": "shared"})[2]["group"], "shared")
+        self.assertEqual(EXPORTER.normalize_log(entry, "panel-b", {"alice": "other"})[2]["group"], "other")
+        self.assertEqual(EXPORTER.normalize_log(entry, "panel-a", {"alice": "未分组"})[2]["group"], "未分组")
+        self.assertEqual(EXPORTER.normalize_log(dict(entry, Email=""), "panel-a", {"alice": "shared"})[2]["group"], "未识别客户端")
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "push_loki") as push:
+            forwarder = EXPORTER.LogForwarder(panel, directory)
+            try:
+                forwarder.forward([entry], now=1791936000, client_groups={"alice": "shared"})
+                self.assertEqual(push.call_args[0][0][0]["stream"]["group"], "shared")
+                forwarder.forward([entry], now=1791936030, client_groups={"alice": "renamed"})
+                push.assert_called_once()
+            finally:
+                forwarder.close()
+
+    def test_worker_retains_panel_group_map_when_client_api_fails(self):
+        panel = {"name": "node-a", "url": "https://panel.example.com/panel/api/inbounds/list",
+                 "token_file": "/run/secrets/xui-node-a.token", "logs": True}
+        worker = EXPORTER.PanelWorker(panel)
+        forwarder = mock.Mock()
+        forwarder.forward.return_value = {"window_gap": 0}
+        fail_clients = False
+        def request(url, method="GET", token=None, form=None):
+            if url.endswith("/clients/list"):
+                if fail_clients:
+                    raise OSError("unavailable")
+                return [{"email": "alice", "group": "shared", "traffic": {}}]
+            return []
+        with mock.patch.object(EXPORTER, "read_token", return_value="secret"), \
+                mock.patch.object(EXPORTER, "request_json", side_effect=request):
+            worker.poll(forwarder)
+            self.assertIn('group="shared"', "\n".join(worker.snapshot()))
+            fail_clients = True
+            worker.poll(forwarder)
+            forwarder.forward.assert_called_with([], client_groups={"alice": "shared"})
+
     def test_update_retains_unprovided_fields_token_and_list_order(self):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "panels.json"
@@ -178,6 +232,51 @@ class ExporterTest(unittest.TestCase):
         output = "\n".join(worker.snapshot())
         self.assertIn('xui_exporter_up{server="node-a"} 1', output)
         self.assertIn('xui_access_log_up{server="node-a"} 0', output)
+
+    def test_telegram_bot_uses_metrics_for_queries_and_persists_group_subscriptions(self):
+        panel = {"name": "node-a", "url": "https://panel.example.com/panel/api/inbounds/list"}
+        worker = EXPORTER.PanelWorker(panel)
+        worker.metrics = [
+            EXPORTER.metric("xui_exporter_up", 1, server="node-a"),
+            EXPORTER.metric("xui_client_online", 1, server="node-a", email="alice", group="shared"),
+            EXPORTER.metric("xui_client_traffic_bytes_total", 1024, server="node-a", email="alice", group="shared", direction="uplink"),
+            EXPORTER.metric("xui_client_traffic_bytes_total", 2048, server="node-a", email="alice", group="shared", direction="downlink"),
+        ]
+        config = {"token": "bot-token", "allowed_user_ids": [42], "allowed_chat_ids": []}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
+            bot = EXPORTER.TelegramBot(config, [worker], directory)
+            try:
+                bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/groups"})
+                self.assertIn("shared", request.call_args.args[2]["text"])
+                bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/traffic shared"})
+                self.assertIn("上行 1.00 KiB", request.call_args.args[2]["text"])
+                bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/watch shared"})
+                bot.process_online()  # first successful observation establishes a quiet baseline
+                worker.metrics[1] = EXPORTER.metric("xui_client_online", 0, server="node-a", email="alice", group="shared")
+                bot.process_online()
+                worker.metrics[1] = EXPORTER.metric("xui_client_online", 1, server="node-a", email="alice", group="shared")
+                bot.process_online()
+                self.assertEqual(request.call_args.args[1], "sendMessage")
+                self.assertEqual(request.call_args.args[2]["chat_id"], 420)
+                self.assertIn("客户端上线", request.call_args.args[2]["text"])
+                self.assertIn((420, "shared"), bot.db.execute("SELECT chat_id,group_name FROM subscriptions").fetchall())
+                bot.handle_message({"chat": {"id": 421}, "from": {"id": 99}, "text": "/groups"})
+                self.assertEqual(request.call_count, 4)
+            finally:
+                bot.db.close()
+
+    def test_telegram_config_requires_a_valid_allowlist_and_token_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = pathlib.Path(directory) / "telegram.json"
+            token_path = pathlib.Path(directory) / "telegram-token"
+            token_path.write_text("123:secret\n", encoding="utf-8")
+            config_path.write_text(json.dumps({"token_file": str(token_path), "allowed_user_ids": [42]}), encoding="utf-8")
+            with mock.patch.object(EXPORTER, "read_token", return_value="123:secret"):
+                with self.assertRaises(ValueError):
+                    EXPORTER.telegram_config(config_path)
+            config_path.write_text(json.dumps({"token_file": "/run/secrets/telegram-bot.token", "allowed_user_ids": [42]}), encoding="utf-8")
+            with mock.patch.object(EXPORTER, "read_token", return_value="123:secret"):
+                self.assertEqual(EXPORTER.telegram_config(config_path)["allowed_user_ids"], [42])
 
 
 if __name__ == "__main__":

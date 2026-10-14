@@ -38,6 +38,27 @@ class XrayGatewayDashboardTest(unittest.TestCase):
         order = panel["transformations"][1]["options"]["indexByName"]
         self.assertLess(order["Value"], order["protocol"])
 
+    def test_groups_filter_client_metrics_and_logs_but_not_panel_totals(self):
+        script = (DASHBOARD_PATH.parents[1] / "deploy-xray-grafana-loki-alloy.sh").read_text(encoding="utf-8")
+        access = json.loads(script.split('cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<\'EOF\'\n')[1].split('\nEOF\n')[0])
+        for dashboard in (self.dashboard, access):
+            variables = {v["name"]: v for v in dashboard["templating"]["list"]}
+            group = variables["group"]
+            self.assertIn('server=~"$server"', group["query"])
+            self.assertTrue(group["multi"])
+            self.assertEqual(group["allValue"], ".*")  # retain pre-upgrade data without group labels
+            for panel in dashboard["panels"]:
+                for target in panel["targets"]:
+                    expr = target["expr"]
+                    if "xui_client_" in expr or 'job="xray-access"' in expr:
+                        self.assertIn('group=~"$group"', expr)
+                    else:
+                        self.assertNotIn("$group", expr)
+        client = next(v for v in access["templating"]["list"] if v["name"] == "client")
+        self.assertIn('group=~"$group"', client["query"])
+        inbound = next(p for p in self.dashboard["panels"] if p["id"] == 7)
+        self.assertIn("全部分组", inbound["title"])
+
 
 if __name__ == "__main__":
     unittest.main()

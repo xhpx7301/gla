@@ -106,7 +106,7 @@ class DashboardTableTest(unittest.TestCase):
         self.assertEqual(self.gateway["title"], "Xray 网关流量与连接")
         self.assertEqual(self.security["timezone"], "Asia/Shanghai")
         self.assertEqual(self.gateway["timezone"], "Asia/Shanghai")
-        self.assertEqual([item["name"] for item in self.gateway["templating"]["list"]], ["server"])
+        self.assertEqual([item["name"] for item in self.gateway["templating"]["list"]], ["server", "group"])
 
         for dashboard, panel_ids in ((self.security, (8, 9)), (self.gateway, (6, 7, 8))):
             for panel_id in panel_ids:

@@ -18,8 +18,8 @@ import sys
 import tempfile
 import threading
 import time
-import urllib.error
 import urllib.parse
+import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -29,6 +29,7 @@ TOKEN_FILE = os.environ.get("XUI_API_TOKEN_FILE", "/run/secrets/xui_api_token")
 PANELS_FILE = os.environ.get("XUI_PANELS_FILE", "")
 STATE_DIR = os.environ.get("XUI_STATE_DIR", "/var/lib/xui")
 LOKI_URL = os.environ.get("XUI_LOKI_URL", "http://alloy:3500/loki/api/v1/push")
+TELEGRAM_CONFIG_FILE = os.environ.get("XUI_TELEGRAM_CONFIG_FILE", "/run/secrets/telegram-config.json")
 TIMEOUT = float(os.environ.get("XUI_API_TIMEOUT", "10"))
 SERVER_NAME = os.environ.get("SERVER_NAME", "").strip() or "unknown"
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}\Z")
@@ -129,6 +130,187 @@ def read_token(path=None):
     return token
 
 
+def telegram_config(path=None):
+    config_path = Path(path or TELEGRAM_CONFIG_FILE)
+    if not config_path.exists():
+        return None
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise ValueError("Telegram 配置必须是 JSON 对象")
+    user_ids = config.get("allowed_user_ids", [])
+    chat_ids = config.get("allowed_chat_ids", [])
+    if (not isinstance(config, dict) or not isinstance(user_ids, list) or not isinstance(chat_ids, list)
+            or (not user_ids and not chat_ids)
+            or any(type(value) is not int for value in [*user_ids, *chat_ids])):
+        raise ValueError("Telegram 配置无效：必须配置数字用户 ID 或 Chat ID")
+    token_file = config.get("token_file", "")
+    if not isinstance(token_file, str) or not token_file.startswith("/run/secrets/") or "/" in token_file[len("/run/secrets/"):] :
+        raise ValueError("Telegram Token 文件必须位于 /run/secrets/ 目录")
+    return {**config, "allowed_user_ids": user_ids, "allowed_chat_ids": chat_ids, "token": read_token(token_file)}
+
+
+def telegram_request(token, method, payload=None, timeout=35):
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    data = urllib.parse.urlencode(payload).encode() if payload is not None else None
+    request = urllib.request.Request(url, data=data, method="POST" if data is not None else "GET")
+    with HTTP.open(request, timeout=timeout) as response:
+        result = json.load(response)
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        raise RuntimeError("Telegram API 返回无效响应")
+    return result.get("result")
+
+
+def parse_metric_line(line):
+    match = re.fullmatch(r'([a-zA-Z_:][a-zA-Z0-9_:]*)\{(.*)\}\s+([-+0-9.eE]+)', line)
+    if not match:
+        return None
+    tags = {}
+    for item in re.finditer(r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:\\.|[^"\\])*)"', match[2]):
+        tags[item[1]] = item[2].replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
+    return match[1], tags, float(match[3])
+
+
+def format_bytes(value):
+    value = max(0, int(value))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.2f} {unit}"
+        value /= 1024
+
+
+class TelegramBot:
+    def __init__(self, config, workers, state_dir):
+        self.config = config
+        self.workers = workers
+        Path(state_dir).mkdir(parents=True, exist_ok=True)
+        self.db = sqlite3.connect(str(Path(state_dir) / "telegram.sqlite"), timeout=10, check_same_thread=False)
+        self.db.execute("CREATE TABLE IF NOT EXISTS state (server TEXT, email TEXT, group_name TEXT, online INTEGER, PRIMARY KEY(server,email))")
+        self.db.execute("CREATE TABLE IF NOT EXISTS subscriptions (chat_id INTEGER, group_name TEXT, PRIMARY KEY(chat_id,group_name))")
+        self.db.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)")
+        self.offset = 0
+
+    def snapshot(self):
+        series = {}
+        servers_up = set()
+        for worker in self.workers:
+            for line in worker.snapshot():
+                parsed = parse_metric_line(line)
+                if not parsed:
+                    continue
+                name, tags, value = parsed
+                server = tags.get("server", "")
+                if name == "xui_exporter_up" and value == 1:
+                    servers_up.add(server)
+                if name == "xui_client_online":
+                    key = (server, tags.get("email", ""))
+                    series.setdefault(key, {"server": server, "email": key[1], "group": tags.get("group", "未分组"), "online": 0, "up": 0, "down": 0})
+                    series[key]["online"] = int(value)
+                elif name == "xui_client_traffic_bytes_total":
+                    key = (server, tags.get("email", ""))
+                    series.setdefault(key, {"server": server, "email": key[1], "group": tags.get("group", "未分组"), "online": 0, "up": 0, "down": 0})
+                    series[key]["up" if tags.get("direction") == "uplink" else "down"] = int(value)
+        for item in series.values():
+            item["up"] = item["up"] if item["server"] in servers_up else 0
+            item["down"] = item["down"] if item["server"] in servers_up else 0
+        return series, servers_up
+
+    def send(self, chat_id, text):
+        telegram_request(self.config["token"], "sendMessage", {"chat_id": chat_id, "text": text})
+
+    def process_online(self):
+        series, servers_up = self.snapshot()
+        if not servers_up:
+            return
+        baseline = self.db.execute("SELECT value FROM metadata WHERE key='baseline'").fetchone()
+        changes = []
+        with self.db:
+            current_keys = set(series)
+            for old_server, old_email in self.db.execute("SELECT server,email FROM state").fetchall():
+                if old_server in servers_up and (old_server, old_email) not in current_keys:
+                    self.db.execute("UPDATE state SET online=0 WHERE server=? AND email=?", (old_server, old_email))
+            for key, item in series.items():
+                if item["server"] not in servers_up:
+                    continue
+                old = self.db.execute("SELECT group_name,online FROM state WHERE server=? AND email=?", key).fetchone()
+                if old and old[1] == 0 and item["online"] == 1:
+                    changes.append((key[0], item["email"], item["group"], "online"))
+                self.db.execute("INSERT OR REPLACE INTO state VALUES (?,?,?,?)", (*key, item["group"], item["online"]))
+            if baseline is None:
+                self.db.execute("INSERT INTO metadata VALUES ('baseline','1')")
+                changes.clear()
+        for server, email, group, _ in changes:
+            chats = [row[0] for row in self.db.execute("SELECT chat_id FROM subscriptions WHERE group_name=?", (group,))]
+            for chat_id in chats:
+                try:
+                    self.send(chat_id, f"客户端上线\n分组：{group}\n客户端：{email}\n面板：{server}")
+                except ERRORS as error:
+                    print(f"Telegram 通知发送失败 ({error_kind(error)})", file=sys.stderr, flush=True)
+
+    def handle_message(self, message):
+        chat_id = message.get("chat", {}).get("id")
+        user_id = message.get("from", {}).get("id")
+        allowed_users = set(self.config.get("allowed_user_ids", []))
+        allowed_chats = set(self.config.get("allowed_chat_ids", []))
+        if not isinstance(chat_id, int) or (user_id not in allowed_users and chat_id not in allowed_chats):
+            return
+        text = (message.get("text") or "").strip()
+        command, _, argument = text.partition(" ")
+        command = command.split("@", 1)[0].lower()
+        argument = argument.strip()
+        series, _ = self.snapshot()
+        groups = sorted({item["group"] for item in series.values()})
+        if command in ("/start", "/help"):
+            reply = "命令：\n/groups 查看分组\n/online [分组] 查看在线客户端\n/traffic [分组] 查看累计流量\n/watch <分组> 订阅上线通知\n/unwatch <分组> 取消订阅\n/watches 查看订阅"
+        elif command == "/groups":
+            reply = "当前分组：\n" + ("\n".join(groups) if groups else "暂无数据")
+        elif command == "/online":
+            rows = [item for item in series.values() if item["online"] and (not argument or item["group"] == argument)]
+            reply = "在线客户端：\n" + ("\n".join(f"{x['group']} | {x['email']} | {x['server']} | 上行 {format_bytes(x['up'])} | 下行 {format_bytes(x['down'])} | 总计 {format_bytes(x['up'] + x['down'])}" for x in sorted(rows, key=lambda x: (x["group"], x["email"]))) if rows else "没有匹配的在线客户端")
+        elif command == "/traffic":
+            totals = {}
+            for item in series.values():
+                if argument and item["group"] != argument:
+                    continue
+                total = totals.setdefault(item["group"], [0, 0])
+                total[0] += item["up"]; total[1] += item["down"]
+            rows = [f"{group} | 上行 {format_bytes(values[0])} | 下行 {format_bytes(values[1])} | 总计 {format_bytes(sum(values))}" for group, values in sorted(totals.items())]
+            reply = "累计流量：\n" + ("\n".join(rows) if rows else "没有匹配的分组流量")
+        elif command in ("/watch", "/unwatch") and argument:
+            if argument not in groups:
+                reply = f"没有找到分组：{argument}。使用 /groups 查看分组。"
+            elif command == "/watch":
+                with self.db: self.db.execute("INSERT OR IGNORE INTO subscriptions VALUES (?,?)", (chat_id, argument))
+                reply = f"已订阅分组：{argument}"
+            else:
+                with self.db: self.db.execute("DELETE FROM subscriptions WHERE chat_id=? AND group_name=?", (chat_id, argument))
+                reply = f"已取消订阅：{argument}"
+        elif command == "/watches":
+            rows = [row[0] for row in self.db.execute("SELECT group_name FROM subscriptions WHERE chat_id=? ORDER BY group_name", (chat_id,))]
+            reply = "已订阅分组：\n" + ("\n".join(rows) if rows else "暂无订阅")
+        else:
+            reply = "无法识别命令。发送 /help 查看命令。"
+        self.send(chat_id, reply[:4000])
+
+    def run(self):
+        next_check = 0
+        while True:
+            if time.monotonic() >= next_check:
+                self.process_online()
+                next_check = time.monotonic() + 15
+            try:
+                updates = telegram_request(self.config["token"], "getUpdates", {"offset": self.offset, "timeout": 20}, timeout=30) or []
+                for update in updates:
+                    self.offset = max(self.offset, int(update["update_id"]) + 1)
+                    if "message" in update:
+                        try:
+                            self.handle_message(update["message"])
+                        except ERRORS as error:
+                            print(f"Telegram 命令处理失败 ({error_kind(error)})", file=sys.stderr, flush=True)
+            except ERRORS as error:
+                print(f"Telegram 连接失败 ({error_kind(error)})", file=sys.stderr, flush=True)
+                time.sleep(5)
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, response_headers, new_url):
         # Never forward panel tokens to a login page or another origin.
@@ -164,10 +346,25 @@ def online_url():
     return endpoint(API_URL, "/clients/onlines")
 
 
+def client_group_map(clients):
+    if not isinstance(clients, list) or any(not isinstance(c, dict) for c in clients):
+        raise ValueError("客户端列表响应类型不正确")
+    groups = {}
+    for client in clients:
+        if not client.get("email"):
+            continue
+        group = client.get("group") or "未分组"
+        if not isinstance(group, str):
+            raise ValueError("客户端分组响应类型不正确")
+        groups[client["email"]] = group
+    return groups
+
+
 def render_metrics(server, inbounds, online_emails, clients=None):
     if not isinstance(inbounds, list) or not isinstance(online_emails, list):
         raise ValueError("入站或在线列表响应类型不正确")
     online = set(online_emails)
+    groups = client_group_map(clients) if clients is not None else {}
     lines = [metric("xui_exporter_up", 1, server=server),
              metric("xui_metrics_last_success_timestamp_seconds", time.time(), server=server)]
     for inbound in inbounds:
@@ -191,7 +388,8 @@ def render_metrics(server, inbounds, online_emails, clients=None):
         traffic = records.get(email, {})
         if not isinstance(traffic, dict):
             raise ValueError("客户端流量响应类型不正确")
-        tags = {"server": server, "email": email}
+        tags = {"server": server, "email": email,
+                "group": groups.get(email, "未分组" if clients is None else "未识别客户端")}
         if email in records:
             for direction, key in (("uplink", "up"), ("downlink", "down")):
                 lines.append(metric("xui_client_traffic_bytes_total", int(traffic.get(key) or 0), direction=direction, **tags))
@@ -216,7 +414,7 @@ def timestamp_ns(value):
     return int(seconds) * 1_000_000_000 + int((match[2] or "").ljust(9, "0"))
 
 
-def normalize_log(entry, server):
+def normalize_log(entry, server, client_groups=None):
     ns = timestamp_ns(entry.get("DateTime", ""))
     source, target = entry.get("FromAddress", ""), entry.get("ToAddress", "")
     inbound, outbound, email = (entry.get(k) or "" for k in ("Inbound", "Outbound", "Email"))
@@ -229,7 +427,8 @@ def normalize_log(entry, server):
     line = f'{date:%Y/%m/%d %H:%M:%S}.{fraction:09d} from {source} accepted {target} [{inbound} -> {outbound}]'
     if email:
         line += f" email: {email}"
-    tags = {"job": "xray-access", "server": server, "collector": "3x-ui-api"}
+    tags = {"job": "xray-access", "server": server, "collector": "3x-ui-api",
+            "group": (client_groups or {}).get(email, "未识别客户端")}
     for key, value in (("email", email), ("inbound", inbound), ("outbound", outbound)):
         if value:
             tags[key] = value
@@ -253,7 +452,7 @@ class LogForwarder:
         self.db = sqlite3.connect(str(Path(state_dir) / (identity + ".sqlite")))
         self.db.execute("CREATE TABLE IF NOT EXISTS seen (digest TEXT PRIMARY KEY, occurrences INTEGER, touched REAL)")
 
-    def forward(self, entries, now=None):
+    def forward(self, entries, now=None, client_groups=None):
         if entries is None:
             entries = []
         if not isinstance(entries, list):
@@ -263,7 +462,7 @@ class LogForwarder:
         invalid = 0
         for entry in entries:
             try:
-                digest, ns, tags, line = normalize_log(entry, self.panel["name"])
+                digest, ns, tags, line = normalize_log(entry, self.panel["name"], client_groups)
                 if not (now - self.panel.get("max_log_age", 3600)) * 1e9 <= ns <= (now + 300) * 1e9:
                     continue  # avoid Loki rejecting an entire batch of expired records
                 counts[digest] += 1
@@ -308,6 +507,7 @@ def error_kind(error):
 class PanelWorker:
     def __init__(self, panel):
         self.panel = panel
+        self.client_groups = {}
         self.lock = threading.Lock()
         self.metrics = [metric("xui_exporter_up", 0, server=panel["name"])]
         self.log_status = {"enabled": int(panel.get("logs", False)), "up": 0,
@@ -320,6 +520,7 @@ class PanelWorker:
             token = read_token(panel["token_file"])
             inbounds = request_json(panel["url"], token=token)
             clients = request_json(endpoint(panel["url"], "/clients/list"), token=token)
+            self.client_groups = client_group_map(clients or [])
             online = request_json(endpoint(panel["url"], "/clients/onlines"), "POST", token=token)
             data = render_metrics(panel["name"], inbounds or [], online or [], clients or [])
         except ERRORS as error:
@@ -335,7 +536,7 @@ class PanelWorker:
             token = read_token(panel["token_file"])
             entries = request_json(endpoint(panel["url"], f'/server/xraylogs/{panel.get("log_count", 1000)}'),
                                    "POST", token=token, form={"showDirect": "true", "showBlocked": "true", "showProxy": "true"})
-            stats = forwarder.forward(entries)
+            stats = forwarder.forward(entries, client_groups=self.client_groups)
             with self.lock:
                 self.log_status.update(stats, up=1, last_success_timestamp_seconds=time.time())
             if stats["window_gap"]:
@@ -465,9 +666,44 @@ def panels_cli(argv):
         (Path(PANELS_FILE).parent / f"xui-{args.name}.token").unlink(missing_ok=True)
 
 
+def telegram_cli(argv):
+    parser = argparse.ArgumentParser(description="管理 Telegram Bot 配置")
+    parser.add_argument("operation", choices=("set", "delete", "show"))
+    parser.add_argument("--user-ids", default="")
+    args = parser.parse_args(argv)
+    path = Path(TELEGRAM_CONFIG_FILE)
+    if args.operation == "show":
+        config = telegram_config()
+        if config:
+            print("已配置 Telegram Bot；允许用户数：%d" % len(config["allowed_user_ids"]))
+        else:
+            print("未配置 Telegram Bot")
+        return
+    if args.operation == "delete":
+        path.unlink(missing_ok=True)
+        path.parent.joinpath("telegram-bot.token").unlink(missing_ok=True)
+        return
+    try:
+        user_ids = [int(value.strip()) for value in args.user_ids.split(",") if value.strip()]
+    except ValueError as error:
+        raise ValueError("用户 ID 必须是逗号分隔的整数") from error
+    if not user_ids:
+        raise ValueError("至少需要一个 Telegram 用户 ID")
+    token = sys.stdin.read().strip()
+    if not token or any(char.isspace() for char in token):
+        raise ValueError("Telegram Bot Token 不能为空或包含空白字符")
+    token_path = path.parent / "telegram-bot.token"
+    atomic_write(token_path, token + "\n")
+    atomic_write(path, json.dumps({"token_file": "/run/secrets/telegram-bot.token",
+                                   "allowed_user_ids": sorted(set(user_ids))}, ensure_ascii=False, indent=2) + "\n")
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "panels":
         panels_cli(sys.argv[2:])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "telegram":
+        telegram_cli(sys.argv[2:])
         return
     if PANELS_FILE:
         panels = load_config(PANELS_FILE)
@@ -475,6 +711,14 @@ def main():
             worker = PanelWorker(panel)
             WORKERS.append(worker)
             threading.Thread(target=worker.run, daemon=True, name=panel["name"]).start()
+        try:
+            config = telegram_config()
+            if config:
+                threading.Thread(target=TelegramBot(config, WORKERS, STATE_DIR).run,
+                                 daemon=True, name="telegram-bot").start()
+                print("Telegram Bot started", flush=True)
+        except ERRORS as error:
+            print(f"Telegram 配置无效，Bot 未启动 ({error_kind(error)})", file=sys.stderr, flush=True)
     elif not API_URL:
         raise ValueError("缺少 XUI_API_URL 或 XUI_PANELS_FILE")
     print("xui exporter started", flush=True)

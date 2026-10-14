@@ -134,6 +134,8 @@ chmod() { :; }
             self.assertIn('prometheus.scrape "host"', alloy)
             self.assertIn('loki.source.journal "ssh"', alloy)
             self.assertIn("XUI_PANELS_FILE: /run/secrets/xui-panels.json", compose)
+            self.assertIn("XUI_TELEGRAM_CONFIG_FILE: /run/secrets/telegram-config.json", compose)
+            self.assertIn("./secrets:/run/secrets:ro", compose)
             self.assertIn("panel.example.com:host-gateway", compose)
             for obsolete in ("obsolete-xray", 'loki.source.file "xray',
                              'local.file_match "xray', "ENABLE_XRAY", "XRAY_LOG"):
