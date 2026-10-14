@@ -650,8 +650,7 @@ class TelegramBot:
         # Telegram entity offsets count UTF-16 units, including emoji before the IP.
         entities = [{"type": "code", "offset": len(notification[:match.start(1)].encode("utf-16-le")) // 2,
                      "length": len(match[1].encode("utf-16-le")) // 2}]
-        keyboard = {"inline_keyboard": [[{"text": f"📋 {address}", "copy_text": {"text": address}}]]}
-        self.send(chat_id, notification, reply_markup=keyboard, entities=entities)
+        self.send(chat_id, notification, entities=entities)
 
     def send_online_notify_test(self, chat_id):
         series, servers_up = self.snapshot()

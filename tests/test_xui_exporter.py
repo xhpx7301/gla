@@ -95,8 +95,7 @@ class ExporterTest(unittest.TestCase):
                 self.assertIn("📍 归属地：广东深圳\n🏢 运营商：中国电信", message)
                 self.assertIn("🕒 IP 记录时间：2026-10-14 16:30:00（UTC+8）", message)
                 payload = send.call_args.args[2]
-                self.assertEqual(json.loads(payload["reply_markup"])["inline_keyboard"][0][0]["copy_text"],
-                                 {"text": "203.0.113.1"})
+                self.assertNotIn("reply_markup", payload)
                 entity, = json.loads(payload["entities"])
                 encoded = message.encode("utf-16-le")
                 self.assertEqual(encoded[entity["offset"] * 2:(entity["offset"] + entity["length"]) * 2]
@@ -151,8 +150,7 @@ class ExporterTest(unittest.TestCase):
                 encoded = text.encode("utf-16-le")
                 self.assertEqual(encoded[entity["offset"] * 2:(entity["offset"] + entity["length"]) * 2]
                                  .decode("utf-16-le"), address)
-                button = json.loads(payload["reply_markup"])["inline_keyboard"][0][0]
-                self.assertEqual(button["copy_text"], {"text": address})
+                self.assertNotIn("reply_markup", payload)
                 self.assertNotIn("parse_mode", payload)
                 self.assertIn(item["email"], payload["text"])
                 ip_log.return_value = None
@@ -182,8 +180,7 @@ class ExporterTest(unittest.TestCase):
                 encoded = tagged[0]["text"].encode("utf-16-le")
                 self.assertEqual(encoded[entity["offset"] * 2:(entity["offset"] + entity["length"]) * 2]
                                  .decode("utf-16-le"), "203.0.113.1")
-                self.assertEqual(json.loads(payloads[-1]["reply_markup"])["inline_keyboard"][0][0]["copy_text"],
-                                 {"text": "203.0.113.1"})
+                self.assertTrue(all("reply_markup" not in payload for payload in payloads))
             finally:
                 bot.db.close()
 
@@ -677,8 +674,7 @@ class ExporterTest(unittest.TestCase):
                 self.assertIn("客户端：alice", text)
                 self.assertIn("当前状态：离线", text)
                 self.assertIn("最近记录 IP：203.0.113.5", text)
-                self.assertEqual(json.loads(request.call_args.args[2]["reply_markup"])["inline_keyboard"][0][0]["copy_text"],
-                                 {"text": "203.0.113.5"})
+                self.assertNotIn("reply_markup", request.call_args.args[2])
                 self.assertEqual(bot.db.execute("SELECT COUNT(*) FROM notification_cooldowns").fetchone(), (0,))
                 self.assertEqual(bot.db.execute("SELECT COUNT(*) FROM online_confirmations").fetchone(), (0,))
             finally:
