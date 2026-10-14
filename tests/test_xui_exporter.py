@@ -520,6 +520,41 @@ class ExporterTest(unittest.TestCase):
             finally:
                 bot.db.close()
 
+    def test_online_notification_menu_manages_groups_and_sends_non_mutating_test(self):
+        worker = EXPORTER.PanelWorker({"name": "node-a"})
+        worker.metrics = EXPORTER.render_metrics("node-a", [], [], [
+            {"email": "alice", "group": "shared", "traffic": {"up": 1024}}])
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(EXPORTER, "telegram_request") as request, \
+                mock.patch.object(worker, "last_ip_for_client", return_value={
+                    "ip": "203.0.113.5", "time": "2026-10-14 08:00:00"}):
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, [worker], directory)
+            try:
+                message = {"chat": {"id": 420}, "from": {"id": 42}}
+                bot.handle_message(dict(message, text="/online_notify"))
+                settings = request.call_args.args[2]
+                keyboard = json.loads(settings["reply_markup"])
+                self.assertEqual(keyboard["inline_keyboard"][1][0]["callback_data"], "onlinenotify:test")
+                bot.handle_callback({"id": "add", "from": {"id": 42}, "message": message,
+                                    "data": "onlinenotify:add"})
+                picker = json.loads(request.call_args.args[2]["reply_markup"])
+                self.assertEqual(picker["inline_keyboard"][0][0]["callback_data"], "onlinenotify:add:0")
+                bot.handle_callback({"id": "select", "from": {"id": 42}, "message": message,
+                                    "data": "onlinenotify:add:0"})
+                self.assertEqual(bot.db.execute("SELECT group_name FROM subscriptions WHERE chat_id=420").fetchone(),
+                                 ("shared",))
+                bot.handle_callback({"id": "test", "from": {"id": 42}, "message": message,
+                                    "data": "onlinenotify:test"})
+                text = request.call_args.args[2]["text"]
+                self.assertIn("🧪 上线通知测试", text)
+                self.assertIn("客户端：alice", text)
+                self.assertIn("当前状态：离线", text)
+                self.assertIn("最近记录 IP：203.0.113.5", text)
+                self.assertEqual(bot.db.execute("SELECT COUNT(*) FROM notification_cooldowns").fetchone(), (0,))
+                self.assertEqual(bot.db.execute("SELECT COUNT(*) FROM online_confirmations").fetchone(), (0,))
+            finally:
+                bot.db.close()
+
     def test_telegram_scheduled_traffic_notifications_include_panel_totals_and_deltas(self):
         workers = [EXPORTER.PanelWorker({"name": name}) for name in ("node-a", "node-b")]
         clients = [
@@ -586,7 +621,7 @@ class ExporterTest(unittest.TestCase):
                     "SELECT enabled FROM traffic_notify_settings WHERE chat_id=420").fetchone(), (1,))
                 bot.handle_message(dict(message, text="/traffic_notify time 8:00"))
                 self.assertEqual(bot.db.execute(
-                    "SELECT notify_time FROM traffic_notify_settings WHERE chat_id=420").fetchone(), ("20:00",))
+                    "SELECT notify_time FROM traffic_notify_settings WHERE chat_id=420").fetchone(), ("08:00",))
                 bot.handle_message(dict(message, text="/traffic_notify time 08:15"))
                 self.assertEqual(bot.db.execute(
                     "SELECT enabled,notify_time FROM traffic_notify_settings WHERE chat_id=420").fetchone(), (1, "08:15"))
@@ -594,6 +629,47 @@ class ExporterTest(unittest.TestCase):
                 self.assertEqual(bot.db.execute(
                     "SELECT group_name FROM traffic_notify_groups WHERE chat_id=420").fetchone(), ("shared",))
                 self.assertEqual(bot.main_keyboard()["inline_keyboard"][3][0]["text"], "📊 流量通知")
+            finally:
+                bot.db.close()
+
+    def test_traffic_notification_test_sends_current_data_without_changing_state(self):
+        worker = EXPORTER.PanelWorker({"name": "node-a"})
+        worker.metrics = EXPORTER.render_metrics("node-a", [], [], [
+            {"email": "alice", "group": "shared", "traffic": {"up": 1024, "down": 2048}}])
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, [worker], directory)
+            try:
+                with bot.db:
+                    bot.db.execute("INSERT INTO traffic_notify_settings VALUES (420,1,'20:00')")
+                    bot.db.execute("INSERT INTO traffic_notify_groups VALUES (420,'shared')")
+                    bot.db.execute("INSERT INTO traffic_notify_baselines VALUES (420,'shared','node-a',512,1024)")
+                    bot.db.execute("INSERT INTO traffic_notify_runs VALUES (420,'2026-10-13')")
+                bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/traffic_notify test"})
+                text = request.call_args.args[2]["text"]
+                self.assertIn("🧪 流量通知测试", text)
+                self.assertIn("🖥 面板：node-a", text)
+                self.assertIn("当前累计：3.00 KiB", text)
+                self.assertEqual(bot.db.execute("SELECT * FROM traffic_notify_baselines").fetchone(),
+                                 (420, "shared", "node-a", 512, 1024))
+                self.assertEqual(bot.db.execute("SELECT * FROM traffic_notify_runs").fetchone(),
+                                 (420, "2026-10-13"))
+            finally:
+                bot.db.close()
+
+    def test_telegram_time_prompt_keeps_waiting_after_invalid_input(self):
+        worker = EXPORTER.PanelWorker({"name": "node-a"})
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, [worker], directory)
+            try:
+                bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/traffic_notify"})
+                bot.handle_callback({"id": "time", "from": {"id": 42}, "message": {"chat": {"id": 420}},
+                                     "data": "trafficnotify:time"})
+                bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "8:0"})
+                self.assertIn(420, bot.pending_traffic_times)
+                bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "08:00"})
+                self.assertNotIn(420, bot.pending_traffic_times)
+                self.assertEqual(bot.db.execute(
+                    "SELECT notify_time FROM traffic_notify_settings WHERE chat_id=420").fetchone(), ("08:00",))
             finally:
                 bot.db.close()
 

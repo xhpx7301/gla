@@ -202,13 +202,22 @@ def format_bytes(value):
         value /= 1024
 
 
+def normalize_notify_time(value):
+    """Accept 8:00 and 08:00, storing a canonical two-digit-hour value."""
+    match = re.fullmatch(r"(\d{1,2}):([0-5]\d)", str(value).strip())
+    if not match or int(match[1]) > 23:
+        return None
+    return f"{int(match[1]):02d}:{match[2]}"
+
+
 class TelegramBot:
     BUTTON_COMMANDS = {
         "菜单": "/menu", "☰ 菜单": "/menu", "M": "/menu",
         "📡 状态": "/status", "👥 分组": "/groups", "🟢 在线客户端": "/online",
         "📈 累计流量": "/traffic", "🔔 添加订阅": "/watch",
         "🔕 取消订阅": "/unwatch", "📋 我的订阅": "/watches", "💡 帮助": "/help",
-        "📊 流量通知": "/traffic_notify", "📖 命令说明": "/commands",
+        "🔔 上线通知": "/online_notify", "📊 流量通知": "/traffic_notify",
+        "📖 命令说明": "/commands",
     }
     COMMANDS = [
         {"command": "start", "description": "显示主菜单"},
@@ -219,6 +228,7 @@ class TelegramBot:
         {"command": "groups", "description": "查看客户端分组"},
         {"command": "online", "description": "查看在线客户端"},
         {"command": "traffic", "description": "查看分组累计流量"},
+        {"command": "online_notify", "description": "管理上线通知"},
         {"command": "watch", "description": "订阅分组上线通知"},
         {"command": "unwatch", "description": "取消分组上线通知"},
         {"command": "watches", "description": "查看已订阅分组"},
@@ -242,6 +252,7 @@ class TelegramBot:
         self.db.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)")
         self.offset = 0
         self.pending_groups = {}
+        self.pending_online_groups = {}
         self.pending_traffic_groups = {}
         self.pending_traffic_times = set()
         self.notification_cooldown_seconds = validate_notification_cooldown(
@@ -283,8 +294,7 @@ class TelegramBot:
              {"text": "👥 分组", "callback_data": "menu:groups"}],
             [{"text": "🟢 在线客户端", "callback_data": "menu:online"},
              {"text": "📈 累计流量", "callback_data": "menu:traffic"}],
-            [{"text": "🔔 添加订阅", "callback_data": "menu:watch"},
-             {"text": "🔕 取消订阅", "callback_data": "menu:unwatch"}],
+            [{"text": "🔔 上线通知", "callback_data": "menu:online_notify"}],
             [{"text": "📊 流量通知", "callback_data": "menu:traffic_notify"}],
             [{"text": "📋 我的订阅", "callback_data": "menu:watches"},
              {"text": "💡 帮助", "callback_data": "menu:help"}],
@@ -361,6 +371,7 @@ class TelegramBot:
                         [{"text": "🔔 开启通知" if not enabled else "🔕 关闭通知",
                           "callback_data": f"trafficnotify:toggle:{0 if enabled else 1}"}],
                         [{"text": f"🕒 修改时间（{notify_time}）", "callback_data": "trafficnotify:time"}],
+                        [{"text": "🧪 发送测试通知", "callback_data": "trafficnotify:test"}],
                         [{"text": "➕ 添加分组", "callback_data": "trafficnotify:add"},
                          {"text": "➖ 移除分组", "callback_data": "trafficnotify:remove"}],
                     ]})
@@ -368,6 +379,98 @@ class TelegramBot:
     def send_traffic_notify_settings(self, chat_id, prefix=""):
         text, keyboard = self.traffic_notify_keyboard(chat_id)
         self.send(chat_id, prefix + text, keyboard)
+
+    def send_traffic_notify_test(self, chat_id):
+        """Send current traffic without changing the scheduled notification state."""
+        now = time.time()
+        local_now = datetime.fromtimestamp(now, timezone(timedelta(hours=8)))
+        series, servers_up = self.snapshot()
+        groups = [row[0] for row in self.db.execute(
+            "SELECT group_name FROM traffic_notify_groups WHERE chat_id=? ORDER BY group_name", (chat_id,))]
+        if not groups:
+            self.send(chat_id, "🧪 流量通知测试\n\n尚未设置通知分组，请先添加分组。")
+            return
+        if not servers_up:
+            self.send(chat_id, "🧪 流量通知测试\n\n⚠️ 当前没有可用面板，暂时无法获取流量数据。")
+            return
+        totals = {}
+        for item in series.values():
+            if item["server"] in servers_up:
+                total = totals.setdefault((item["group"], item["server"]), [0, 0])
+                total[0] += item["up"]
+                total[1] += item["down"]
+        rows = []
+        for group in groups:
+            group_totals = [(server, totals[(group, server)]) for server in sorted(servers_up)
+                            if (group, server) in totals]
+            if not group_totals:
+                rows.append(f"👥 分组：{group}\n⚠️ 当前没有可用面板的流量数据")
+                continue
+            rows.append(f"👥 分组：{group}")
+            for server, (up, down) in group_totals:
+                rows.append(f"🖥 面板：{server}\n"
+                            f"📊 当前累计：{format_bytes(up + down)}（⬆️ {format_bytes(up)} / ⬇️ {format_bytes(down)}）")
+        text = (f"🧪 流量通知测试\n🕒 当前时间：{local_now.strftime('%Y-%m-%d %H:%M')}（UTC+8）\n\n"
+                + "\n\n".join(rows) + self.report_footer(servers_up))
+        self.send(chat_id, text)
+
+    def online_notify_keyboard(self, chat_id):
+        groups = [item[0] for item in self.db.execute(
+            "SELECT group_name FROM subscriptions WHERE chat_id=? ORDER BY group_name", (chat_id,))]
+        cooldown = self.notification_cooldown_seconds
+        if cooldown == 0:
+            cooldown_text = "关闭"
+        elif cooldown % 60 == 0:
+            cooldown_text = f"{cooldown // 60} 分钟"
+        else:
+            cooldown_text = f"{cooldown} 秒"
+        return (f"🔔 上线通知：{'已开启' if groups else '未设置'}\n"
+                f"👥 订阅分组：{'、'.join(groups) if groups else '未设置'}\n"
+                f"⏱️ 通知冷却：{cooldown_text}", {
+                    "inline_keyboard": [
+                        [{"text": "➕ 添加分组", "callback_data": "onlinenotify:add"},
+                         {"text": "➖ 移除分组", "callback_data": "onlinenotify:remove"}],
+                        [{"text": "🧪 发送测试通知", "callback_data": "onlinenotify:test"}],
+                    ]})
+
+    def send_online_notify_settings(self, chat_id, prefix=""):
+        text, keyboard = self.online_notify_keyboard(chat_id)
+        self.send(chat_id, prefix + text, keyboard)
+
+    def online_notification_text(self, item, test=False):
+        worker = next((worker for worker in self.workers
+                       if worker.panel["name"] == item["server"]), None)
+        ip_record = worker.last_ip_for_client(item["email"]) if worker else None
+        if ip_record:
+            ip_text = f"🌐 最近记录 IP：{ip_record['ip']}\n📍 归属地/网络：{ip_attribution(ip_record['ip'])}"
+            if ip_record.get("time"):
+                ip_text += f"\n🕒 IP 记录时间：{ip_record['time']}"
+        else:
+            ip_text = "🌐 最近记录 IP：暂无记录"
+        inbounds = worker.inbounds_for_client(item["email"]) if worker else []
+        inbound_lines = "\n".join(f"  • {inbound}" for inbound in inbounds) or "  未找到配置关联"
+        title = "🧪 上线通知测试" if test else "🟢 客户端上线"
+        status = "在线" if item.get("online") else "离线"
+        suffix = f"\n\nℹ️ 测试样例，客户端当前状态：{status}。不会记录在线状态或通知冷却。" if test else ""
+        return (f"{title}\n\n👤 客户端：{item['email']}\n👥 分组：{item['group']}\n"
+                f"🖥 面板：{item['server']}\n{ip_text}\n🔗 关联入站：\n{inbound_lines}\n\n"
+                f"🕒 检测时间：{self.report_time()}{suffix}")
+
+    def send_online_notify_test(self, chat_id):
+        series, servers_up = self.snapshot()
+        subscribed = {row[0] for row in self.db.execute(
+            "SELECT group_name FROM subscriptions WHERE chat_id=?", (chat_id,))}
+        if not subscribed:
+            self.send(chat_id, "🧪 上线通知测试\n\n尚未设置订阅分组，请先添加分组。")
+            return
+        rows = sorted((item for item in series.values()
+                       if item["server"] in servers_up
+                       and item["group"] in subscribed),
+                      key=lambda item: (item["group"], item["server"], item["email"]))
+        if not rows:
+            self.send(chat_id, "🧪 上线通知测试\n\n已订阅分组中没有客户端数据，无法生成测试样例。")
+            return
+        self.send(chat_id, self.online_notification_text(rows[0], test=True))
 
     def process_traffic_notifications(self, now=None):
         now = time.time() if now is None else now
@@ -495,19 +598,11 @@ class TelegramBot:
                 eligible_chats.append(chat_id)
             if not eligible_chats:
                 continue
-            worker = next((item for item in self.workers if item.panel["name"] == server), None)
-            ip_record = worker.last_ip_for_client(email) if worker else None
-            if ip_record:
-                ip_text = f"🌐 最近记录 IP：{ip_record['ip']}\n📍 归属地/网络：{ip_attribution(ip_record['ip'])}"
-                if ip_record.get("time"):
-                    ip_text += f"\n🕒 IP 记录时间：{ip_record['time']}"
-            else:
-                ip_text = "🌐 最近记录 IP：暂无记录"
+            item = {"server": server, "email": email, "group": group}
+            notification = self.online_notification_text(item)
             for chat_id in eligible_chats:
-                inbounds = worker.inbounds_for_client(email) if worker else []
-                inbound_lines = "\n".join(f"  • {inbound}" for inbound in inbounds) or "  未找到配置关联"
                 try:
-                    self.send(chat_id, f"🟢 客户端上线\n\n👤 客户端：{email}\n👥 分组：{group}\n🖥 面板：{server}\n{ip_text}\n🔗 关联入站：\n{inbound_lines}\n\n🕒 检测时间：{self.report_time()}")
+                    self.send(chat_id, notification)
                 except ERRORS as error:
                     print(f"Telegram 通知发送失败 ({error_kind(error)})", file=sys.stderr, flush=True)
                 else:
@@ -526,14 +621,15 @@ class TelegramBot:
         text = (message.get("text") or "").strip()
         if chat_id in self.pending_traffic_times and (
                 user_id in allowed_users or chat_id in allowed_chats):
-            self.pending_traffic_times.discard(chat_id)
-            if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", text):
-                self.send(chat_id, "时间格式无效，请发送 24 小时制时间，例如 20:00。")
+            notify_time = normalize_notify_time(text)
+            if notify_time is None:
+                self.send(chat_id, "时间格式无效，请发送例如 8:00 或 08:00（24 小时制）。")
                 return
+            self.pending_traffic_times.discard(chat_id)
             with self.db:
                 self.db.execute("INSERT INTO traffic_notify_settings(chat_id,enabled,notify_time) VALUES (?,0,?) "
                                 "ON CONFLICT(chat_id) DO UPDATE SET notify_time=excluded.notify_time",
-                                (chat_id, text))
+                                (chat_id, notify_time))
             self.send_traffic_notify_settings(chat_id, "✅ 通知时间已更新\n\n")
             return
         # Old reply keyboards send the entire label, including spaces.
@@ -583,6 +679,7 @@ class TelegramBot:
                      "/groups - 查看客户端分组\n"
                      "/online [分组] - 查看在线客户端及流量\n"
                      "/traffic [分组] - 查看累计流量\n"
+                     "/online_notify - 管理上线通知分组并发送测试\n"
                      "/watch [分组] - 订阅上线通知\n"
                      "/unwatch [分组] - 取消订阅\n"
                      "/watches - 查看已订阅分组\n"
@@ -599,6 +696,9 @@ class TelegramBot:
                 return
             action, _, value = argument.partition(" ")
             value = value.strip()
+            if action == "test" and not value:
+                self.send_traffic_notify_test(chat_id)
+                return
             if action in ("on", "off") and not value:
                 enabled = int(action == "on")
                 with self.db:
@@ -606,11 +706,12 @@ class TelegramBot:
                                     "ON CONFLICT(chat_id) DO UPDATE SET enabled=excluded.enabled", (chat_id, enabled))
                 self.send_traffic_notify_settings(chat_id, "✅ 定时流量通知设置已更新\n\n")
                 return
-            if action == "time" and re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+            notify_time = normalize_notify_time(value) if action == "time" else None
+            if notify_time is not None:
                 with self.db:
                     self.db.execute("INSERT INTO traffic_notify_settings(chat_id,enabled,notify_time) VALUES (?,0,?) "
                                     "ON CONFLICT(chat_id) DO UPDATE SET notify_time=excluded.notify_time",
-                                    (chat_id, value))
+                                    (chat_id, notify_time))
                 self.send_traffic_notify_settings(chat_id, "✅ 通知时间已更新\n\n")
                 return
             if action in ("add", "remove") and value:
@@ -625,8 +726,14 @@ class TelegramBot:
                         self.db.execute("DELETE FROM traffic_notify_baselines WHERE chat_id=? AND group_name=?", (chat_id, value))
                 self.send_traffic_notify_settings(chat_id, f"✅ {'已添加' if action == 'add' else '已移除'}分组：{value}\n\n")
                 return
-            self.send(chat_id, "用法：/traffic_notify、/traffic_notify on、/traffic_notify off、"
+            self.send(chat_id, "用法：/traffic_notify、/traffic_notify test、/traffic_notify on、/traffic_notify off、"
                       "/traffic_notify time 20:00、/traffic_notify add 分组、/traffic_notify remove 分组")
+            return
+        elif command == "/online_notify":
+            if argument == "test":
+                self.send_online_notify_test(chat_id)
+            else:
+                self.send_online_notify_settings(chat_id)
             return
         elif command == "/status":
             series, servers_up = self.snapshot()
@@ -709,6 +816,7 @@ class TelegramBot:
             return
         menu_commands = {"menu:status": "/status", "menu:groups": "/groups",
                          "menu:online": "/online", "menu:traffic": "/traffic",
+                         "menu:online_notify": "/online_notify",
                          "menu:watch": "/watch", "menu:unwatch": "/unwatch",
                          "menu:watches": "/watches", "menu:help": "/help",
                          "menu:commands": "/commands", "menu:traffic_notify": "/traffic_notify"}
@@ -717,9 +825,57 @@ class TelegramBot:
             telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
             self.handle_message({"chat": {"id": chat_id}, "from": {"id": user_id}, "text": menu_commands[data]})
             return
-        match = re.fullmatch(r"trafficnotify:(toggle|time|add|remove)(?::(\d+))?", data)
+        match = re.fullmatch(r"onlinenotify:(add|remove|test)(?::(\d+))?", data)
         if match:
             action, index_text = match.groups()
+            if action == "test":
+                telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
+                self.send_online_notify_test(chat_id)
+                return
+            current = {row[0] for row in self.db.execute(
+                "SELECT group_name FROM subscriptions WHERE chat_id=?", (chat_id,))}
+            available = sorted(({item["group"] for item in self.snapshot()[0].values()} - current)
+                               if action == "add" else current)
+            if index_text is not None:
+                index = int(index_text)
+                pending = self.pending_online_groups.get(chat_id)
+                if not pending or pending[0] != action or index >= len(pending[1]):
+                    telegram_request(self.config["token"], "answerCallbackQuery", {
+                        "callback_query_id": callback_id,
+                        "text": "选项已过期，请重新打开上线通知设置。"})
+                    return
+                group = pending[1][index]
+                with self.db:
+                    if action == "add":
+                        self.db.execute("INSERT OR IGNORE INTO subscriptions VALUES (?,?)", (chat_id, group))
+                    else:
+                        self.db.execute("DELETE FROM subscriptions WHERE chat_id=? AND group_name=?",
+                                        (chat_id, group))
+                self.pending_online_groups.pop(chat_id, None)
+                telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
+                self.send_online_notify_settings(
+                    chat_id, f"✅ {'已添加' if action == 'add' else '已移除'}分组：{group}\n\n")
+                return
+            if not available:
+                telegram_request(self.config["token"], "answerCallbackQuery", {
+                    "callback_query_id": callback_id,
+                    "text": "没有可选分组。" if action == "add" else "目前没有已订阅分组。"})
+                return
+            self.pending_online_groups[chat_id] = (action, available)
+            prefix = "onlinenotify:add:" if action == "add" else "onlinenotify:remove:"
+            buttons = [[{"text": group, "callback_data": f"{prefix}{index}"}]
+                       for index, group in enumerate(available[:50])]
+            telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
+            title = "👥 请选择要订阅上线通知的分组：" if action == "add" else "👥 请选择要取消订阅的分组："
+            self.send(chat_id, title, {"inline_keyboard": buttons})
+            return
+        match = re.fullmatch(r"trafficnotify:(toggle|time|test|add|remove)(?::(\d+))?", data)
+        if match:
+            action, index_text = match.groups()
+            if action == "test":
+                telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
+                self.send_traffic_notify_test(chat_id)
+                return
             if action == "toggle":
                 if index_text not in ("0", "1"):
                     telegram_request(self.config["token"], "answerCallbackQuery", {
