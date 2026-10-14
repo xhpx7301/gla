@@ -390,6 +390,17 @@ class TelegramBot:
         text, keyboard = self.traffic_notify_keyboard(chat_id)
         self.send(chat_id, prefix + text, keyboard)
 
+    def set_traffic_notify_time(self, chat_id, notify_time):
+        """Rearm a changed schedule while keeping the last successful totals."""
+        with self.db:
+            previous = self.db.execute(
+                "SELECT notify_time FROM traffic_notify_settings WHERE chat_id=?", (chat_id,)).fetchone()
+            self.db.execute("INSERT INTO traffic_notify_settings(chat_id,enabled,notify_time) VALUES (?,0,?) "
+                            "ON CONFLICT(chat_id) DO UPDATE SET notify_time=excluded.notify_time",
+                            (chat_id, notify_time))
+            if previous is None or previous[0] != notify_time:
+                self.db.execute("DELETE FROM traffic_notify_runs WHERE chat_id=?", (chat_id,))
+
     def send_traffic_notify_test(self, chat_id):
         """Send current traffic without changing the scheduled notification state."""
         now = time.time()
@@ -691,10 +702,7 @@ class TelegramBot:
                 self.send(chat_id, "时间格式无效，请发送例如 8:00 或 08:00（24 小时制）。")
                 return
             self.pending_traffic_times.discard(chat_id)
-            with self.db:
-                self.db.execute("INSERT INTO traffic_notify_settings(chat_id,enabled,notify_time) VALUES (?,0,?) "
-                                "ON CONFLICT(chat_id) DO UPDATE SET notify_time=excluded.notify_time",
-                                (chat_id, notify_time))
+            self.set_traffic_notify_time(chat_id, notify_time)
             self.send_traffic_notify_settings(chat_id, "✅ 通知时间已更新\n\n")
             return
         # Old reply keyboards send the entire label, including spaces.
@@ -776,10 +784,7 @@ class TelegramBot:
                 return
             notify_time = normalize_notify_time(value) if action == "time" else None
             if notify_time is not None:
-                with self.db:
-                    self.db.execute("INSERT INTO traffic_notify_settings(chat_id,enabled,notify_time) VALUES (?,0,?) "
-                                    "ON CONFLICT(chat_id) DO UPDATE SET notify_time=excluded.notify_time",
-                                    (chat_id, notify_time))
+                self.set_traffic_notify_time(chat_id, notify_time)
                 self.send_traffic_notify_settings(chat_id, "✅ 通知时间已更新\n\n")
                 return
             if action in ("add", "remove") and value:

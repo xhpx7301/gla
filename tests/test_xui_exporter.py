@@ -732,6 +732,73 @@ class ExporterTest(unittest.TestCase):
             finally:
                 bot.db.close()
 
+    def test_changed_traffic_time_rearms_today_and_survives_restart(self):
+        worker = EXPORTER.PanelWorker({"name": "node-a"})
+        config = {"token": "bot-token", "allowed_user_ids": [42]}
+        message = {"chat": {"id": 420}, "from": {"id": 42}}
+        report_time = EXPORTER.datetime(2026, 10, 14, 20, 0, tzinfo=EXPORTER.timezone(
+            EXPORTER.timedelta(hours=8))).timestamp()
+        due_time = report_time + 3 * 3600 + 20 * 60
+        for use_prompt in (False, True):
+            with self.subTest(use_prompt=use_prompt), tempfile.TemporaryDirectory() as directory, \
+                    mock.patch.object(EXPORTER, "telegram_request") as request:
+                worker.metrics = EXPORTER.render_metrics("node-a", [], [], [
+                    {"email": "alice", "group": "shared", "traffic": {"up": 1024, "down": 2048}}])
+                bot = EXPORTER.TelegramBot(config, [worker], directory)
+                try:
+                    with bot.db:
+                        bot.db.execute("INSERT INTO traffic_notify_settings VALUES (420,1,'20:00')")
+                        bot.db.execute("INSERT INTO traffic_notify_groups VALUES (420,'shared')")
+                        bot.db.execute("INSERT INTO traffic_notify_runs VALUES (421,'2026-10-14')")
+                    bot.process_traffic_notifications(report_time)
+                    self.assertEqual(bot.db.execute(
+                        "SELECT sent_date FROM traffic_notify_runs WHERE chat_id=420").fetchone(),
+                        ("2026-10-14",))
+                    baseline = bot.db.execute("SELECT * FROM traffic_notify_baselines").fetchall()
+                    if use_prompt:
+                        bot.handle_callback({"id": "time", "from": {"id": 42},
+                                             "message": {"chat": {"id": 420}},
+                                             "data": "trafficnotify:time"})
+                        bot.handle_message(dict(message, text="23:20"))
+                    else:
+                        bot.handle_message(dict(message, text="/traffic_notify time 23:20"))
+                    self.assertEqual(bot.db.execute(
+                        "SELECT enabled,notify_time FROM traffic_notify_settings WHERE chat_id=420").fetchone(),
+                        (1, "23:20"))
+                    self.assertIsNone(bot.db.execute(
+                        "SELECT sent_date FROM traffic_notify_runs WHERE chat_id=420").fetchone())
+                    self.assertEqual(bot.db.execute(
+                        "SELECT sent_date FROM traffic_notify_runs WHERE chat_id=421").fetchone(),
+                        ("2026-10-14",))
+                    self.assertEqual(bot.db.execute("SELECT * FROM traffic_notify_baselines").fetchall(), baseline)
+                    bot.db.close()
+                    bot = EXPORTER.TelegramBot(config, [worker], directory)
+                    request.reset_mock()
+                    bot.process_traffic_notifications(due_time - 60)
+                    request.assert_not_called()
+                    worker.metrics = EXPORTER.render_metrics("node-a", [], [], [
+                        {"email": "alice", "group": "shared", "traffic": {"up": 2048, "down": 3072}}])
+                    request.side_effect = RuntimeError("temporary send failure")
+                    with mock.patch.object(sys, "stderr", io.StringIO()):
+                        bot.process_traffic_notifications(due_time)
+                    self.assertIsNone(bot.db.execute(
+                        "SELECT sent_date FROM traffic_notify_runs WHERE chat_id=420").fetchone())
+                    self.assertEqual(bot.db.execute("SELECT * FROM traffic_notify_baselines").fetchall(), baseline)
+                    request.side_effect = None
+                    request.reset_mock()
+                    bot.process_traffic_notifications(due_time + 20)
+                    request.assert_called_once()
+                    self.assertIn("2026-10-14 23:20", request.call_args.args[2]["text"])
+                    self.assertIn("➕ 较上次新增：2.00 KiB", request.call_args.args[2]["text"])
+                    # Re-entering the same time or an invalid time must not rearm delivery.
+                    bot.handle_message(dict(message, text="/traffic_notify time 23:20"))
+                    bot.handle_message(dict(message, text="/traffic_notify time 24:00"))
+                    request.reset_mock()
+                    bot.process_traffic_notifications(due_time + 60)
+                    request.assert_not_called()
+                finally:
+                    bot.db.close()
+
     def test_telegram_traffic_notification_settings_and_time_validation(self):
         worker = EXPORTER.PanelWorker({"name": "node-a"})
         worker.metrics = EXPORTER.render_metrics("node-a", [], [], [
