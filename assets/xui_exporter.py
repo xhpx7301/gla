@@ -37,9 +37,10 @@ PANELS_FILE = os.environ.get("XUI_PANELS_FILE", "")
 STATE_DIR = os.environ.get("XUI_STATE_DIR", "/var/lib/xui")
 LOKI_URL = os.environ.get("XUI_LOKI_URL", "http://alloy:3500/loki/api/v1/push")
 TELEGRAM_CONFIG_FILE = os.environ.get("XUI_TELEGRAM_CONFIG_FILE", "/run/secrets/telegram-config.json")
-DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 600
+DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 1800
+PREVIOUS_DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 600
 MAX_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 86400
-TELEGRAM_ONLINE_CONFIRMATION_SAMPLES = 2
+TELEGRAM_ONLINE_CONFIRMATION_SAMPLES = 4
 TIMEOUT = float(os.environ.get("XUI_API_TIMEOUT", "10"))
 SERVER_NAME = os.environ.get("SERVER_NAME", "").strip() or "unknown"
 GEOIP_CITY_DB = os.environ.get("GEOIP_CITY_DB", "/var/lib/gla/geoip/GeoLite2-City.mmdb")
@@ -151,6 +152,12 @@ def validate_notification_cooldown(value):
     return value
 
 
+def configured_notification_cooldown(value):
+    if value == PREVIOUS_DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS:
+        return DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS
+    return validate_notification_cooldown(value)
+
+
 def telegram_config(path=None):
     config_path = Path(path or TELEGRAM_CONFIG_FILE)
     if not config_path.exists():
@@ -167,7 +174,7 @@ def telegram_config(path=None):
     token_file = config.get("token_file", "")
     if not isinstance(token_file, str) or not token_file.startswith("/run/secrets/") or "/" in token_file[len("/run/secrets/"):] :
         raise ValueError("Telegram Token 文件必须位于 /run/secrets/ 目录")
-    cooldown = validate_notification_cooldown(
+    cooldown = configured_notification_cooldown(
         config.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS))
     return {**config, "allowed_user_ids": user_ids, "allowed_chat_ids": chat_ids,
             "notification_cooldown_seconds": cooldown, "token": read_token(token_file)}
@@ -1609,7 +1616,7 @@ def telegram_cli(argv):
     token_path = path.parent / "telegram-bot.token"
     atomic_write(token_path, token + "\n")
     previous = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    cooldown = validate_notification_cooldown(
+    cooldown = configured_notification_cooldown(
         previous.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS)
         if isinstance(previous, dict) else DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS)
     atomic_write(path, json.dumps({"token_file": "/run/secrets/telegram-bot.token",
