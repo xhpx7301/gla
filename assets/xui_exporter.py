@@ -9,6 +9,7 @@ import argparse
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -21,7 +22,13 @@ import time
 import urllib.parse
 import urllib.error
 import urllib.request
+from urllib.parse import quote
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+try:
+    import maxminddb
+except ImportError:  # Local tests and utility commands do not need MMDB support.
+    maxminddb = None
 
 
 API_URL = os.environ.get("XUI_API_URL", "").rstrip("/")
@@ -30,8 +37,15 @@ PANELS_FILE = os.environ.get("XUI_PANELS_FILE", "")
 STATE_DIR = os.environ.get("XUI_STATE_DIR", "/var/lib/xui")
 LOKI_URL = os.environ.get("XUI_LOKI_URL", "http://alloy:3500/loki/api/v1/push")
 TELEGRAM_CONFIG_FILE = os.environ.get("XUI_TELEGRAM_CONFIG_FILE", "/run/secrets/telegram-config.json")
+DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 600
+MAX_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 86400
+TELEGRAM_ONLINE_CONFIRMATION_SAMPLES = 2
 TIMEOUT = float(os.environ.get("XUI_API_TIMEOUT", "10"))
 SERVER_NAME = os.environ.get("SERVER_NAME", "").strip() or "unknown"
+GEOIP_CITY_DB = os.environ.get("GEOIP_CITY_DB", "/var/lib/gla/geoip/GeoLite2-City.mmdb")
+GEOIP_ASN_DB = os.environ.get("GEOIP_ASN_DB", "/var/lib/gla/geoip/GeoLite2-ASN.mmdb")
+_MMDB_READERS = {}
+_MMDB_LOCK = threading.Lock()
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}\Z")
 ERRORS = (OSError, RuntimeError, ValueError, TypeError, KeyError, sqlite3.Error)
 METRICS = {
@@ -130,6 +144,13 @@ def read_token(path=None):
     return token
 
 
+def validate_notification_cooldown(value):
+    if (type(value) is not int or value < 0
+            or value > MAX_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS):
+        raise ValueError("Telegram 通知冷却必须是 0 到 86400 秒的整数")
+    return value
+
+
 def telegram_config(path=None):
     config_path = Path(path or TELEGRAM_CONFIG_FILE)
     if not config_path.exists():
@@ -146,7 +167,10 @@ def telegram_config(path=None):
     token_file = config.get("token_file", "")
     if not isinstance(token_file, str) or not token_file.startswith("/run/secrets/") or "/" in token_file[len("/run/secrets/"):] :
         raise ValueError("Telegram Token 文件必须位于 /run/secrets/ 目录")
-    return {**config, "allowed_user_ids": user_ids, "allowed_chat_ids": chat_ids, "token": read_token(token_file)}
+    cooldown = validate_notification_cooldown(
+        config.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS))
+    return {**config, "allowed_user_ids": user_ids, "allowed_chat_ids": chat_ids,
+            "notification_cooldown_seconds": cooldown, "token": read_token(token_file)}
 
 
 def telegram_request(token, method, payload=None, timeout=35):
@@ -180,10 +204,11 @@ def format_bytes(value):
 
 class TelegramBot:
     BUTTON_COMMANDS = {
+        "菜单": "/menu", "☰ 菜单": "/menu", "M": "/menu",
         "📡 状态": "/status", "👥 分组": "/groups", "🟢 在线客户端": "/online",
         "📈 累计流量": "/traffic", "🔔 添加订阅": "/watch",
-        "🔕 取消订阅": "/unwatch", "📋 我的订阅": "/watches", "❔ 帮助": "/help",
-        "📖 命令说明": "/commands",
+        "🔕 取消订阅": "/unwatch", "📋 我的订阅": "/watches", "💡 帮助": "/help",
+        "📊 流量通知": "/traffic_notify", "📖 命令说明": "/commands",
     }
     COMMANDS = [
         {"command": "start", "description": "显示主菜单"},
@@ -197,6 +222,8 @@ class TelegramBot:
         {"command": "watch", "description": "订阅分组上线通知"},
         {"command": "unwatch", "description": "取消分组上线通知"},
         {"command": "watches", "description": "查看已订阅分组"},
+        {"command": "traffic_notify", "description": "配置定时流量通知"},
+        {"command": "menu", "description": "菜单"},
     ]
 
     def __init__(self, config, workers, state_dir):
@@ -206,13 +233,24 @@ class TelegramBot:
         self.db = sqlite3.connect(str(Path(state_dir) / "telegram.sqlite"), timeout=10, check_same_thread=False)
         self.db.execute("CREATE TABLE IF NOT EXISTS state (server TEXT, email TEXT, group_name TEXT, online INTEGER, PRIMARY KEY(server,email))")
         self.db.execute("CREATE TABLE IF NOT EXISTS subscriptions (chat_id INTEGER, group_name TEXT, PRIMARY KEY(chat_id,group_name))")
+        self.db.execute("CREATE TABLE IF NOT EXISTS notification_cooldowns (chat_id INTEGER, server TEXT, email TEXT, notified_at REAL NOT NULL, PRIMARY KEY(chat_id,server,email))")
+        self.db.execute("CREATE TABLE IF NOT EXISTS online_confirmations (server TEXT, email TEXT, last_sample_at REAL NOT NULL, consecutive_online INTEGER NOT NULL, PRIMARY KEY(server,email))")
+        self.db.execute("CREATE TABLE IF NOT EXISTS traffic_notify_settings (chat_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, notify_time TEXT NOT NULL DEFAULT '20:00')")
+        self.db.execute("CREATE TABLE IF NOT EXISTS traffic_notify_groups (chat_id INTEGER, group_name TEXT, PRIMARY KEY(chat_id,group_name))")
+        self.db.execute("CREATE TABLE IF NOT EXISTS traffic_notify_baselines (chat_id INTEGER, group_name TEXT, server TEXT, up INTEGER NOT NULL, down INTEGER NOT NULL, PRIMARY KEY(chat_id,group_name,server))")
+        self.db.execute("CREATE TABLE IF NOT EXISTS traffic_notify_runs (chat_id INTEGER PRIMARY KEY, sent_date TEXT NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)")
         self.offset = 0
         self.pending_groups = {}
+        self.pending_traffic_groups = {}
+        self.pending_traffic_times = set()
+        self.notification_cooldown_seconds = validate_notification_cooldown(
+            config.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS))
 
     def snapshot(self):
         series = {}
         servers_up = set()
+        server_samples = {}
         for worker in self.workers:
             for line in worker.snapshot():
                 parsed = parse_metric_line(line)
@@ -222,6 +260,8 @@ class TelegramBot:
                 server = tags.get("server", "")
                 if name == "xui_exporter_up" and value == 1:
                     servers_up.add(server)
+                elif name == "xui_metrics_last_success_timestamp_seconds":
+                    server_samples[server] = value
                 if name == "xui_client_online":
                     key = (server, tags.get("email", ""))
                     series.setdefault(key, {"server": server, "email": key[1], "group": tags.get("group", "未分组"), "online": 0, "up": 0, "down": 0})
@@ -233,6 +273,7 @@ class TelegramBot:
         for item in series.values():
             item["up"] = item["up"] if item["server"] in servers_up else 0
             item["down"] = item["down"] if item["server"] in servers_up else 0
+            item["sample_at"] = server_samples.get(item["server"])
         return series, servers_up
 
     @staticmethod
@@ -244,8 +285,9 @@ class TelegramBot:
              {"text": "📈 累计流量", "callback_data": "menu:traffic"}],
             [{"text": "🔔 添加订阅", "callback_data": "menu:watch"},
              {"text": "🔕 取消订阅", "callback_data": "menu:unwatch"}],
+            [{"text": "📊 流量通知", "callback_data": "menu:traffic_notify"}],
             [{"text": "📋 我的订阅", "callback_data": "menu:watches"},
-             {"text": "❔ 帮助", "callback_data": "menu:help"}],
+             {"text": "💡 帮助", "callback_data": "menu:help"}],
             [{"text": "📖 命令说明", "callback_data": "menu:commands"}],
         ]}
 
@@ -294,9 +336,103 @@ class TelegramBot:
         return note + "\n\n🕒 查询时间：" + self.report_time()
 
     def register_commands(self):
+        # Keep Telegram's native bottom-left button on the command menu.  The
+        # native button text is controlled by the Telegram client; the bot
+        # exposes /menu as the localized in-chat menu entry.
+        try:
+            telegram_request(self.config["token"], "setChatMenuButton", {
+                "menu_button": json.dumps({"type": "commands"}, separators=(",", ":"))
+            })
+        except ERRORS as error:
+            print(f"Telegram 原生菜单按钮设置失败 ({error_kind(error)})", file=sys.stderr, flush=True)
         telegram_request(self.config["token"], "setMyCommands", {
             "commands": json.dumps(self.COMMANDS, ensure_ascii=False, separators=(",", ":"))
         })
+
+    def traffic_notify_keyboard(self, chat_id):
+        row = self.db.execute("SELECT enabled,notify_time FROM traffic_notify_settings WHERE chat_id=?", (chat_id,)).fetchone()
+        enabled, notify_time = row if row else (0, "20:00")
+        groups = [item[0] for item in self.db.execute(
+            "SELECT group_name FROM traffic_notify_groups WHERE chat_id=? ORDER BY group_name", (chat_id,))]
+        return (f"📊 定时流量通知：{'开启' if enabled else '关闭'}\n"
+                f"🕒 通知时间：每天 {notify_time}（UTC+8）\n"
+                f"👥 通知分组：{'、'.join(groups) if groups else '未设置'}", {
+                    "inline_keyboard": [
+                        [{"text": "🔔 开启通知" if not enabled else "🔕 关闭通知",
+                          "callback_data": f"trafficnotify:toggle:{0 if enabled else 1}"}],
+                        [{"text": f"🕒 修改时间（{notify_time}）", "callback_data": "trafficnotify:time"}],
+                        [{"text": "➕ 添加分组", "callback_data": "trafficnotify:add"},
+                         {"text": "➖ 移除分组", "callback_data": "trafficnotify:remove"}],
+                    ]})
+
+    def send_traffic_notify_settings(self, chat_id, prefix=""):
+        text, keyboard = self.traffic_notify_keyboard(chat_id)
+        self.send(chat_id, prefix + text, keyboard)
+
+    def process_traffic_notifications(self, now=None):
+        now = time.time() if now is None else now
+        local_now = datetime.fromtimestamp(now, timezone(timedelta(hours=8)))
+        current_date = local_now.strftime("%Y-%m-%d")
+        current_time = local_now.strftime("%H:%M")
+        series, servers_up = self.snapshot()
+        if not servers_up:
+            return
+        totals = {}
+        for item in series.values():
+            if item["server"] not in servers_up:
+                continue
+            key = (item["group"], item["server"])
+            total = totals.setdefault(key, [0, 0])
+            total[0] += item["up"]
+            total[1] += item["down"]
+        settings = self.db.execute(
+            "SELECT chat_id,notify_time FROM traffic_notify_settings WHERE enabled=1").fetchall()
+        for chat_id, notify_time in settings:
+            if current_time < notify_time:
+                continue
+            run = self.db.execute("SELECT sent_date FROM traffic_notify_runs WHERE chat_id=?", (chat_id,)).fetchone()
+            if run and run[0] == current_date:
+                continue
+            groups = [row[0] for row in self.db.execute(
+                "SELECT group_name FROM traffic_notify_groups WHERE chat_id=? ORDER BY group_name", (chat_id,))]
+            if not groups:
+                continue
+            available = sorted({server for group, server in totals if group in groups})
+            rows = []
+            current_values = []
+            for group in groups:
+                group_totals = [(server, totals[(group, server)]) for server in available
+                                if (group, server) in totals]
+                if not group_totals:
+                    rows.append(f"👥 分组：{group}\n⚠️ 当前没有可用面板的流量数据")
+                    continue
+                rows.append(f"👥 分组：{group}")
+                for server, (up, down) in group_totals:
+                    previous = self.db.execute(
+                        "SELECT up,down FROM traffic_notify_baselines WHERE chat_id=? AND group_name=? AND server=?",
+                        (chat_id, group, server)).fetchone()
+                    delta_up = max(0, up - previous[0]) if previous else 0
+                    delta_down = max(0, down - previous[1]) if previous else 0
+                    delta_text = (f"➕ 较上次新增：{format_bytes(delta_up + delta_down)}"
+                                  f"（⬆️ {format_bytes(delta_up)} / ⬇️ {format_bytes(delta_down)}）"
+                                  if previous else "🆕 较上次新增：首次记录")
+                    rows.append(f"🖥 面板：{server}\n"
+                                f"📊 累计：{format_bytes(up + down)}（⬆️ {format_bytes(up)} / ⬇️ {format_bytes(down)}）\n"
+                                f"{delta_text}")
+                    current_values.append((group, server, up, down))
+            text = (f"📊 分组流量日报\n🕒 {current_date} {notify_time}（UTC+8）\n\n"
+                    + "\n\n".join(rows) + self.report_footer(servers_up))
+            try:
+                self.send(chat_id, text)
+            except ERRORS as error:
+                print(f"Telegram 流量通知发送失败 ({error_kind(error)})", file=sys.stderr, flush=True)
+                continue
+            with self.db:
+                self.db.executemany(
+                    "INSERT INTO traffic_notify_baselines VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(chat_id,group_name,server) DO UPDATE SET up=excluded.up,down=excluded.down",
+                    [(chat_id, group, server, up, down) for group, server, up, down in current_values])
+                self.db.execute("INSERT OR REPLACE INTO traffic_notify_runs VALUES (?,?)", (chat_id, current_date))
 
     def process_online(self):
         series, servers_up = self.snapshot()
@@ -309,23 +445,76 @@ class TelegramBot:
             for old_server, old_email in self.db.execute("SELECT server,email FROM state").fetchall():
                 if old_server in servers_up and (old_server, old_email) not in current_keys:
                     self.db.execute("UPDATE state SET online=0 WHERE server=? AND email=?", (old_server, old_email))
+                    self.db.execute("UPDATE online_confirmations SET consecutive_online=0 WHERE server=? AND email=?", (old_server, old_email))
             for key, item in series.items():
                 if item["server"] not in servers_up:
                     continue
                 old = self.db.execute("SELECT group_name,online FROM state WHERE server=? AND email=?", key).fetchone()
-                if old and old[1] == 0 and item["online"] == 1:
-                    changes.append((key[0], item["email"], item["group"], "online"))
+                sample_at = item.get("sample_at")
+                if sample_at is None:
+                    # A worker sample must carry the exporter success timestamp;
+                    # without it, repeated Telegram polls could count one sample twice.
+                    continue
+                observation = self.db.execute(
+                    "SELECT last_sample_at,consecutive_online FROM online_confirmations WHERE server=? AND email=?",
+                    key).fetchone()
+                if observation is not None and float(observation[0]) == float(sample_at):
+                    continue
+                online = item["online"] == 1
+                if baseline is None:
+                    streak = TELEGRAM_ONLINE_CONFIRMATION_SAMPLES if online else 0
+                elif observation is None:
+                    # Existing state from before confirmation support is treated
+                    # as a baseline when it was already online.
+                    streak = (TELEGRAM_ONLINE_CONFIRMATION_SAMPLES if online and old and old[1] == 1
+                              else (1 if online else 0))
+                elif online:
+                    streak = min(observation[1] + 1, TELEGRAM_ONLINE_CONFIRMATION_SAMPLES)
+                    if observation[1] == TELEGRAM_ONLINE_CONFIRMATION_SAMPLES - 1:
+                        changes.append((key[0], item["email"], item["group"], "online"))
+                else:
+                    streak = 0
+                self.db.execute(
+                    "INSERT OR REPLACE INTO online_confirmations VALUES (?,?,?,?)",
+                    (key[0], item["email"], sample_at, streak))
                 self.db.execute("INSERT OR REPLACE INTO state VALUES (?,?,?,?)", (*key, item["group"], item["online"]))
             if baseline is None:
                 self.db.execute("INSERT INTO metadata VALUES ('baseline','1')")
                 changes.clear()
         for server, email, group, _ in changes:
             chats = [row[0] for row in self.db.execute("SELECT chat_id FROM subscriptions WHERE group_name=?", (group,))]
+            eligible_chats = []
             for chat_id in chats:
+                now = time.time()
+                last = self.db.execute(
+                    "SELECT notified_at FROM notification_cooldowns WHERE chat_id=? AND server=? AND email=?",
+                    (chat_id, server, email)).fetchone()
+                if (last is not None
+                        and now - float(last[0]) < self.notification_cooldown_seconds):
+                    continue
+                eligible_chats.append(chat_id)
+            if not eligible_chats:
+                continue
+            worker = next((item for item in self.workers if item.panel["name"] == server), None)
+            ip_record = worker.last_ip_for_client(email) if worker else None
+            if ip_record:
+                ip_text = f"🌐 最近记录 IP：{ip_record['ip']}\n📍 归属地/网络：{ip_attribution(ip_record['ip'])}"
+                if ip_record.get("time"):
+                    ip_text += f"\n🕒 IP 记录时间：{ip_record['time']}"
+            else:
+                ip_text = "🌐 最近记录 IP：暂无记录"
+            for chat_id in eligible_chats:
+                inbounds = worker.inbounds_for_client(email) if worker else []
+                inbound_lines = "\n".join(f"  • {inbound}" for inbound in inbounds) or "  未找到配置关联"
                 try:
-                    self.send(chat_id, f"🟢 客户端上线\n\n👤 客户端：{email}\n👥 分组：{group}\n🖥 面板：{server}\n\n🕒 检测时间：{self.report_time()}")
+                    self.send(chat_id, f"🟢 客户端上线\n\n👤 客户端：{email}\n👥 分组：{group}\n🖥 面板：{server}\n{ip_text}\n🔗 关联入站：\n{inbound_lines}\n\n🕒 检测时间：{self.report_time()}")
                 except ERRORS as error:
                     print(f"Telegram 通知发送失败 ({error_kind(error)})", file=sys.stderr, flush=True)
+                else:
+                    with self.db:
+                        self.db.execute(
+                            "INSERT OR REPLACE INTO notification_cooldowns VALUES (?,?,?,?)",
+                            (chat_id, server, email, time.time()))
 
     def handle_message(self, message):
         chat_id = message.get("chat", {}).get("id")
@@ -335,6 +524,18 @@ class TelegramBot:
         if not isinstance(chat_id, int):
             return
         text = (message.get("text") or "").strip()
+        if chat_id in self.pending_traffic_times and (
+                user_id in allowed_users or chat_id in allowed_chats):
+            self.pending_traffic_times.discard(chat_id)
+            if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", text):
+                self.send(chat_id, "时间格式无效，请发送 24 小时制时间，例如 20:00。")
+                return
+            with self.db:
+                self.db.execute("INSERT INTO traffic_notify_settings(chat_id,enabled,notify_time) VALUES (?,0,?) "
+                                "ON CONFLICT(chat_id) DO UPDATE SET notify_time=excluded.notify_time",
+                                (chat_id, text))
+            self.send_traffic_notify_settings(chat_id, "✅ 通知时间已更新\n\n")
+            return
         # Old reply keyboards send the entire label, including spaces.
         # Resolve it before parsing slash command arguments.
         legacy_command = {label.replace("\ufe0f", ""): command
@@ -354,6 +555,8 @@ class TelegramBot:
         if legacy_command:
             self.send(chat_id, "菜单已更新，请使用聊天消息下方的按钮。", {"remove_keyboard": True})
             self.send(chat_id, "👇 请选择：", self.main_keyboard())
+            if legacy_command == "/menu":
+                return
         series, servers_up = self.snapshot()
         groups = sorted({item["group"] for item in series.values()})
         if command == "/start":
@@ -361,10 +564,13 @@ class TelegramBot:
             self.send(chat_id, f"👋 你好，{name}！\n🤖 欢迎使用 GLA 分组监控机器人。", {"remove_keyboard": True})
             self.send(chat_id, "👇 请选择：", self.main_keyboard())
             return
+        elif command == "/menu":
+            self.send(chat_id, "👇 请选择：", self.main_keyboard())
+            return
         elif command == "/help":
             reply = ("🤖 欢迎使用 GLA 分组监控机器人！\n"
                      "您可以查询各面板的状态、分组在线客户端和累计流量，"
-                     "也可以订阅指定分组的客户端上线通知。\n\n"
+                     "也可以订阅指定分组的客户端上线通知，配置每日分组流量通知。\n\n"
                      "👇 请选择：")
             self.send(chat_id, reply, self.main_keyboard())
             return
@@ -380,11 +586,47 @@ class TelegramBot:
                      "/watch [分组] - 订阅上线通知\n"
                      "/unwatch [分组] - 取消订阅\n"
                      "/watches - 查看已订阅分组\n"
+                     "/traffic_notify - 配置每日流量通知\n"
                      "/id - 显示您的 Telegram ID\n\n"
                      "[分组] 可省略；订阅和取消订阅时会显示分组选择按钮。\n"
                      "示例：/online Aurora 极光云瓶\n"
                      "流量为面板返回的累计值。")
             self.send(chat_id, reply, self.main_keyboard())
+            return
+        elif command == "/traffic_notify":
+            if not argument:
+                self.send_traffic_notify_settings(chat_id)
+                return
+            action, _, value = argument.partition(" ")
+            value = value.strip()
+            if action in ("on", "off") and not value:
+                enabled = int(action == "on")
+                with self.db:
+                    self.db.execute("INSERT INTO traffic_notify_settings(chat_id,enabled,notify_time) VALUES (?,?,'20:00') "
+                                    "ON CONFLICT(chat_id) DO UPDATE SET enabled=excluded.enabled", (chat_id, enabled))
+                self.send_traffic_notify_settings(chat_id, "✅ 定时流量通知设置已更新\n\n")
+                return
+            if action == "time" and re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+                with self.db:
+                    self.db.execute("INSERT INTO traffic_notify_settings(chat_id,enabled,notify_time) VALUES (?,0,?) "
+                                    "ON CONFLICT(chat_id) DO UPDATE SET notify_time=excluded.notify_time",
+                                    (chat_id, value))
+                self.send_traffic_notify_settings(chat_id, "✅ 通知时间已更新\n\n")
+                return
+            if action in ("add", "remove") and value:
+                if value not in groups:
+                    self.send(chat_id, f"没有找到分组：{value}。使用 /groups 查看分组。")
+                    return
+                with self.db:
+                    if action == "add":
+                        self.db.execute("INSERT OR IGNORE INTO traffic_notify_groups VALUES (?,?)", (chat_id, value))
+                    else:
+                        self.db.execute("DELETE FROM traffic_notify_groups WHERE chat_id=? AND group_name=?", (chat_id, value))
+                        self.db.execute("DELETE FROM traffic_notify_baselines WHERE chat_id=? AND group_name=?", (chat_id, value))
+                self.send_traffic_notify_settings(chat_id, f"✅ {'已添加' if action == 'add' else '已移除'}分组：{value}\n\n")
+                return
+            self.send(chat_id, "用法：/traffic_notify、/traffic_notify on、/traffic_notify off、"
+                      "/traffic_notify time 20:00、/traffic_notify add 分组、/traffic_notify remove 分组")
             return
         elif command == "/status":
             series, servers_up = self.snapshot()
@@ -469,11 +711,65 @@ class TelegramBot:
                          "menu:online": "/online", "menu:traffic": "/traffic",
                          "menu:watch": "/watch", "menu:unwatch": "/unwatch",
                          "menu:watches": "/watches", "menu:help": "/help",
-                         "menu:commands": "/commands"}
+                         "menu:commands": "/commands", "menu:traffic_notify": "/traffic_notify"}
         data = callback.get("data", "")
         if data in menu_commands:
             telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
             self.handle_message({"chat": {"id": chat_id}, "from": {"id": user_id}, "text": menu_commands[data]})
+            return
+        match = re.fullmatch(r"trafficnotify:(toggle|time|add|remove)(?::(\d+))?", data)
+        if match:
+            action, index_text = match.groups()
+            if action == "toggle":
+                if index_text not in ("0", "1"):
+                    telegram_request(self.config["token"], "answerCallbackQuery", {
+                        "callback_query_id": callback_id, "text": "无效的通知开关选项。"})
+                    return
+                enabled = int(index_text)
+                with self.db:
+                    self.db.execute("INSERT INTO traffic_notify_settings(chat_id,enabled,notify_time) VALUES (?,?, '20:00') "
+                                    "ON CONFLICT(chat_id) DO UPDATE SET enabled=excluded.enabled", (chat_id, enabled))
+                telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
+                self.send_traffic_notify_settings(chat_id, "✅ 定时流量通知设置已更新\n\n")
+                return
+            if action == "time":
+                self.pending_traffic_times.add(chat_id)
+                telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
+                self.send(chat_id, "🕒 请在聊天中发送通知时间（北京时间，24 小时制），例如 20:00。")
+                return
+            series, _ = self.snapshot()
+            groups = sorted({item["group"] for item in series.values()})
+            if action == "remove":
+                groups = [row[0] for row in self.db.execute(
+                    "SELECT group_name FROM traffic_notify_groups WHERE chat_id=? ORDER BY group_name", (chat_id,))]
+            if index_text is not None:
+                index = int(index_text)
+                pending = self.pending_traffic_groups.get(chat_id)
+                if not pending or pending[0] != action or index >= len(pending[1]):
+                    telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id,
+                                                                                    "text": "选项已过期，请重新打开流量通知设置。"})
+                    return
+                group = pending[1][index]
+                with self.db:
+                    if action == "add":
+                        self.db.execute("INSERT OR IGNORE INTO traffic_notify_groups VALUES (?,?)", (chat_id, group))
+                    else:
+                        self.db.execute("DELETE FROM traffic_notify_groups WHERE chat_id=? AND group_name=?", (chat_id, group))
+                        self.db.execute("DELETE FROM traffic_notify_baselines WHERE chat_id=? AND group_name=?", (chat_id, group))
+                self.pending_traffic_groups.pop(chat_id, None)
+                telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
+                self.send_traffic_notify_settings(chat_id, f"✅ {'已添加' if action == 'add' else '已移除'}分组：{group}\n\n")
+                return
+            if not groups:
+                telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id,
+                                                                                "text": "没有可选分组。"})
+                return
+            self.pending_traffic_groups[chat_id] = (action, groups)
+            prefix = "trafficnotify:add:" if action == "add" else "trafficnotify:remove:"
+            buttons = [[{"text": group, "callback_data": f"{prefix}{index}"}] for index, group in enumerate(groups[:50])]
+            telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
+            self.send(chat_id, "👥 请选择要添加到流量通知的分组：" if action == "add" else "👥 请选择要移除的分组：",
+                      {"inline_keyboard": buttons})
             return
         match = re.fullmatch(r"(watch|unwatch):(\d+)", data)
         pending = self.pending_groups.get(chat_id)
@@ -506,6 +802,7 @@ class TelegramBot:
         while True:
             if time.monotonic() >= next_check:
                 self.process_online()
+                self.process_traffic_notifications()
                 next_check = time.monotonic() + 15
             try:
                 updates = telegram_request(self.config["token"], "getUpdates", {"offset": self.offset, "timeout": 20}, timeout=30) or []
@@ -557,6 +854,103 @@ def endpoint(api_url, suffix):
     return api_url[:-len("/inbounds/list")] + suffix
 
 
+def latest_ip_record(records):
+    if isinstance(records, dict):
+        records = records.get("ips", records.get("records", [records]))
+    if isinstance(records, str):
+        records = [records]
+    if not isinstance(records, list) or not records:
+        return None
+    record = records[0]
+    if isinstance(record, dict):
+        raw_ip = str(record.get("ip") or record.get("IP") or "")
+        timestamp = str(record.get("time") or record.get("timestamp") or record.get("date") or "")
+    elif isinstance(record, str):
+        raw_ip = record
+        timestamp = ""
+        match = re.search(r"\(([^()]*)\)\s*$", record)
+        if match:
+            timestamp = match.group(1).strip()
+    else:
+        return None
+    candidates = re.findall(r"(?:\d{1,3}\.){3}\d{1,3}|[0-9A-Fa-f:]{3,}", raw_ip)
+    for candidate in candidates:
+        try:
+            address = ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+        return {"ip": str(address), "time": timestamp}
+    return None
+
+
+def mmdb_record(path, address):
+    if maxminddb is None or not path or not Path(path).is_file():
+        return {}
+    with _MMDB_LOCK:
+        reader = _MMDB_READERS.get(path)
+        if reader is None:
+            reader = maxminddb.open_database(path)
+            _MMDB_READERS[path] = reader
+    return reader.get(address) or {}
+
+
+COUNTRY_NAMES_ZH = {
+    "CN": "中国", "HK": "香港", "MO": "澳门", "TW": "台湾", "US": "美国",
+    "JP": "日本", "SG": "新加坡", "GB": "英国", "DE": "德国", "KR": "韩国",
+    "CA": "加拿大", "AU": "澳大利亚", "FR": "法国", "NL": "荷兰", "RU": "俄罗斯",
+}
+
+
+def ip_attribution(address):
+    try:
+        city_data = mmdb_record(GEOIP_CITY_DB, address)
+        asn_data = mmdb_record(GEOIP_ASN_DB, address)
+    except Exception:
+        city_data, asn_data = {}, {}
+    country = city_data.get("country", {})
+    iso_code = country.get("iso_code", "")
+    asn = asn_data.get("autonomous_system_number")
+    organization = asn_data.get("autonomous_system_organization", "")
+    carrier_by_asn = {
+        4134: "中国电信", 4812: "中国电信", 4809: "中国电信", 58519: "中国电信",
+        4837: "中国联通", 9929: "中国联通", 17621: "中国联通", 134190: "中国联通",
+        9808: "中国移动", 9394: "中国移动", 24400: "中国移动", 56040: "中国移动",
+    }
+    country_name = (country.get("names", {}).get("zh-CN")
+                    or country.get("names", {}).get("en")
+                    or COUNTRY_NAMES_ZH.get(iso_code, ""))
+    if iso_code == "CN":
+        city = (city_data.get("city", {}).get("names", {}).get("zh-CN")
+                or city_data.get("city", {}).get("names", {}).get("en"))
+        location = f"中国{city}" if city else "中国大陆"
+    elif iso_code and COUNTRY_NAMES_ZH.get(iso_code):
+        city = (city_data.get("city", {}).get("names", {}).get("zh-CN")
+                or city_data.get("city", {}).get("names", {}).get("en"))
+        country_name = COUNTRY_NAMES_ZH[iso_code]
+        location = f"{country_name}·{city}" if city else country_name
+    elif country_name:
+        city = (city_data.get("city", {}).get("names", {}).get("zh-CN")
+                or city_data.get("city", {}).get("names", {}).get("en"))
+        location = f"{country_name}·{city}" if city else country_name
+    elif asn in carrier_by_asn:
+        location = "中国大陆"
+    else:
+        location = "归属地未知"
+
+    carrier_by_org = (("电信", "中国电信"), ("telecom", "中国电信"),
+                      ("chinanet", "中国电信"), ("联通", "中国联通"), ("unicom", "中国联通"),
+                      ("移动", "中国移动"), ("mobile", "中国移动"), ("cmnet", "中国移动"))
+    if iso_code == "CN" or asn in carrier_by_asn:
+        network = carrier_by_asn.get(asn)
+        org_lower = organization.lower()
+        if network is None:
+            network = next((name for text, name in carrier_by_org if text in org_lower), None)
+        network = network or "运营商未知"
+    else:
+        network = organization or (f"AS{asn}" if asn else "网络组织未知")
+    return f"{location} / {network}"
+
+
 def online_url():
     return endpoint(API_URL, "/clients/onlines")
 
@@ -573,6 +967,44 @@ def client_group_map(clients):
             raise ValueError("客户端分组响应类型不正确")
         groups[client["email"]] = group
     return groups
+
+
+def inbound_client_map(inbounds):
+    """Map each configured client email to all inbounds containing that client."""
+    if not isinstance(inbounds, list):
+        raise ValueError("入站列表响应类型不正确")
+    result = {}
+    for inbound in inbounds:
+        if not isinstance(inbound, dict):
+            continue
+        settings = inbound.get("settings") or {}
+        if isinstance(settings, str):
+            try:
+                settings = json.loads(settings)
+            except (json.JSONDecodeError, TypeError):
+                settings = {}
+        clients = settings.get("clients", []) if isinstance(settings, dict) else []
+        stats = inbound.get("clientStats") or []
+        if not isinstance(clients, list):
+            clients = []
+        if not isinstance(stats, list):
+            stats = []
+        name = inbound.get("remark") or inbound.get("tag") or f"入站 {inbound.get('id', '未知')}"
+        port = inbound.get("port")
+        protocol = inbound.get("protocol")
+        details = str(name)
+        if port:
+            details += f"（端口 {port}"
+            if protocol:
+                details += f" / {protocol}"
+            details += "）"
+        elif protocol:
+            details += f"（{protocol}）"
+        emails = {client.get("email") for client in [*clients, *stats]
+                  if isinstance(client, dict) and isinstance(client.get("email"), str) and client["email"]}
+        for email in emails:
+            result.setdefault(email, set()).add(details)
+    return {email: sorted(names) for email, names in result.items()}
 
 
 def render_metrics(server, inbounds, online_emails, clients=None):
@@ -723,6 +1155,7 @@ class PanelWorker:
     def __init__(self, panel):
         self.panel = panel
         self.client_groups = {}
+        self.client_inbounds = {}
         self.lock = threading.Lock()
         self.metrics = [metric("xui_exporter_up", 0, server=panel["name"])]
         self.log_status = {"enabled": int(panel.get("logs", False)), "up": 0,
@@ -734,6 +1167,7 @@ class PanelWorker:
         try:
             token = read_token(panel["token_file"])
             inbounds = request_json(panel["url"], token=token)
+            mapped_inbounds = inbound_client_map(inbounds or [])
             clients = request_json(endpoint(panel["url"], "/clients/list"), token=token)
             self.client_groups = client_group_map(clients or [])
             online = request_json(endpoint(panel["url"], "/clients/onlines"), "POST", token=token)
@@ -743,6 +1177,8 @@ class PanelWorker:
             print(f'{panel["name"]}: 流量采集失败 ({error_kind(error)})', file=sys.stderr, flush=True)
         with self.lock:
             self.metrics = data  # discard stale client series on failure
+            if "mapped_inbounds" in locals():
+                self.client_inbounds = mapped_inbounds
         if not panel.get("logs", False):
             return
         try:
@@ -781,6 +1217,23 @@ class PanelWorker:
         with self.lock:
             return self.metrics + [metric("xui_access_log_" + key, value, server=self.panel["name"])
                                    for key, value in self.log_status.items()]
+
+    def inbounds_for_client(self, email):
+        with self.lock:
+            return list(self.client_inbounds.get(email, []))
+
+    def last_ip_for_client(self, email):
+        if not self.panel.get("url") or not self.panel.get("token_file"):
+            return None
+        try:
+            token = read_token(self.panel["token_file"])
+            url = endpoint(self.panel["url"], f"/clients/ips/{quote(email, safe='')}")
+            records = request_json(url, "POST", token=token)
+            return latest_ip_record(records)
+        except ERRORS as error:
+            print(f'{self.panel["name"]}: 客户端 IP 日志获取失败 ({error_kind(error)})',
+                  file=sys.stderr, flush=True)
+            return None
 
 
 WORKERS = []
@@ -909,8 +1362,13 @@ def telegram_cli(argv):
         raise ValueError("Telegram Bot Token 不能为空或包含空白字符")
     token_path = path.parent / "telegram-bot.token"
     atomic_write(token_path, token + "\n")
+    previous = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    cooldown = validate_notification_cooldown(
+        previous.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS)
+        if isinstance(previous, dict) else DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS)
     atomic_write(path, json.dumps({"token_file": "/run/secrets/telegram-bot.token",
-                                   "allowed_user_ids": sorted(set(user_ids))}, ensure_ascii=False, indent=2) + "\n")
+                                   "allowed_user_ids": sorted(set(user_ids)),
+                                   "notification_cooldown_seconds": cooldown}, ensure_ascii=False, indent=2) + "\n")
 
 
 def main():

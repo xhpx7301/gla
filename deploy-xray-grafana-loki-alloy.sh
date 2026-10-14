@@ -4,6 +4,7 @@ set -Eeuo pipefail
 
 STACK_DIR="${STACK_DIR:-/opt/xray-log-dashboard}"
 ENABLE_GEOIP="${ENABLE_GEOIP:-auto}"
+ENABLE_ASN="${ENABLE_ASN:-auto}"
 ENABLE_SECURITY_TRAFFIC="${ENABLE_SECURITY_TRAFFIC:-auto}"
 SSH_PORT="${SSH_PORT:-}"
 GRAFANA_BIND="${GRAFANA_BIND:-0.0.0.0}"
@@ -20,6 +21,8 @@ MANAGER_PATH="/usr/local/bin/gla"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
 GEOIP_DB_PATH="${GEOIP_DB_PATH:-$STACK_DIR/geoip/GeoLite2-City.mmdb}"
 GEOIP_MIRROR_URL="${GEOIP_MIRROR_URL:-https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb}"
+ASN_DB_PATH="${ASN_DB_PATH:-$STACK_DIR/geoip/GeoLite2-ASN.mmdb}"
+ASN_MIRROR_URL="${ASN_MIRROR_URL:-https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-ASN.mmdb}"
 
 die() { printf '错误: %s\n' "$*" >&2; exit 1; }
 note() { printf '\n==> %s\n' "$*"; }
@@ -28,10 +31,13 @@ write_install_settings() {
   {
     printf 'STACK_DIR=%q\n' "$STACK_DIR"
     printf 'ENABLE_GEOIP=%q\n' "$ENABLE_GEOIP"
+    printf 'ENABLE_ASN=%q\n' "$ENABLE_ASN"
     printf 'ENABLE_SECURITY_TRAFFIC=%q\n' "$ENABLE_SECURITY_TRAFFIC"
     printf 'SSH_PORT=%q\n' "$SSH_PORT"
     printf 'GEOIP_DB_PATH=%q\n' "$GEOIP_DB_PATH"
     printf 'GEOIP_MIRROR_URL=%q\n' "$GEOIP_MIRROR_URL"
+    printf 'ASN_DB_PATH=%q\n' "$ASN_DB_PATH"
+    printf 'ASN_MIRROR_URL=%q\n' "$ASN_MIRROR_URL"
     printf 'GRAFANA_BIND=%q\n' "$GRAFANA_BIND"
     printf 'GRAFANA_PORT=%q\n' "$GRAFANA_PORT"
     printf 'LOKI_RETENTION=%q\n' "$LOKI_RETENTION"
@@ -235,8 +241,60 @@ prepare_geoip_database() {
   esac
 }
 
+install_asn_database() {
+  local source_path="$1"
+  [ -r "$source_path" ] || die "无法读取 ASN 数据库文件：$source_path"
+  install -d -m 0750 "$STACK_DIR/geoip"
+  install -m 0640 "$source_path" "$STACK_DIR/geoip/GeoLite2-ASN.mmdb"
+  ASN_DB_PATH="$STACK_DIR/geoip/GeoLite2-ASN.mmdb"
+  printf 'ASN 数据库已放置并启用：%s\n' "$ASN_DB_PATH"
+}
+
+download_asn_database() {
+  local tmp_dir db_file http_code size_bytes
+  command -v curl >/dev/null 2>&1 || die "从 GitHub 镜像下载需要 curl。请先安装 curl，或选择使用已有文件。"
+  tmp_dir="$(mktemp -d)"
+  db_file="$tmp_dir/GeoLite2-ASN.mmdb"
+  http_code="$(curl -sSL --retry 2 "$ASN_MIRROR_URL" -o "$db_file" -w '%{http_code}')" || { rm -rf "$tmp_dir"; die "无法连接 ASN 镜像，请检查网络。"; }
+  case "$http_code" in
+    200) ;;
+    404) rm -rf "$tmp_dir"; die "ASN 镜像中未找到 GeoLite2-ASN.mmdb。" ;;
+    429) rm -rf "$tmp_dir"; die "GitHub 请求过于频繁，请稍后再试。" ;;
+    *) rm -rf "$tmp_dir"; die "ASN 镜像下载失败，HTTP 状态码：$http_code" ;;
+  esac
+  size_bytes="$(wc -c <"$db_file")"
+  [ "$size_bytes" -gt 1048576 ] || { rm -rf "$tmp_dir"; die "下载文件过小，可能不是有效的 GeoLite2-ASN.mmdb。"; }
+  install_asn_database "$db_file"
+  rm -rf "$tmp_dir"
+}
+
+prepare_asn_database() {
+  local source_path choice
+  [ "$ENABLE_ASN" != false ] || return
+  if [ -r "$ASN_DB_PATH" ]; then
+    return
+  fi
+  printf '\n未检测到 ASN 数据库。\n'
+  printf 'ASN 数据库可为客户端最近记录 IP 显示中国运营商或境外网络组织。\n\n'
+  printf '1. 从 GitHub GeoLite.mmdb 镜像下载（无需 MaxMind 密钥）\n'
+  printf '2. 使用服务器上已有的 GeoLite2-ASN.mmdb\n'
+  printf '0. 跳过 ASN 归属解析\n'
+  read -rp "请选择 [0-2]: " choice
+  case "$choice" in
+    1) download_asn_database ;;
+    2)
+      read -rp "已有 GeoLite2-ASN.mmdb 文件路径: " source_path
+      [ -n "$source_path" ] || { printf '未提供 ASN 数据库，跳过 ASN 归属解析。\n'; return; }
+      install_asn_database "$source_path"
+      ;;
+    0|"") printf '已跳过 ASN 归属解析。\n' ;;
+    *) die "无效选择。" ;;
+  esac
+}
+
 install_stack() {
   prepare_geoip_database
+  prepare_asn_database
   require_install_prerequisites
   docker network inspect "$NPM_NETWORK" >/dev/null 2>&1 || docker network create "$NPM_NETWORK" >/dev/null
 
@@ -270,6 +328,7 @@ install -d -m 0750 "$STACK_DIR" "$STACK_DIR/alloy" \
   "$STACK_DIR/grafana/provisioning/dashboards" "$STACK_DIR/grafana/dashboards" \
   "$STACK_DIR/assets" "$STACK_DIR/secrets" "$STACK_DIR/geoip"
 download_asset assets/xui_exporter.py "$STACK_DIR/assets/xui_exporter.py"
+download_asset assets/xui-exporter.Dockerfile "$STACK_DIR/assets/xui-exporter.Dockerfile"
 [ -f "$STACK_DIR/secrets/xui-panels.json" ] || printf '[]\n' >"$STACK_DIR/secrets/xui-panels.json"
 chmod 0600 "$STACK_DIR/secrets/xui-panels.json"
 # Migrate an existing local-panel URL and Token into the shared API panel list.
@@ -310,8 +369,14 @@ if [ -n "$XUI_LOCAL_HOST" ]; then
 fi
 
 GEOIP_VOLUME_LINE=""
+XUI_CITY_VOLUME_LINE=""
 if [ "$ENABLE_GEOIP" = true ]; then
   GEOIP_VOLUME_LINE="      - ${GEOIP_DB_PATH}:/var/lib/gla/geoip/GeoLite2-City.mmdb:ro"
+  XUI_CITY_VOLUME_LINE="      - ${GEOIP_DB_PATH}:/var/lib/gla/geoip/GeoLite2-City.mmdb:ro"
+fi
+XUI_ASN_VOLUME_LINE=""
+if [ -r "$ASN_DB_PATH" ] && [ "$ENABLE_ASN" != false ]; then
+  XUI_ASN_VOLUME_LINE="      - ${ASN_DB_PATH}:/var/lib/gla/geoip/GeoLite2-ASN.mmdb:ro"
 fi
 
 GEOIP_XRAY_STAGES=""
@@ -429,7 +494,10 @@ ${SECURITY_TRAFFIC_VOLUME_LINE}
 
   xui-exporter:
     profiles: ["xui"]
-    image: python:3.12-alpine
+    build:
+      context: ./assets
+      dockerfile: xui-exporter.Dockerfile
+    image: gla-xui-exporter:local
     container_name: gla-xui-exporter
     restart: unless-stopped
     command: ["python3", "/app/xui_exporter.py"]
@@ -439,9 +507,13 @@ ${SECURITY_TRAFFIC_VOLUME_LINE}
       XUI_STATE_DIR: /var/lib/xui
       XUI_LOKI_URL: http://alloy:3500/loki/api/v1/push
       XUI_TELEGRAM_CONFIG_FILE: /run/secrets/telegram-config.json
+      GEOIP_CITY_DB: /var/lib/gla/geoip/GeoLite2-City.mmdb
+      GEOIP_ASN_DB: /var/lib/gla/geoip/GeoLite2-ASN.mmdb
 ${XUI_EXTRA_HOST_LINE}
     volumes:
       - ./assets/xui_exporter.py:/app/xui_exporter.py:ro
+${XUI_CITY_VOLUME_LINE}
+${XUI_ASN_VOLUME_LINE}
       - ./secrets:/run/secrets:ro
       - xui-state:/var/lib/xui
     depends_on:
@@ -874,7 +946,8 @@ chmod 0600 "$STACK_DIR/compose.yaml"
 
 note "正在启动 Grafana、Loki、VictoriaMetrics 和 Alloy"
 cd "$STACK_DIR"
-"${COMPOSE[@]}" pull
+"${COMPOSE[@]}" pull grafana loki victoriametrics alloy
+"${COMPOSE[@]}" build xui-exporter
 "${COMPOSE[@]}" up -d
 "${COMPOSE[@]}" restart alloy
 "${COMPOSE[@]}" restart xui-exporter
@@ -1118,6 +1191,8 @@ update_script_and_deploy() {
   local xui_local_host_is_set="${XUI_LOCAL_HOST+x}" xui_local_host_override="${XUI_LOCAL_HOST-}"
   local enable_geoip_is_set="${ENABLE_GEOIP+x}" enable_geoip_override="${ENABLE_GEOIP-}"
   local geoip_db_path_is_set="${GEOIP_DB_PATH+x}" geoip_db_path_override="${GEOIP_DB_PATH-}"
+  local enable_asn_is_set="${ENABLE_ASN+x}" enable_asn_override="${ENABLE_ASN-}"
+  local asn_db_path_is_set="${ASN_DB_PATH+x}" asn_db_path_override="${ASN_DB_PATH-}"
   [ -r "$INSTALL_SETTINGS_FILE" ] || die "未找到安装配置：$INSTALL_SETTINGS_FILE"
   printf '正在从 GitHub 下载最新版脚本并重新部署，服务可能短暂重建。\n'
   set -a
@@ -1139,6 +1214,14 @@ update_script_and_deploy() {
   if [ "$geoip_db_path_is_set" = x ]; then
     GEOIP_DB_PATH="$geoip_db_path_override"
     export GEOIP_DB_PATH
+  fi
+  if [ "$enable_asn_is_set" = x ]; then
+    ENABLE_ASN="$enable_asn_override"
+    export ENABLE_ASN
+  fi
+  if [ "$asn_db_path_is_set" = x ]; then
+    ASN_DB_PATH="$asn_db_path_override"
+    export ASN_DB_PATH
   fi
   GLA_ACTION=install bash <(download_installer)
 }

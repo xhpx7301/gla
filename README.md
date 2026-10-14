@@ -52,11 +52,23 @@ GLA 是面向个人和小型 Linux 服务器的轻量观测项目，用一台中
 
 中心端每个面板独立轮询入站、客户端、在线名单和访问日志。流量与在线状态写入 VictoriaMetrics；启用日志采集后，最近的解析访问记录经 Alloy 补充 GeoIP 写入 Loki。两个 Xray 仪表盘均可按服务器筛选。采集状态和日志窗口风险显示在仪表盘底部，服务错误可在 `gla -> 6. 查看服务日志 -> 5` 查看。旧采集端升级后会停用 Xray 文件日志和本地 3x-ui 导出器，中心端升级后也会停用 Xray 文件日志。为避免过渡期间重复计数，按下文升级顺序迁移。
 
-中心端可在 `gla -> 3. 管理 Telegram Bot` 配置机器人。输入 BotFather 创建的 Token 和允许访问的 Telegram 用户 ID（可用逗号分隔多个 ID；也可以在机器人里发送 `/id` 查询）；Token 保存为权限 `600` 的独立文件，不写入 Compose。机器人使用长轮询，不需要开放公网入站端口。启动后会自动注册 Telegram 原生斜杠命令菜单：`/start`、`/help`、`/status`、`/id`、`/groups`、`/online`、`/traffic`、`/watch`、`/unwatch`、`/watches`。`/start` 会在聊天页面发送主菜单消息，操作按钮附在这条消息下方，不会占用输入框下方的键盘区域。选择“添加订阅”或“取消订阅”后可直接点选分组，也可继续使用 `/watch 分组` 和 `/unwatch 分组`。`/id` 仅返回发送者自己的 Telegram 用户 ID 和当前 Chat ID，不受白名单限制；其余命令仅对白名单用户开放。`/groups` 列出当前分组，`/online [分组]` 查看在线客户端，`/traffic [分组]` 查看累计上行/下行/总流量，`/watches` 查看订阅；`/status` 显示面板 API 状态和在线客户端数。首次启动只建立在线状态基线，不会把已有在线客户端误报为刚上线；状态和订阅保存在中心端 `xui-state` 卷。流量是 3x-UI API 返回的累计值，机器人不把它当作实时速率。
+中心端可在 `gla -> 3. 管理 Telegram Bot` 配置机器人。输入 BotFather 创建的 Token 和允许访问的 Telegram 用户 ID（可用逗号分隔多个 ID；也可以在机器人里发送 `/id` 查询）；Token 保存为权限 `600` 的独立文件，不写入 Compose。机器人使用长轮询，不需要开放公网入站端口。启动后会自动注册 Telegram 原生斜杠命令菜单：`/start`、`/menu`、`/help`、`/status`、`/id`、`/groups`、`/online`、`/traffic`、`/traffic_notify`、`/watch`、`/unwatch`、`/watches`。`/start` 或 `/menu` 会在聊天页面发送主菜单消息，操作按钮附在这条消息下方，不会占用输入框下方的键盘区域。选择“添加订阅”或“取消订阅”后可直接点选分组，也可继续使用 `/watch 分组` 和 `/unwatch 分组`。`/id` 仅返回发送者自己的 Telegram 用户 ID 和当前 Chat ID，不受白名单限制；其余命令仅对白名单用户开放。`/groups` 列出当前分组，`/online [分组]` 查看在线客户端，`/traffic [分组]` 查看累计上行/下行/总流量，`/watches` 查看订阅；`/status` 显示面板 API 状态和在线客户端数。首次启动只建立在线状态基线，不会把已有在线客户端误报为刚上线；状态、订阅、上线通知冷却和流量通知设置保存在中心端 `xui-state` 卷。流量是 3x-UI API 返回的累计值，机器人不把它当作实时速率。
+
+上线通知默认按每个聊天、面板和客户端分别冷却 10 分钟；冷却期内该客户端再次上线不重复通知，不同客户端互不影响。冷却记录在 Telegram 消息发送成功后持久化，机器人重启后继续生效。可在 `secrets/telegram-config.json` 中设置 `notification_cooldown_seconds`（允许 `0` 到 `86400` 秒，`0` 表示关闭冷却）；通过菜单更新 Bot 配置会保留该设置。
+
+上线通知要求同一客户端在连续两次不同的成功 API 采集结果中均在线。第一次发现在线只记录待确认，第二次仍在线才通知；中间采集到离线会重新计数，重复读取同一份结果不计数，API 失败不计数也不视为离线。默认采集间隔为 30 秒，通知通常比第一次发现在线晚一个采集周期；FlClash 等延迟测试造成的单次短暂在线不会通知，持续到第二次采集仍在线则可能通知。在线查询仍直接显示最新采集结果，确认后发送通知继续受上述冷却限制。
+
+客户端上线通知会按需调用该客户端的 3X-UI IP 日志接口，显示最近记录 IP、日志时间以及离线数据库解析的归属地和网络。3.3.0/3.3.1 的字符串列表和 3.5.0 的对象列表都会解析；IP 日志是历史记录，不能保证就是触发本次上线的连接 IP。GeoLite2-City 有城市记录时中国地址显示为“中国深圳”一类格式，否则显示“中国大陆”；境外优先显示国家/地区与城市。GeoLite2-ASN 用于显示中国三大运营商或境外网络组织。数据库缺失或查询失败时不影响上线通知，只会显示 IP 或“暂无记录”。IP 和归属地通过本机数据库解析，不会发送给第三方查询服务。客户端 IP 日志可能包含敏感信息，请限制 Bot 白名单和数据库/备份访问。
+
+通知同时显示该客户端在 3X-UI 配置中关联的入站名称、端口和协议。同一客户端配置在多个入站时全部列出；这是面板配置关联关系，3X-UI 在线名单接口不会提供本次会话实际使用的入站，因此不能据此判断当前连接的具体入站。面板入站配置暂时无法读取时显示“未找到配置关联”。
 
 升级机器人后发送 `/start` 可清除旧版输入框键盘。旧按钮发送的完整文字也会映射到对应命令，并自动清除旧键盘、显示消息内菜单。新菜单按钮通过回调执行与斜杠命令相同的功能，点击时不会在聊天里发送一条用户命令消息。
 
 `/help` 会发送简短的功能介绍，并在消息下方提供操作按钮。点击“命令说明”或发送 `/commands` 可查看完整命令、参数用法和分组查询示例。
+
+“📊 流量通知”按钮或 `/traffic_notify` 可配置每日流量通知：按北京时间设置通知时间（默认每天 20:00），开启/关闭通知，并把指定分组加入或移出通知列表。也支持直接发送 `/traffic_notify on`、`/traffic_notify off`、`/traffic_notify time 20:00`、`/traffic_notify add 分组` 和 `/traffic_notify remove 分组`。每次通知按“分组 → 面板”列出 3x-ui 返回的累计上行、下行和总流量，并显示相较上一次成功通知的新增量；第一次通知显示“首次记录”。面板 API 暂时不可用时不会把流量清零，成功发送后才更新对比基线。
+
+Telegram 左下角的原生菜单按钮由 Telegram 客户端控制文字，Bot API 不能把它强制改成自定义中文；机器人已注册 `/menu` 命令，并在聊天消息中提供“📊 流量通知”等内联菜单按钮。这样不需要恢复输入框下方的旧键盘。
 
 状态、在线客户端和流量查询使用图标与分行字段展示，底部标注 UTC+8 查询时间（不是面板数据的采集时间）。每个在线客户端单独列出客户端名称、分组、面板及累计上下行/总流量；分组流量按累计总量降序排列。面板不可用时会提示该面板未计入结果。较长的查询结果自动分条发送，避免截断客户端和分组信息。
 
@@ -194,8 +206,11 @@ Alloy 内部日志原本使用 UTC 的 `Z` 时间，管理菜单会在显示时�
 | `ENABLE_SECURITY_TRAFFIC` | `auto` | `auto` 仅在主机指标、安全日志、UFW 和指标写入均可用时启用；`true` 强制启用；`false` 停止并清理计数器 |
 | `XUI_LOCAL_HOST` | 无 | 中心服务器本机面板域名；仅此域名映射到 Docker 宿主机网关 |
 | `ENABLE_GEOIP` | `auto` | `auto`、`true` 或 `false`；检测到本地数据库时自动启用 |
+| `ENABLE_ASN` | `auto` | 中心端为 `auto`、`true` 或 `false`；控制 Telegram IP 归属中的 ASN 网络信息 |
 | `GEOIP_DB_PATH` | 采集端为 `/opt/xray-alloy-collector/geoip/GeoLite2-City.mmdb`，中心端为 `/opt/xray-log-dashboard/geoip/GeoLite2-City.mmdb` | 本地 GeoLite2-City 数据库路径 |
 | `GEOIP_MIRROR_URL` | `https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb` | 菜单自动下载使用的 GitHub 镜像地址 |
+| `ASN_DB_PATH` | `/opt/xray-log-dashboard/geoip/GeoLite2-ASN.mmdb` | 中心端 Telegram IP 归属显示使用的本地 ASN 数据库 |
+| `ASN_MIRROR_URL` | `https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-ASN.mmdb` | 中心端 ASN 数据库自动下载地址 |
 | `LOKI_RETENTION` | `168h` | 中心端 Loki 日志保留时间 |
 | `METRICS_RETENTION` | `14d` | 中心端指标保留时间 |
 
@@ -203,7 +218,7 @@ Alloy 内部日志原本使用 UTC 的 `Z` 时间，管理菜单会在显示时�
 
 ### 启用第一阶段 GeoIP
 
-项目支持通过 GitHub 镜像自动下载 `GeoLite2-City.mmdb`，也支持使用本地已有文件。
+项目支持通过 GitHub 镜像自动下载 `GeoLite2-City.mmdb`，也支持使用本地已有文件。中心端部署时还会单独询问是否配置 `GeoLite2-ASN.mmdb`，用于 Telegram 上线通知的运营商/网络组织显示。
 
 运行 `alloy` 或 `gla`，选择菜单 `1`。部署时如果没有检测到数据库，脚本会提供三个选项：
 
@@ -214,6 +229,8 @@ Alloy 内部日志原本使用 UTC 的 `Z` 时间，管理菜单会在显示时�
 ```
 
 选择 `1` 时，脚本从 `GEOIP_MIRROR_URL` 下载数据库，检查 HTTP 状态和文件大小后复制到 GLA 默认目录。该镜像不是 MaxMind 官方源，数据新鲜度、完整性和授权条款需要自行确认。选择 `2` 时，输入服务器上已有文件路径，例如 `/tmp/GeoLite2-City.mmdb`，脚本会自动复制到采集端 `/opt/xray-alloy-collector/geoip/` 或中心端 `/opt/xray-log-dashboard/geoip/`。选择 `0` 可跳过。重新部署后，新的 SSH、Fail2ban 和 Xray 日志会带有国家/地区、省份和城市字段；历史日志不会自动补齐。
+
+中心端 ASN 提示中选择 `1` 会从 `ASN_MIRROR_URL` 下载 `GeoLite2-ASN.mmdb`；选择 `2` 可输入已有数据库路径；选择 `0` 跳过。P3TERX 仓库提供 ASN 文件，但不是 MaxMind 官方源，使用前应自行确认更新频率与许可条款。中心端会把 City 和 ASN 数据库只读挂载给 exporter；构建 exporter 镜像时安装固定版本的 `maxminddb` Python reader。被监控服务器无需安装数据库或额外程序。
 
 中心服务器：
 

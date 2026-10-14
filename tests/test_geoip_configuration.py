@@ -38,6 +38,17 @@ class GeoIpConfigurationTest(unittest.TestCase):
         self.assertNotIn('source_ip = ""', collector)
         self.assertNotIn('source_ip = "source_ip"', collector)
 
+    def test_central_installs_asn_database_and_mounts_local_readers(self):
+        script = (ROOT / "deploy-xray-grafana-loki-alloy.sh").read_text(encoding="utf-8")
+        exporter = (ROOT / "assets" / "xui_exporter.py").read_text(encoding="utf-8")
+        dockerfile = (ROOT / "assets" / "xui-exporter.Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("GeoLite2-ASN.mmdb", script)
+        self.assertIn("P3TERX/GeoLite.mmdb/download/GeoLite2-ASN.mmdb", script)
+        self.assertIn("XUI_ASN_VOLUME_LINE", script)
+        self.assertIn("GEOIP_CITY_DB", exporter)
+        self.assertIn("GEOIP_ASN_DB", exporter)
+        self.assertIn("maxminddb==2.7.1", dockerfile)
+
 
 if __name__ == "__main__":
     unittest.main()

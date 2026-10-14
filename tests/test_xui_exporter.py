@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import pathlib
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -28,6 +29,99 @@ class ExporterTest(unittest.TestCase):
         self.assertNotIn('group="B组"', "\n".join(a))
         self.assertIn('group="未分组"', "\n".join(a))
         self.assertEqual(EXPORTER.client_group_map(clients_b)["same-email"], "B组")
+
+    def test_inbound_client_map_reads_json_settings_and_client_stats(self):
+        inbounds = [
+            {"id": 1, "remark": "VLESS-main", "port": 443, "protocol": "vless",
+             "settings": json.dumps({"clients": [{"email": "alice"}, {"email": "shared"}]})},
+            {"id": 2, "tag": "trojan-backup", "port": 8443, "protocol": "trojan",
+             "settings": {"clients": [{"email": "shared"}]},
+             "clientStats": [{"email": "bob"}]},
+        ]
+        self.assertEqual(EXPORTER.inbound_client_map(inbounds), {
+            "alice": ["VLESS-main（端口 443 / vless）"],
+            "bob": ["trojan-backup（端口 8443 / trojan）"],
+            "shared": ["VLESS-main（端口 443 / vless）", "trojan-backup（端口 8443 / trojan）"],
+        })
+
+    def test_worker_associates_online_notification_with_configured_inbounds(self):
+        panel = EXPORTER.PanelWorker({"name": "node-a", "url": "https://panel.example.com/panel/api/inbounds/list",
+                                      "token_file": "/run/secrets/xui-node-a.token", "logs": False})
+        inbound = {"id": 7, "remark": "VLESS-443", "port": 443, "protocol": "vless",
+                   "settings": json.dumps({"clients": [{"email": "alice"}]})}
+        clients = [{"email": "alice", "group": "shared", "traffic": {}}]
+        def api(url, method="GET", token=None, form=None):
+            if url.endswith("/clients/list"):
+                return clients
+            if url.endswith("/clients/onlines"):
+                return []
+            return [inbound]
+        with mock.patch.object(EXPORTER, "read_token", return_value="secret"), \
+                mock.patch.object(EXPORTER, "request_json", side_effect=api):
+            panel.poll()
+        self.assertEqual(panel.inbounds_for_client("alice"), ["VLESS-443（端口 443 / vless）"])
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as send, \
+                mock.patch.object(EXPORTER.TelegramBot, "report_time", return_value="test-time"), \
+                mock.patch.object(panel, "last_ip_for_client", return_value={
+                    "ip": "203.0.113.1", "time": "2026-10-14 08:30:00"}), \
+                mock.patch.object(EXPORTER, "ip_attribution", return_value="中国深圳 / 中国电信"):
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42],
+                                        "notification_cooldown_seconds": 600}, [panel], directory)
+            try:
+                with bot.db:
+                    bot.db.execute("INSERT INTO subscriptions VALUES (?,?)", (420, "shared"))
+                bot.process_online()  # baseline is quiet
+                panel.metrics = EXPORTER.render_metrics("node-a", [inbound], [], clients)
+                bot.process_online()  # offline sample
+                with mock.patch.object(EXPORTER.time, "time", return_value=1060):
+                    panel.metrics = EXPORTER.render_metrics("node-a", [inbound], ["alice"], clients)
+                bot.process_online()
+                send.assert_not_called()
+                with mock.patch.object(EXPORTER.time, "time", return_value=1090):
+                    panel.metrics = EXPORTER.render_metrics("node-a", [inbound], ["alice"], clients)
+                bot.process_online()
+                message = send.call_args.args[2]["text"]
+                self.assertIn("🔗 关联入站：\n  • VLESS-443（端口 443 / vless）", message)
+                self.assertIn("🌐 最近记录 IP：203.0.113.1", message)
+                self.assertIn("📍 归属地/网络：中国深圳 / 中国电信", message)
+                self.assertIn("🕒 IP 记录时间：2026-10-14 08:30:00", message)
+            finally:
+                bot.db.close()
+
+    def test_ip_log_formats_from_supported_panel_versions_are_normalized(self):
+        self.assertEqual(EXPORTER.latest_ip_record(["203.0.113.1 (2026-10-14 08:30:00)"]),
+                         {"ip": "203.0.113.1", "time": "2026-10-14 08:30:00"})
+        self.assertEqual(EXPORTER.latest_ip_record([
+            {"ip": "2001:4860:4860::8888", "time": "2026-10-14T08:30:00Z", "node": "node-a"}]),
+            {"ip": "2001:4860:4860::8888", "time": "2026-10-14T08:30:00Z"})
+        self.assertIsNone(EXPORTER.latest_ip_record(["no valid IP"] ))
+
+    def test_ip_attribution_uses_local_city_and_asn_records(self):
+        def lookup(path, address):
+            if path == EXPORTER.GEOIP_CITY_DB:
+                return {"country": {"iso_code": "CN"}, "city": {"names": {"zh-CN": "深圳"}}}
+            return {"autonomous_system_number": 4134, "autonomous_system_organization": "CHINANET"}
+        with mock.patch.object(EXPORTER, "mmdb_record", side_effect=lookup):
+            self.assertEqual(EXPORTER.ip_attribution("203.0.113.1"), "中国深圳 / 中国电信")
+        with mock.patch.object(EXPORTER, "mmdb_record", side_effect=[
+                {}, {"autonomous_system_number": 4837, "autonomous_system_organization": "CHINA169"}]):
+            self.assertEqual(EXPORTER.ip_attribution("203.0.113.1"), "中国大陆 / 中国联通")
+        with mock.patch.object(EXPORTER, "mmdb_record", side_effect=[
+                {"country": {"iso_code": "US", "names": {"en": "United States"}},
+                 "city": {"names": {"en": "Los Angeles"}}},
+                {"autonomous_system_organization": "Example Networks"}]):
+            self.assertEqual(EXPORTER.ip_attribution("203.0.113.1"), "美国·Los Angeles / Example Networks")
+
+    def test_worker_fetches_latest_client_ip_from_panel_api(self):
+        worker = EXPORTER.PanelWorker({"name": "node-a", "url": "https://panel.example.com/panel/api/inbounds/list",
+                                       "token_file": "/run/secrets/xui-node-a.token"})
+        with mock.patch.object(EXPORTER, "read_token", return_value="secret"), \
+                mock.patch.object(EXPORTER, "request_json", return_value=[
+                    {"ip": "198.51.100.4", "time": "2026-10-14T10:00:00Z"}]) as request:
+            self.assertEqual(worker.last_ip_for_client("alice@example.com"),
+                             {"ip": "198.51.100.4", "time": "2026-10-14T10:00:00Z"})
+        self.assertTrue(request.call_args.args[0].endswith("/clients/ips/alice%40example.com"))
+        self.assertEqual(request.call_args.args[1], "POST")
 
     def test_log_groups_and_group_changes_do_not_replay_seen_records(self):
         panel = {"name": "panel-a", "url": "https://panel.example.com/panel/api/inbounds/list"}
@@ -241,6 +335,7 @@ class ExporterTest(unittest.TestCase):
             EXPORTER.metric("xui_client_online", 1, server="node-a", email="alice", group="shared"),
             EXPORTER.metric("xui_client_traffic_bytes_total", 1024, server="node-a", email="alice", group="shared", direction="uplink"),
             EXPORTER.metric("xui_client_traffic_bytes_total", 2048, server="node-a", email="alice", group="shared", direction="downlink"),
+            EXPORTER.metric("xui_metrics_last_success_timestamp_seconds", 1000, server="node-a"),
         ]
         config = {"token": "bot-token", "allowed_user_ids": [42], "allowed_chat_ids": []}
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
@@ -253,8 +348,13 @@ class ExporterTest(unittest.TestCase):
                 bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/watch shared"})
                 bot.process_online()  # first successful observation establishes a quiet baseline
                 worker.metrics[1] = EXPORTER.metric("xui_client_online", 0, server="node-a", email="alice", group="shared")
+                worker.metrics[-1] = EXPORTER.metric("xui_metrics_last_success_timestamp_seconds", 1030, server="node-a")
                 bot.process_online()
                 worker.metrics[1] = EXPORTER.metric("xui_client_online", 1, server="node-a", email="alice", group="shared")
+                worker.metrics[-1] = EXPORTER.metric("xui_metrics_last_success_timestamp_seconds", 1060, server="node-a")
+                bot.process_online()
+                self.assertEqual(request.call_count, 3)
+                worker.metrics[-1] = EXPORTER.metric("xui_metrics_last_success_timestamp_seconds", 1090, server="node-a")
                 bot.process_online()
                 self.assertEqual(request.call_args.args[1], "sendMessage")
                 self.assertEqual(request.call_args.args[2]["chat_id"], 420)
@@ -276,7 +376,31 @@ class ExporterTest(unittest.TestCase):
                     EXPORTER.telegram_config(config_path)
             config_path.write_text(json.dumps({"token_file": "/run/secrets/telegram-bot.token", "allowed_user_ids": [42]}), encoding="utf-8")
             with mock.patch.object(EXPORTER, "read_token", return_value="123:secret"):
-                self.assertEqual(EXPORTER.telegram_config(config_path)["allowed_user_ids"], [42])
+                loaded = EXPORTER.telegram_config(config_path)
+                self.assertEqual(loaded["allowed_user_ids"], [42])
+                self.assertEqual(loaded["notification_cooldown_seconds"], 600)
+            config_path.write_text(json.dumps({"token_file": "/run/secrets/telegram-bot.token",
+                                               "allowed_user_ids": [42],
+                                               "notification_cooldown_seconds": 1200}), encoding="utf-8")
+            with mock.patch.object(EXPORTER, "read_token", return_value="123:secret"):
+                self.assertEqual(EXPORTER.telegram_config(config_path)["notification_cooldown_seconds"], 1200)
+            for invalid in (-1, 86401, True, "600"):
+                with self.subTest(cooldown=invalid), self.assertRaises(ValueError):
+                    EXPORTER.validate_notification_cooldown(invalid)
+
+    def test_telegram_admin_update_preserves_notification_cooldown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "telegram-config.json"
+            path.write_text(json.dumps({"token_file": "/run/secrets/telegram-bot.token",
+                                        "allowed_user_ids": [42],
+                                        "notification_cooldown_seconds": 1200}), encoding="utf-8")
+            with mock.patch.object(EXPORTER, "TELEGRAM_CONFIG_FILE", str(path)), \
+                    mock.patch.object(sys, "stdin", io.StringIO("987:bot-token")):
+                EXPORTER.telegram_cli(["set", "--user-ids", "77,42,77"])
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["allowed_user_ids"], [42, 77])
+            self.assertEqual(saved["notification_cooldown_seconds"], 1200)
+            self.assertEqual((path.parent / "telegram-bot.token").read_text().strip(), "987:bot-token")
 
     def test_telegram_registers_native_command_menu_and_exposes_id_safely(self):
         worker = EXPORTER.PanelWorker({"name": "node-a", "url": "https://panel.example.com/panel/api/inbounds/list"})
@@ -285,8 +409,13 @@ class ExporterTest(unittest.TestCase):
             bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, [worker], directory)
             try:
                 bot.register_commands()
-                self.assertEqual(request.call_args.args[1], "setMyCommands")
-                commands = json.loads(request.call_args.args[2]["commands"])
+                methods = [call.args[1] for call in request.call_args_list]
+                self.assertIn("setChatMenuButton", methods)
+                self.assertIn("setMyCommands", methods)
+                menu = request.call_args_list[methods.index("setChatMenuButton")].args[2]
+                self.assertEqual(json.loads(menu["menu_button"]), {"type": "commands"})
+                command_call = request.call_args_list[methods.index("setMyCommands")]
+                commands = json.loads(command_call.args[2]["commands"])
                 self.assertEqual(commands[0], {"command": "start", "description": "显示主菜单"})
                 self.assertIn({"command": "id", "description": "显示您的 Telegram ID"}, commands)
                 bot.handle_message({"chat": {"id": 999}, "from": {"id": 77}, "text": "/id"})
@@ -388,6 +517,229 @@ class ExporterTest(unittest.TestCase):
                 bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/unwatch"})
                 picker = json.loads(request.call_args.args[2]["reply_markup"])
                 self.assertEqual(picker["inline_keyboard"][0][0]["callback_data"], "unwatch:0")
+            finally:
+                bot.db.close()
+
+    def test_telegram_scheduled_traffic_notifications_include_panel_totals_and_deltas(self):
+        workers = [EXPORTER.PanelWorker({"name": name}) for name in ("node-a", "node-b")]
+        clients = [
+            {"email": "alice", "group": "shared", "traffic": {"up": 1024, "down": 2048}},
+            {"email": "bob", "group": "shared", "traffic": {"up": 512, "down": 512}},
+            {"email": "carol", "group": "other", "traffic": {"up": 4096, "down": 4096}},
+        ]
+        workers[0].metrics = EXPORTER.render_metrics("node-a", [], [], clients[:2])
+        workers[1].metrics = EXPORTER.render_metrics("node-b", [], [], clients[1:])
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(EXPORTER, "telegram_request") as request:
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, workers, directory)
+            try:
+                with bot.db:
+                    bot.db.execute("INSERT INTO traffic_notify_settings VALUES (420,1,'20:00')")
+                    bot.db.execute("INSERT INTO traffic_notify_groups VALUES (420,'shared')")
+                before_time = int(EXPORTER.datetime(2026, 10, 14, 19, 59, tzinfo=EXPORTER.timezone(
+                    EXPORTER.timedelta(hours=8))).timestamp())
+                bot.process_traffic_notifications(before_time)
+                request.assert_not_called()
+
+                report_time = int(EXPORTER.datetime(2026, 10, 14, 20, 0, tzinfo=EXPORTER.timezone(
+                    EXPORTER.timedelta(hours=8))).timestamp())
+                bot.process_traffic_notifications(report_time)
+                first = request.call_args.args[2]["text"]
+                self.assertIn("🖥 面板：node-a", first)
+                self.assertIn("🖥 面板：node-b", first)
+                self.assertIn("🆕 较上次新增：首次记录", first)
+                self.assertNotIn("分组：other", first)
+                request.reset_mock()
+                bot.process_traffic_notifications(report_time + 300)
+                request.assert_not_called()
+
+                workers[0].metrics = EXPORTER.render_metrics("node-a", [], [], [
+                    {"email": "alice", "group": "shared", "traffic": {"up": 2048, "down": 3072}},
+                    {"email": "bob", "group": "shared", "traffic": {"up": 512, "down": 512}},
+                ])
+                workers[1].metrics = EXPORTER.render_metrics("node-b", [], [], [
+                    {"email": "bob", "group": "shared", "traffic": {"up": 1024, "down": 1536}},
+                ])
+                next_day = report_time + 86400
+                bot.process_traffic_notifications(next_day)
+                second = request.call_args.args[2]["text"]
+                self.assertIn("➕ 较上次新增：2.00 KiB（⬆️ 1.00 KiB / ⬇️ 1.00 KiB）", second)
+                self.assertIn("➕ 较上次新增：1.50 KiB（⬆️ 512 B / ⬇️ 1.00 KiB）", second)
+            finally:
+                bot.db.close()
+
+    def test_telegram_traffic_notification_settings_and_time_validation(self):
+        worker = EXPORTER.PanelWorker({"name": "node-a"})
+        worker.metrics = EXPORTER.render_metrics("node-a", [], [], [
+            {"email": "alice", "group": "shared", "traffic": {}}])
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, [worker], directory)
+            message = {"chat": {"id": 420}, "from": {"id": 42}}
+            try:
+                bot.handle_message(dict(message, text="/traffic_notify"))
+                self.assertIn("每天 20:00", request.call_args.args[2]["text"])
+                keyboard = json.loads(request.call_args.args[2]["reply_markup"])
+                self.assertEqual(keyboard["inline_keyboard"][0][0]["callback_data"], "trafficnotify:toggle:1")
+                bot.handle_callback({"id": "toggle", "from": {"id": 42},
+                                     "message": {"chat": {"id": 420}}, "data": "trafficnotify:toggle:1"})
+                self.assertEqual(bot.db.execute(
+                    "SELECT enabled FROM traffic_notify_settings WHERE chat_id=420").fetchone(), (1,))
+                bot.handle_message(dict(message, text="/traffic_notify time 8:00"))
+                self.assertEqual(bot.db.execute(
+                    "SELECT notify_time FROM traffic_notify_settings WHERE chat_id=420").fetchone(), ("20:00",))
+                bot.handle_message(dict(message, text="/traffic_notify time 08:15"))
+                self.assertEqual(bot.db.execute(
+                    "SELECT enabled,notify_time FROM traffic_notify_settings WHERE chat_id=420").fetchone(), (1, "08:15"))
+                bot.handle_message(dict(message, text="/traffic_notify add shared"))
+                self.assertEqual(bot.db.execute(
+                    "SELECT group_name FROM traffic_notify_groups WHERE chat_id=420").fetchone(), ("shared",))
+                self.assertEqual(bot.main_keyboard()["inline_keyboard"][3][0]["text"], "📊 流量通知")
+            finally:
+                bot.db.close()
+
+    def test_telegram_online_confirmation_filters_probes_and_repeated_samples(self):
+        panel = EXPORTER.PanelWorker({"name": "node-a"})
+        emails = [f"client-{index}" for index in range(6)]
+        clients = [{"email": email, "group": "shared", "traffic": {}} for email in emails]
+        config = {"token": "bot-token", "allowed_user_ids": [42]}
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(EXPORTER, "telegram_request") as request:
+            bot = EXPORTER.TelegramBot(config, [panel], directory)
+            try:
+                with bot.db:
+                    bot.db.execute("INSERT INTO subscriptions VALUES (?,?)", (420, "shared"))
+
+                def sample(timestamp, online):
+                    with mock.patch.object(EXPORTER.time, "time", return_value=timestamp):
+                        panel.metrics = EXPORTER.render_metrics("node-a", [], online, clients)
+                    bot.process_online()
+
+                sample(1000, [])  # quiet baseline
+                sample(1030, emails)  # six simultaneous delay probes
+                for _ in range(3):
+                    bot.process_online()  # same API result cannot confirm online
+                request.assert_not_called()
+                sample(1060, [])  # a successful offline sample resets all streaks
+                sample(1090, emails)
+                request.assert_not_called()
+
+                # An unsuccessful API poll neither confirms nor clears pending online.
+                panel.metrics = [EXPORTER.metric("xui_exporter_up", 0, server="node-a")]
+                bot.process_online()
+                request.assert_not_called()
+                self.assertEqual({row[0] for row in bot.db.execute(
+                    "SELECT consecutive_online FROM online_confirmations")}, {1})
+
+                # Pending confirmation survives a restart; the cached result is still one sample.
+                bot.db.close()
+                bot = EXPORTER.TelegramBot(config, [panel], directory)
+                sample(1090, emails)
+                request.assert_not_called()
+                sample(1120, [emails[0]])  # only this client remains online twice
+                request.assert_called_once()
+                self.assertIn(f"客户端：{emails[0]}", request.call_args.args[2]["text"])
+                sample(1150, [emails[0]])  # prolonged online does not repeat notifications
+                request.assert_called_once()
+                self.assertEqual(bot.db.execute(
+                    "SELECT consecutive_online FROM online_confirmations WHERE email=?",
+                    (emails[0],)).fetchone(), (2,))
+            finally:
+                bot.db.close()
+
+    def test_telegram_online_confirmation_migrates_old_online_state_quietly(self):
+        panels = [EXPORTER.PanelWorker({"name": name}) for name in ("node-a", "node-b")]
+        clients = [{"email": "alice", "group": "shared", "traffic": {}}]
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(EXPORTER, "telegram_request") as request:
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, panels, directory)
+            try:
+                # Simulate upgrading a database from before online confirmation support.
+                with bot.db:
+                    bot.db.execute("INSERT INTO metadata VALUES ('baseline','1')")
+                    bot.db.execute("INSERT INTO subscriptions VALUES (420,'shared')")
+                    for panel in panels:
+                        bot.db.execute("INSERT INTO state VALUES (?, 'alice', 'shared', 1)",
+                                       (panel.panel["name"],))
+
+                def sample(timestamp, online_a, online_b):
+                    with mock.patch.object(EXPORTER.time, "time", return_value=timestamp):
+                        for panel, online in zip(panels, (online_a, online_b)):
+                            panel.metrics = EXPORTER.render_metrics(
+                                panel.panel["name"], [], ["alice"] if online else [], clients)
+                    bot.process_online()
+
+                sample(1000, False, True)  # offline migration must reset node-a's old state
+                sample(1030, True, True)
+                request.assert_not_called()
+                sample(1060, True, True)
+                request.assert_called_once()
+                self.assertIn("面板：node-a", request.call_args.args[2]["text"])
+            finally:
+                bot.db.close()
+
+    def test_telegram_online_notifications_have_persistent_per_client_cooldown(self):
+        panel = EXPORTER.PanelWorker({"name": "node-a"})
+        panel.metrics = EXPORTER.render_metrics("node-a", [], [], [
+            {"email": "alice", "group": "shared", "traffic": {}},
+            {"email": "bob", "group": "shared", "traffic": {}},
+        ])
+        config = {"token": "bot-token", "allowed_user_ids": [42], "notification_cooldown_seconds": 600}
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(EXPORTER, "telegram_request") as request, \
+                mock.patch.object(EXPORTER, "time") as clock, \
+                mock.patch.object(EXPORTER.TelegramBot, "report_time", return_value="test-time"):
+            now = [1000]
+            clock.time.side_effect = lambda: now[0]
+            bot = EXPORTER.TelegramBot(config, [panel], directory)
+            try:
+                for chat_id in (420, 421):
+                    with bot.db:
+                        bot.db.execute("INSERT INTO subscriptions VALUES (?,?)", (chat_id, "shared"))
+                bot.process_online()  # baseline
+                self.assertEqual(request.call_count, 0)
+
+                sample_at = [2000]
+                def set_online(alice, bob):
+                    sample_at[0] += 30
+                    with mock.patch.object(clock, "time", return_value=sample_at[0]):
+                        panel.metrics = EXPORTER.render_metrics(
+                            "node-a", [], [email for email, online in (("alice", alice), ("bob", bob)) if online],
+                            [{"email": "alice", "group": "shared", "traffic": {}},
+                             {"email": "bob", "group": "shared", "traffic": {}}])
+                    bot.process_online()
+
+                set_online(True, False)
+                self.assertEqual(request.call_count, 0)
+                set_online(True, False)  # Alice: confirmed notification
+                self.assertEqual(request.call_count, 2)
+                now[0] = 1300
+                set_online(False, False)
+                set_online(True, False)
+                set_online(True, False)  # Alice still cooling down
+                self.assertEqual(request.call_count, 2)
+                set_online(True, True)
+                set_online(True, True)  # Bob has an independent cooldown
+                self.assertEqual(request.call_count, 4)
+
+                # Recreate the bot against the same state database.
+                bot.db.close()
+                bot = EXPORTER.TelegramBot(config, [panel], directory)
+                now[0] = 1500
+                set_online(False, False)
+                set_online(True, True)
+                set_online(True, True)  # persisted cooldown suppresses both
+                self.assertEqual(request.call_count, 4)
+
+                set_online(False, False)
+                now[0] = 1901
+                set_online(True, True)
+                set_online(True, True)  # cooldown expired; notify both chats
+                self.assertEqual(request.call_count, 8)
+                sent_chats = [call.args[2]["chat_id"] for call in request.call_args_list]
+                self.assertEqual(sent_chats, [420, 421, 420, 421, 420, 421, 420, 421])
+                rows = bot.db.execute("SELECT chat_id,server,email,notified_at FROM notification_cooldowns ORDER BY chat_id,email").fetchall()
+                self.assertEqual(len(rows), 4)
+                self.assertEqual({row[3] for row in rows}, {1901})
             finally:
                 bot.db.close()
 
