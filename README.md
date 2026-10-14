@@ -2,29 +2,28 @@
 
 GLA 是面向个人和小型 Linux 服务器的轻量观测项目，用一台中心服务器集中查看多台服务器的运行状态、安全事件、Xray 访问日志和 3x-ui 流量。
 
-中心端使用 Grafana、Loki、VictoriaMetrics 和 Alloy；其他服务器通常只运行 Alloy，以及按需启用的 3x-ui 指标导出器。
+中心端运行 Grafana、Loki、VictoriaMetrics、Alloy 和 3x-ui API 采集服务。GLA 采集端只采集服务器安全事件与系统资源；所有 Xray 数据，包括中心服务器自己的 Xray，都由中心端通过 3x-ui API 收集。
 
 ## 快速了解
 
 | 角色 | 安装内容 | 管理命令 |
 | --- | --- | --- |
-| 中心服务器 | Grafana、Loki、VictoriaMetrics、Alloy、预置仪表盘 | `gla` |
+| 中心服务器 | Grafana、Loki、VictoriaMetrics、Alloy、统一 3x-ui API 采集服务 | `gla` |
 | 普通采集服务器 | Alloy：SSH、Fail2ban、UFW 日志和主机指标 | `alloy` |
-| 3x-ui 采集服务器 | 普通采集能力 + Xray 日志 + 3x-ui API 流量 | `alloy` |
+| 运行 3x-ui 的服务器 | Alloy 采集安全与系统资源；Xray 数据由中心端访问面板 API | `alloy` / 中心端 `gla` |
 
 ```text
-采集服务器
-  SSH / Fail2ban / UFW / 系统指标 / Xray / 3x-ui API
-                         |
-                         | HTTPS + Basic Auth
-                         v
-中心服务器
-  Loki（日志） + VictoriaMetrics（指标） -> Grafana（仪表盘）
+采集端 Alloy --HTTPS + Basic Auth--> 中心端 Loki / VictoriaMetrics
+  SSH / Fail2ban / UFW / 系统指标
+
+各服务器 3x-ui API <---HTTPS + Token--- 中心端 API 采集服务
+  Xray 日志 / 在线状态 / 流量                |
+                                       Loki / VictoriaMetrics --> Grafana
 ```
 
 项目默认提供三个 Grafana 仪表盘：
 
-- `Xray 访问日志`：原始日志、最新访问记录、客户端、入站和访问目标统计。
+- `Xray 访问日志`：API 解析访问记录、最新访问记录、客户端、入站和访问目标统计。
 - `Xray 网关流量与连接`：在线用户、3x-ui API 状态、指标最新时间、上下行速率、客户端和入站流量、来源 IP 连接数。
 - `服务器安全事件与系统资源`：SSH 失败、Fail2ban、UFW、指标最新时间、CPU、内存、网卡、SSH 端口入站和 UFW 默认拒绝流量。
 
@@ -32,7 +31,7 @@ GLA 是面向个人和小型 Linux 服务器的轻量观测项目，用一台中
 
 | 数据 | 来源 | 存储位置 |
 | --- | --- | --- |
-| Xray 访问记录、来源 IP、访问目标 | `/var/log/x-ui/access.log` | Loki |
+| Xray 访问记录、来源 IP、访问目标 | 中心端轮询各服务器的 3x-ui API（含中心服务器本机） | Loki |
 | SSH 失败登录 | systemd journal | Loki |
 | Fail2ban 发现、封禁、解封 | `/var/log/fail2ban.log` | Loki |
 | UFW 拒绝记录 | `/var/log/ufw.log` | Loki |
@@ -40,6 +39,14 @@ GLA 是面向个人和小型 Linux 服务器的轻量观测项目，用一台中
 | SSH 端口入站流量 | UFW 活跃时的宿主机防火墙计数器 | VictoriaMetrics |
 | UFW 默认拒绝流量 | UFW 默认 INPUT 拒绝策略的宿主机计数器 | VictoriaMetrics |
 | 3x-ui 在线用户和上下行流量 | 3x-ui Panel API | VictoriaMetrics |
+
+## 中心端通过 API 监控 3x-ui
+
+3x-ui 3.3.0、3.3.1 和 3.5.0 可使用同一组接口。在中心服务器运行 `gla`，选择 `1` 更新部署，再选择 `8. 管理 3x-ui API 面板`，逐个输入服务器名称、完整 HTTPS 地址、Token 和日志采集选项。地址示例：`https://example.com/面板路径/panel/api/inbounds/list`。Token 从面板设置中的 API Token 功能创建；它有管理权限，应只通过 HTTPS 使用。面板配置保存在中心端的 `secrets/xui-panels.json`，Token 分别写入权限为 `600` 的文件，菜单不回显 Token。只监控 Xray 时，被监控服务器只需运行已有的 3x-ui；需要安全事件和系统资源时，再安装 GLA 采集端。中心服务器自己的面板也通过此菜单添加，名称应与 `SERVER_NAME` 一致。
+
+中心端每个面板独立轮询入站、客户端、在线名单和访问日志。流量与在线状态写入 VictoriaMetrics；启用日志采集后，最近的解析访问记录经 Alloy 补充 GeoIP 写入 Loki。两个 Xray 仪表盘均可按服务器筛选。采集状态和日志窗口风险显示在仪表盘底部，服务错误可在 `gla -> 4. 查看服务日志 -> 5` 查看。旧采集端升级后会停用 Xray 文件日志和本地 3x-ui 导出器，中心端升级后也会停用 Xray 文件日志。为避免过渡期间重复计数，按下文升级顺序迁移。
+
+使用 API 采集日志时，必须在 3x-ui/Xray 开启 access log，并确保面板能读取它。`/server/xraylogs/:count` 扫描当前日志文件，再返回最近 N 条解析记录；文件很大时轮询也会消耗服务器资源，应配置日志轮转。原始行和 `[api -> api]` 不会完整保留，接口没有增量游标。采集器使用持久化去重记录，Loki 写入失败时重试，并在窗口已满或与上次采集没有重叠时提示风险，但日志轮转、长时间断连和高吞吐仍可能漏采。默认每 30 秒取 1000 条，首次启用只回填最近 1 小时。API 状态正常代表请求和转发成功，不证明此时有新访问记录。来源 IP 的“连接数”始终是日志记录数，无法从 API 得到每条连接的精确字节数或持续时间。
 
 SSH 端口入站流量和 UFW 默认拒绝流量仅在 UFW 已启用且配置了指标写入时自动采集。采集器每 30 秒使用仅计数、随后立即返回的防火墙链生成聚合字节数，不会创建来源 IP 标签，也不改变放行或拒绝决定。SSH 端口流量包含正常会话和扫描；UFW 默认拒绝流量仅代表最终落入默认 INPUT 拒绝策略的流量。
 
@@ -63,25 +70,11 @@ SERVER_NAME=central-server \
 bash <(wget -qO- https://raw.githubusercontent.com/xhpx7301/gla/main/deploy-xray-grafana-loki-alloy.sh)
 ```
 
-脚本会自动检测 `/var/log/x-ui/access.log`。存在时采集 Xray，不存在时仍可正常安装系统与安全观测功能。
+安装后运行 `gla`，选择 `8. 管理 3x-ui API 面板`，添加中心服务器本机和其他服务器的面板。每台面板需提供完整 HTTPS API 地址和 Token，并在 3x-ui 中开启访问日志。中心端直接读取本机 access.log 的方式已移除。
 
-如果中心服务器本身也运行 3x-ui，并且需要 API 流量统计：
+中心服务器访问自己的面板域名若有公网回环问题，可在安装时设置 `XUI_LOCAL_HOST=panel.example.com`。采集服务将这个域名解析到 Docker 宿主机网关，同时保持原域名用于 HTTPS 证书校验。远程面板按正常 DNS 解析。
 
-```bash
-SERVER_NAME=central-server \
-XUI_API_URL=https://panel.example.com/面板路径/panel/api/inbounds/list \
-bash <(wget -qO- https://raw.githubusercontent.com/xhpx7301/gla/main/deploy-xray-grafana-loki-alloy.sh)
-```
-
-脚本会交互询问 3x-ui API Token，输入内容不会显示。安装后运行：
-
-```bash
-gla
-```
-
-已有中心平台可以直接运行 `gla`，选择 `8. 配置或关闭本机 3x-ui API 流量采集`。输入 API 地址后脚本会安全询问 Token、重新部署导出器，并重启 Alloy 使抓取配置立即生效。
-
-中心服务器采集自己的 3x-ui 时，导出器容器会保留 API 域名用于 HTTPS 证书校验，同时将该域名解析到 Docker 宿主机网关，避免服务器通过公网地址访问自身时发生回环超时。此行为只用于中心服务器的本机 3x-ui，不影响远程采集器。
+旧版中心服务器通过 `XUI_API_URL` 配置的本机面板，会在升级时自动迁移到统一列表并开启 API 日志采集。旧 Token 文件仍保留，统一列表已存在相同名称时保留现有配置。
 
 ## 配置远程写入入口
 
@@ -122,7 +115,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/xhpx7301/gla/main/deploy-xray
 
 ### 增加主机指标
 
-已安装采集器时，运行 `alloy`，选择 `3. 配置采集模块 -> 3. 主机指标`，输入 VictoriaMetrics Remote Write 地址和认证用户名。重新部署时脚本会安全询问指标接口密码。
+已安装采集器时，运行 `alloy`，选择 `3. 配置采集模块 -> 2. 主机指标`，输入 VictoriaMetrics Remote Write 地址和认证用户名。重新部署时脚本会安全询问指标接口密码。
 
 首次安装或自动化部署也可以使用环境变量：
 
@@ -135,53 +128,30 @@ METRICS_USERNAME=alloy-agent \
 bash <(wget -qO- https://raw.githubusercontent.com/xhpx7301/gla/main/deploy-xray-alloy-collector.sh)
 ```
 
-### 增加 3x-ui API 流量
+采集端只包含安全日志、主机指标、GeoIP 安全日志增强和 SSH/UFW 聚合流量四个模块。运行 `alloy`，选择 `3. 配置采集模块` 调整；菜单 `8` 查看 Alloy 日志。Xray 访问日志、在线状态和流量统一在中心服务器的 `gla -> 8` 配置，采集端不再下载或运行 3x-ui 导出器，也不询问面板 Token。
 
-```bash
-SERVER_NAME=collector-server \
-LOKI_URL=https://loki.example.com/loki/api/v1/push \
-LOKI_USERNAME=alloy-agent \
-METRICS_URL=https://metrics.example.com/api/v1/write \
-METRICS_USERNAME=alloy-agent \
-XUI_API_URL=https://panel.example.com/面板路径/panel/api/inbounds/list \
-bash <(wget -qO- https://raw.githubusercontent.com/xhpx7301/gla/main/deploy-xray-alloy-collector.sh)
-```
+菜单 `9. 查看采集器设置` 会用中文显示服务器标识、日志与指标写入地址、认证用户名、各模块状态、日志和数据库路径、SSH 端口及采集间隔。进入任一模块配置页也会先显示该模块当前使用的配置和依赖状态。认证密码只显示“已配置/未配置”，不会回显内容。
 
-上面的兼容模式会在配置 `METRICS_URL` 后自动启用主机指标。如果只需要 3x-ui API 指标，不采集 CPU、内存、磁盘和网卡指标，请同时设置 `ENABLE_HOST_METRICS=false`。
+菜单 `7. 检测中央写入状态` 会检查 Alloy 容器和最近 10 分钟的 Loki、VictoriaMetrics 写入错误。按提示临时输入 Basic Auth 密码后，还会验证中央服务连接与认证、查询本服务器最近日志，并检查主机指标的最新样本时间。检测密码只在内存中使用，不会保存或回显；HTTP `401/403` 会明确提示检查用户名和密码。
 
-API Token 在 3x-ui 的“面板设置 -> 安全 -> API Token”中创建。它具有完整管理权限，不要直接写入命令、截图或 GitHub。GLA 会将 Token 保存为：
+Alloy 内部日志原本使用 UTC 的 `Z` 时间，管理菜单会在显示时转换为 UTC+8。Fail2ban 这类不带时区的文本日志会按 `Asia/Shanghai` 解析；API 访问记录保留面板返回的事件时间并按 UTC+8 显示；Grafana 预置仪表盘也固定使用 UTC+8。修改时区不会重写 Loki 中已经采集的历史日志。
 
-```text
-/opt/xray-alloy-collector/secrets/xui-api-token
-```
-
-文件权限为 `600`。安装后运行 `alloy` 打开采集端管理菜单。菜单顶部会显示 Alloy 容器、Xray 日志、安全日志、主机指标、GeoIP、SSH/UFW 聚合流量和 3x-ui 流量采集的当前状态。选择菜单 `3. 配置采集模块` 可以分别启用、更新或关闭这些能力，不需要手写环境变量。菜单 `8` 可分别查看 Alloy 与 3x-ui API 导出器日志；导出器容器处于“运行中”只代表进程已启动，是否成功访问面板 API 应以导出器日志和 Grafana 指标为准。
-
-菜单 `9. 查看采集器设置` 会用中文显示服务器标识、日志与指标写入地址、认证用户名、各模块状态、日志和数据库路径、SSH 端口及采集间隔。进入任一模块配置页也会先显示该模块当前使用的配置和依赖状态。密码与 API Token 只显示“已配置/未配置”，不会回显内容。
-
-菜单 `7. 检测中央写入状态` 会检查 Alloy 容器和最近 10 分钟的 Loki、VictoriaMetrics 写入错误。按提示临时输入 Basic Auth 密码后，还会验证中央服务连接与认证、查询本服务器最近日志，并检查主机或 3x-ui 指标的最新样本时间。检测密码只在内存中使用，不会保存或回显；HTTP `401/403` 会明确提示检查用户名和密码。
-
-Alloy 内部日志原本使用 UTC 的 `Z` 时间，管理菜单会在显示时转换为 UTC+8。Xray 和 Fail2ban 这类不带时区的文本日志会按 `Asia/Shanghai` 解析；Grafana 预置仪表盘也固定使用 UTC+8。修改时区不会重写 Loki 中已经采集的历史日志。
-
-模块菜单会在重新部署前检查依赖并给出提示：主机指标和 3x-ui 流量需要 VictoriaMetrics；Xray 与安全日志需要 Loki；GeoIP 需要 `GeoLite2-City.mmdb`；安全日志需要 systemd journal；SSH/UFW 聚合流量还需要主机指标、安全日志、systemd、iptables 和已启用的 UFW。
+模块菜单会在重新部署前检查依赖并给出提示：主机指标需要 VictoriaMetrics；安全日志需要 Loki；GeoIP 需要 `GeoLite2-City.mmdb`；安全日志需要 systemd journal；SSH/UFW 聚合流量还需要主机指标、安全日志、systemd、iptables 和已启用的 UFW。
 
 ## 已有安装如何升级
 
 中心服务器和采集服务器均为已有安装时，按以下顺序升级：
 
-1. 先在中心服务器运行 `gla`，选择编号 `1`。旧版菜单显示“安装或更新脚本并重新部署”，新版显示“更新配置、脚本与仪表盘”。
-2. 中心服务器本身运行 3x-ui 时，再运行 `gla` 并选择编号 `8`，输入完整 API 地址；无需在命令行传入 Token。
-3. 在 Nginx Proxy Manager 创建 VictoriaMetrics 的 HTTPS 入口并配置 Basic Auth。
-4. 在采集服务器运行 `alloy`，先选择编号 `1` 更新脚本和管理菜单。
-5. 再次运行 `alloy`，选择 `3. 配置采集模块 -> 3. 主机指标`，填写指标写入地址；安装器会询问 Loki 和指标接口密码。
-6. 采集服务器同时运行 3x-ui 时，选择 `3. 配置采集模块 -> 6. 3x-ui API 流量`。它与主机指标共享 VictoriaMetrics 地址，但可以独立开关。
-7. 更新完成后先检查 `alloy` 顶部模块状态，再进入 Grafana 查看新仪表盘。
+1. 在中心服务器运行 `gla`，选择 `1` 更新。新版停用本机 Xray 文件采集；旧本机 API 配置自动迁移。
+2. 在各采集服务器运行 `alloy`，选择 `1` 更新。新版生成安全与系统资源配置，并用 Compose 的 `--remove-orphans` 移除该项目旧的 3x-ui 导出器。旧 Token 不会自动上传到中心端，需要自行在中心端配置。
+3. 在中心端 `gla -> 8` 添加所有服务器的面板，服务器名称与对应采集端 `SERVER_NAME` 一致。填写 Token 并启用访问日志采集。若中心端已有这些面板的 API 日志采集配置，可先关闭其日志采集，待对应采集端升级后再开启，以减少过渡期间重复采集。
+4. 需要系统资源时，在采集端 `3. 配置采集模块 -> 2. 主机指标` 配置 VictoriaMetrics 地址；随后检查安全仪表盘及两个 Xray 仪表盘。
 
-升级会保留 Grafana、Loki、VictoriaMetrics 数据卷以及已保存的 3x-ui API Token。远程写入密码不会写入 `.install.env`，更新时需要重新输入。
+历史 Grafana、Loki、VictoriaMetrics 数据卷保留。采集端旧的 Xray 环境变量会被忽略，新菜单不再提供相应开关。远程写入密码不会写入 `.install.env`，更新时需要重新输入。中心端和采集端都升级后，不再产生文件日志与 API 日志的重复采集。
 
 ## `gla` 菜单说明
 
-运行 `gla` 后，顶部会直接显示 Grafana、Loki、VictoriaMetrics、Alloy 和中心服务器本机 3x-ui 流量采集的状态。这里的“本机 3x-ui”不代表远程采集服务器；远程服务器的 3x-ui API 状态应在“Xray 网关流量与连接”仪表盘中查看。
+运行 `gla` 后，顶部会显示 Grafana、Loki、VictoriaMetrics、Alloy 和中心端 3x-ui API 采集服务的状态。每台面板的 API、日志状态应在 Xray 仪表盘中查看；容器“运行中”本身不代表面板可访问。
 
 | 选项 | 作用 |
 | --- | --- |
@@ -192,7 +162,7 @@ Alloy 内部日志原本使用 UTC 的 `Z` 时间，管理菜单会在显示时�
 | 查看访问地址、凭据与模块 | 查看 Grafana 地址、密码、内部接口和已安装仪表盘 |
 | 更新容器镜像 | 拉取最新镜像并重建容器，不修改采集参数 |
 | 卸载并删除全部数据 | 删除容器、配置和项目数据卷，执行前需要二次确认 |
-| 配置或关闭本机 3x-ui API 流量采集 | 为中心服务器启用、修改或关闭 3x-ui Panel API 指标采集 |
+| 管理 3x-ui API 面板 | 在中心端管理本机和远程面板的流量、在线状态与访问日志采集 |
 
 “更新配置、脚本与仪表盘”和“更新容器镜像”不是同一操作：前者更新 GLA 项目配置，后者只更新 Docker 镜像。
 
@@ -201,15 +171,13 @@ Alloy 内部日志原本使用 UTC 的 `Z` 时间，管理菜单会在显示时�
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `SERVER_NAME` | 中心端为 `central` | Grafana 中显示的服务器名称，只能使用字母、数字、点、下划线和连字符 |
-| `XRAY_LOG` | `/var/log/x-ui/access.log` | Xray access log 路径 |
-| `ENABLE_XRAY` | `auto` | `auto`、`true` 或 `false` |
 | `LOKI_URL` | 无 | 远程 Loki Push API 的 HTTPS 地址 |
 | `LOKI_USERNAME` | `alloy-agent` | Loki 反向代理认证用户名 |
 | `METRICS_URL` | 无 | VictoriaMetrics Remote Write HTTPS 地址 |
 | `METRICS_USERNAME` | `alloy-agent` | 指标反向代理认证用户名 |
-| `ENABLE_HOST_METRICS` | `auto` | `auto` 在配置 `METRICS_URL` 时兼容启用；`true` 或 `false` 可与 3x-ui 指标独立控制 |
+| `ENABLE_HOST_METRICS` | `auto` | `auto` 在配置 `METRICS_URL` 时兼容启用；`true` 或 `false` 控制采集端主机指标 |
 | `ENABLE_SECURITY_TRAFFIC` | `auto` | `auto` 仅在主机指标、安全日志、UFW 和指标写入均可用时启用；`true` 强制启用；`false` 停止并清理计数器 |
-| `XUI_API_URL` | 无 | 3x-ui `/panel/api/inbounds/list` 完整 HTTPS 地址 |
+| `XUI_LOCAL_HOST` | 无 | 中心服务器本机面板域名；仅此域名映射到 Docker 宿主机网关 |
 | `ENABLE_GEOIP` | `auto` | `auto`、`true` 或 `false`；检测到本地数据库时自动启用 |
 | `GEOIP_DB_PATH` | 采集端为 `/opt/xray-alloy-collector/geoip/GeoLite2-City.mmdb`，中心端为 `/opt/xray-log-dashboard/geoip/GeoLite2-City.mmdb` | 本地 GeoLite2-City 数据库路径 |
 | `GEOIP_MIRROR_URL` | `https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb` | 菜单自动下载使用的 GitHub 镜像地址 |
@@ -251,11 +219,11 @@ docker logs --tail=100 xray-alloy
 - **Fail2ban 面板为 0**：不一定是故障，可能当前时间范围内没有 `Found`、`Ban` 或 `Unban` 事件。
 - **UFW 面板无数据**：确认 UFW 已启用日志，并检查 `/var/log/ufw.log` 是否存在。
 - **系统曲线为空**：检查是否设置了 `METRICS_URL`，以及指标域名的 SSL、Basic Auth 和 `/api/v1/write` 转发。
-- **3x-ui API 状态不可用**：检查 API URL、Token、证书，以及采集服务器能否访问面板域名。
-- **Xray 网关流量与连接的服务器列表只有 All**：更新中心和采集端脚本后重新部署。新版导出器会在每条 `xui_*` 指标中写入 `server` 标签；可用 `count by (server) (xui_exporter_up)` 验证。
-- **中心服务器本机 3x-ui 显示超时**：更新中心服务器脚本并重新部署，新版会让本机面板域名在导出器容器内直连宿主机网关，解决 Docker 访问本机公网地址的回环超时。
-- **传入 `XUI_API_URL` 后仍未启用**：确认反斜杠是该行最后一个字符，后面不能有空格；也可以直接使用 `alloy` 菜单第 `11` 项。
-- **Xray 面板无日志**：检查 `XRAY_LOG`、3x-ui 的访问日志设置和文件读取权限。
+- **3x-ui API 状态不可用**：检查 API URL、Token、证书，以及中心服务器能否访问面板域名。
+- **Xray 网关流量与连接的服务器列表只有 All**：在中心端 `gla -> 8` 添加面板，检查 API 采集服务和指标写入；可用 `count by (server) (xui_exporter_up)` 验证。
+- **中心服务器本机 3x-ui 显示超时**：设置 `XUI_LOCAL_HOST=本机面板域名` 后重新部署，使该域名在 API 采集容器内直连宿主机网关；同时确认宿主机上的 HTTPS 反向代理可从 Docker 网络访问。
+- **面板尚未开始采集**：在中心端 `gla -> 8` 确认面板已添加，再查看 `gla -> 4 -> 5` 的 API 采集服务日志。
+- **Xray 面板无日志**：在中心端检查面板 API 配置、Token、日志状态和采集服务错误；确认 3x-ui 已启用访问日志且能读取它。
 - **旧日志没有全部出现**：systemd journal 首次默认读取最近数据；GLA 主要保证安装后的持续采集。
 
 ## 数据保留与资源
@@ -271,7 +239,7 @@ docker logs --tail=100 xray-alloy
 ## 安全说明
 
 - Grafana、Loki、VictoriaMetrics 和 3x-ui API 都必须经过认证或限制来源 IP。
-- 3x-ui API Token 具有完整管理权限，只保存在对应服务器。
+- 3x-ui API Token 具有完整管理权限，统一采集所用 Token 保存在中心服务器。
 - 不要在命令行参数中传入密码或 API Token；脚本会使用隐藏输入。
 - 仪表盘中的来源 IP、用户名和访问目标属于敏感运维数据。
 - 启用 UFW 前必须先放行当前 SSH 端口和必要业务端口，并用第二个 SSH 会话验证。
@@ -282,7 +250,7 @@ docker logs --tail=100 xray-alloy
 ```text
 deploy-xray-grafana-loki-alloy.sh  中心服务器安装与 gla 菜单
 deploy-xray-alloy-collector.sh     采集服务器安装与 alloy 菜单
-assets/xui_exporter.py             3x-ui API Prometheus 导出器
+assets/xui_exporter.py             中心端 3x-ui API 指标与日志采集服务
 assets/security_traffic_collector.sh SSH/UFW 聚合流量采集器
 dashboards/xray-gateway.json       Xray / 3x-ui 流量仪表盘
 dashboards/server-security.json    服务器安全事件与系统资源仪表盘

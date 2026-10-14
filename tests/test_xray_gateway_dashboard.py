@@ -11,15 +11,16 @@ class XrayGatewayDashboardTest(unittest.TestCase):
     def setUpClass(cls):
         cls.dashboard = json.loads(DASHBOARD_PATH.read_text(encoding="utf-8"))
 
-    def test_server_variable_uses_loki_server_labels(self):
+    def test_server_variable_discovers_panels_without_access_logs(self):
         server_variable = self.dashboard["templating"]["list"][0]
         self.assertEqual(server_variable["name"], "server")
         self.assertEqual(server_variable["allValue"], ".+")
-        self.assertEqual(server_variable["datasource"]["type"], "loki")
+        self.assertEqual(server_variable["datasource"]["type"], "prometheus")
         self.assertIsInstance(server_variable["query"], str)
         self.assertIn("label_values", server_variable["query"])
         self.assertIn("server", server_variable["query"])
         self.assertIn("server", server_variable["definition"])
+        self.assertIn("xui_exporter_up", server_variable["query"])
 
     def test_port_field_is_not_formatted_as_bytes(self):
         panel = next(panel for panel in self.dashboard["panels"] if panel["id"] == 7)

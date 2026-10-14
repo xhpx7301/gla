@@ -3,8 +3,6 @@
 set -Eeuo pipefail
 
 STACK_DIR="${STACK_DIR:-/opt/xray-log-dashboard}"
-XRAY_LOG="${XRAY_LOG:-/var/log/x-ui/access.log}"
-ENABLE_XRAY="${ENABLE_XRAY:-auto}"
 ENABLE_GEOIP="${ENABLE_GEOIP:-auto}"
 ENABLE_SECURITY_TRAFFIC="${ENABLE_SECURITY_TRAFFIC:-auto}"
 SSH_PORT="${SSH_PORT:-}"
@@ -17,6 +15,7 @@ NPM_NETWORK="${NPM_NETWORK:-npm-loki}"
 ASSET_BASE_URL="${ASSET_BASE_URL:-https://raw.githubusercontent.com/xhpx7301/gla/main}"
 XUI_API_URL="${XUI_API_URL:-}"
 XUI_API_TOKEN="${XUI_API_TOKEN:-}"
+XUI_LOCAL_HOST="${XUI_LOCAL_HOST:-}"
 MANAGER_PATH="/usr/local/bin/gla"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
 GEOIP_DB_PATH="${GEOIP_DB_PATH:-$STACK_DIR/geoip/GeoLite2-City.mmdb}"
@@ -28,8 +27,6 @@ note() { printf '\n==> %s\n' "$*"; }
 write_install_settings() {
   {
     printf 'STACK_DIR=%q\n' "$STACK_DIR"
-    printf 'XRAY_LOG=%q\n' "$XRAY_LOG"
-    printf 'ENABLE_XRAY=%q\n' "$ENABLE_XRAY"
     printf 'ENABLE_GEOIP=%q\n' "$ENABLE_GEOIP"
     printf 'ENABLE_SECURITY_TRAFFIC=%q\n' "$ENABLE_SECURITY_TRAFFIC"
     printf 'SSH_PORT=%q\n' "$SSH_PORT"
@@ -41,19 +38,13 @@ write_install_settings() {
     printf 'METRICS_RETENTION=%q\n' "$METRICS_RETENTION"
     printf 'SERVER_NAME=%q\n' "$SERVER_NAME"
     printf 'NPM_NETWORK=%q\n' "$NPM_NETWORK"
-    printf 'XUI_API_URL=%q\n' "$XUI_API_URL"
+    printf 'XUI_LOCAL_HOST=%q\n' "$XUI_LOCAL_HOST"
   } >"$INSTALL_SETTINGS_FILE"
   chmod 0600 "$INSTALL_SETTINGS_FILE"
 }
 
 require_install_prerequisites() {
   [ "$(id -u)" -eq 0 ] || die "请使用 root 执行：sudo bash $0"
-  case "$ENABLE_XRAY" in
-    auto) [ -r "$XRAY_LOG" ] && ENABLE_XRAY=true || ENABLE_XRAY=false ;;
-    true) [ -r "$XRAY_LOG" ] || die "已要求采集 Xray，但无法读取日志：$XRAY_LOG" ;;
-    false) ;;
-    *) die "ENABLE_XRAY 只能是 auto、true 或 false。" ;;
-  esac
   case "$ENABLE_GEOIP" in
     auto) [ -r "$GEOIP_DB_PATH" ] && ENABLE_GEOIP=true || ENABLE_GEOIP=false ;;
     true) [ -r "$GEOIP_DB_PATH" ] || die "已要求启用 GeoIP，但无法读取数据库：$GEOIP_DB_PATH" ;;
@@ -95,9 +86,11 @@ require_install_prerequisites() {
     XUI_API_HOST="${XUI_API_URL#https://}"
     XUI_API_HOST="${XUI_API_HOST%%/*}"
     XUI_API_HOST="${XUI_API_HOST%%:*}"
+    XUI_LOCAL_HOST="$XUI_API_HOST"
     [[ "$XUI_API_HOST" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || die "无法从 XUI_API_URL 识别面板域名。"
-  else
-    XUI_API_HOST="localhost"
+  fi
+  if [ -n "$XUI_LOCAL_HOST" ]; then
+    [[ "$XUI_LOCAL_HOST" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || die "本机面板域名格式无效。"
   fi
   command -v docker >/dev/null 2>&1 || die "未找到 Docker。通常 Nginx Proxy Manager 已经安装 Docker。"
   docker info >/dev/null 2>&1 || die "Docker 服务未运行或当前用户无权限访问。"
@@ -277,24 +270,27 @@ install -d -m 0750 "$STACK_DIR" "$STACK_DIR/alloy" \
   "$STACK_DIR/loki" "$STACK_DIR/grafana/provisioning/datasources" \
   "$STACK_DIR/grafana/provisioning/dashboards" "$STACK_DIR/grafana/dashboards" \
   "$STACK_DIR/assets" "$STACK_DIR/secrets" "$STACK_DIR/geoip"
-write_install_settings
-
-printf '%s\n' "$XUI_API_TOKEN" >"$STACK_DIR/secrets/xui-api-token"
-chmod 0600 "$STACK_DIR/secrets/xui-api-token"
 download_asset assets/xui_exporter.py "$STACK_DIR/assets/xui_exporter.py"
+[ -f "$STACK_DIR/secrets/xui-panels.json" ] || printf '[]\n' >"$STACK_DIR/secrets/xui-panels.json"
+chmod 0600 "$STACK_DIR/secrets/xui-panels.json"
+# Migrate an existing local-panel URL and Token into the shared API panel list.
+# Once migrated, removing the panel in the manager also stops its collection.
+if [ -n "$XUI_API_URL" ]; then
+  printf '%s' "$XUI_API_TOKEN" | docker run --rm -i --network none \
+    -e XUI_PANELS_FILE=/run/secrets/xui-panels.json \
+    -v "$STACK_DIR/secrets:/run/secrets" \
+    -v "$STACK_DIR/assets/xui_exporter.py:/app/xui_exporter.py:ro" \
+    python:3.12-alpine python3 /app/xui_exporter.py panels migrate \
+      --name "$SERVER_NAME" --url "$XUI_API_URL" --logs true
+fi
+write_install_settings
 download_asset assets/security_traffic_collector.sh "$STACK_DIR/assets/security_traffic_collector.sh"
 chmod 0750 "$STACK_DIR/assets/security_traffic_collector.sh"
 setup_security_traffic_collector
-if [ -n "$XUI_API_URL" ]; then
-  printf 'COMPOSE_PROFILES=xui\n' >"$STACK_DIR/.env"
-else
-  printf 'COMPOSE_PROFILES=\n' >"$STACK_DIR/.env"
-fi
+printf 'COMPOSE_PROFILES=xui\n' >"$STACK_DIR/.env"
 chmod 0600 "$STACK_DIR/.env"
 
-XUI_SCRAPE_CONFIG=""
-if [ -n "$XUI_API_URL" ]; then
-  XUI_SCRAPE_CONFIG="$(cat <<EOF
+XUI_SCRAPE_CONFIG="$(cat <<EOF
 
 prometheus.scrape "xui" {
   targets = [{
@@ -308,11 +304,10 @@ prometheus.scrape "xui" {
 }
 EOF
 )"
-fi
 
-XRAY_VOLUME_LINE=""
-if [ "$ENABLE_XRAY" = true ]; then
-  XRAY_VOLUME_LINE="      - ${XRAY_LOG}:${XRAY_LOG}:ro"
+XUI_EXTRA_HOST_LINE=""
+if [ -n "$XUI_LOCAL_HOST" ]; then
+  XUI_EXTRA_HOST_LINE="    extra_hosts: [\"${XUI_LOCAL_HOST}:host-gateway\"]"
 fi
 
 GEOIP_VOLUME_LINE=""
@@ -419,7 +414,6 @@ services:
     user: "0:0"
     command: run --server.http.listen-addr=0.0.0.0:12345 --storage.path=/var/lib/alloy/data /etc/alloy/config.alloy
     volumes:
-${XRAY_VOLUME_LINE}
 ${GEOIP_VOLUME_LINE}
       - ${JOURNAL_PATH_HOST}:/var/log/journal:ro
       - /etc/machine-id:/etc/machine-id:ro
@@ -441,20 +435,24 @@ ${SECURITY_TRAFFIC_VOLUME_LINE}
     restart: unless-stopped
     command: ["python3", "/app/xui_exporter.py"]
     environment:
-      XUI_API_URL: "${XUI_API_URL}"
-      XUI_API_TOKEN_FILE: /run/secrets/xui_api_token
       SERVER_NAME: "${SERVER_NAME}"
-    extra_hosts:
-      - "${XUI_API_HOST}:host-gateway"
+      XUI_PANELS_FILE: /run/secrets/xui-panels.json
+      XUI_STATE_DIR: /var/lib/xui
+      XUI_LOKI_URL: http://alloy:3500/loki/api/v1/push
+${XUI_EXTRA_HOST_LINE}
     volumes:
       - ./assets/xui_exporter.py:/app/xui_exporter.py:ro
-      - ./secrets/xui-api-token:/run/secrets/xui_api_token:ro
+      - ./secrets:/run/secrets:ro
+      - xui-state:/var/lib/xui
+    depends_on:
+      - alloy
 
 volumes:
   grafana-data:
   loki-data:
   victoria-metrics-data:
   alloy-data:
+  xui-state:
 
 networks:
   npm:
@@ -503,44 +501,24 @@ analytics:
 EOF
 
 cat >"$STACK_DIR/alloy/config.alloy" <<EOF
-local.file_match "xray_access" {
-  path_targets = [{
-    __path__ = "${XRAY_LOG}",
-    job      = "xray-access",
-    server   = "${SERVER_NAME}",
-  }]
+loki.source.api "xui_access" {
+  http {
+    listen_address = "0.0.0.0"
+    listen_port    = 3500
+  }
+  forward_to = [loki.process.xui_access.receiver]
 }
 
-loki.source.file "xray_access" {
-  targets    = local.file_match.xray_access.targets
-  forward_to = [loki.process.xray_access.receiver]
-}
-
-loki.process "xray_access" {
+loki.process "xui_access" {
   forward_to = [loki.write.default.receiver]
-
   stage.regex {
-    expression = "^(?P<timestamp>\\\\d{4}/\\\\d{2}/\\\\d{2} \\\\d{2}:\\\\d{2}:\\\\d{2}\\\\.\\\\d+) from (?P<source_ip>(?:\\\\[[0-9A-Fa-f:]+\\\\]|[0-9A-Fa-f:.]+)):[0-9]+ accepted (?P<network>\\\\w+):(?P<destination>\\\\S+) \\\\[(?P<inbound>[^ ]+) (?:>>|->) (?P<outbound>[^\\\\]]+)\\\\](?: email: (?P<email>\\\\S+))?"
+    expression = "from \\\\[?(?P<source_ip>[0-9A-Fa-f:.]+)\\\\]?:[0-9]+ accepted"
   }
-
 ${GEOIP_XRAY_STAGES}
-
-  stage.timestamp {
-    source = "timestamp"
-    format = "2006/01/02 15:04:05.000000"
-    location = "Asia/Shanghai"
-  }
-
-  stage.labels {
-    values = {
-      inbound  = "",
-      outbound = "",
-      email    = "",
-    }
-  }
-
 }
 
+EOF
+cat >>"$STACK_DIR/alloy/config.alloy" <<EOF
 loki.source.journal "ssh" {
   path       = "/var/log/journal"
   matches    = "_SYSTEMD_UNIT=ssh.service"
@@ -750,7 +728,8 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
     {
       "id": 1,
       "type": "logs",
-      "title": "全部访问日志（含 API）",
+      "title": "全部已采集访问记录",
+      "description": "访问记录统一来自 3x-ui API，返回解析记录且排除 api -> api；日志可能因轮转或采集窗口不足而缺失。",
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{ "refId": "A", "expr": "{job=\"xray-access\", server=~\"$server\"}" }],
       "gridPos": { "x": 0, "y": 42, "w": 24, "h": 10 },
@@ -882,7 +861,10 @@ cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
           }
         }
       ]
-    }
+    },
+    {"id": 21, "type": "stat", "title": "API 日志采集状态", "datasource": {"type": "prometheus", "uid": "victoriametrics"}, "targets": [{"refId": "A", "expr": "min(xui_access_log_up{server=~\"$server\"} and on(server) (xui_access_log_enabled{server=~\"$server\"} == 1))", "instant": true}], "gridPos": {"x": 0, "y": 52, "w": 8, "h": 5}, "fieldConfig": {"defaults": {"unit": "none", "noValue": "未启用或尚未成功采集", "mappings": [{"type": "value", "options": {"0": {"text": "失败或等待采集", "color": "red"}, "1": {"text": "正常", "color": "green"}}}]}, "overrides": []}, "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "graphMode": "none"}},
+    {"id": 22, "type": "stat", "title": "API 日志最近成功采集", "datasource": {"type": "prometheus", "uid": "victoriametrics"}, "targets": [{"refId": "A", "expr": "1000 * min(xui_access_log_last_success_timestamp_seconds{server=~\"$server\"} > 0)", "instant": true}], "gridPos": {"x": 8, "y": 52, "w": 8, "h": 5}, "fieldConfig": {"defaults": {"unit": "dateTimeAsLocal", "noValue": "未启用或尚未成功采集"}, "overrides": []}, "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "graphMode": "none"}},
+    {"id": 23, "type": "stat", "title": "API 日志窗口风险", "datasource": {"type": "prometheus", "uid": "victoriametrics"}, "targets": [{"refId": "A", "expr": "max(xui_access_log_window_full{server=~\"$server\"} + xui_access_log_window_gap{server=~\"$server\"})", "instant": true}], "gridPos": {"x": 16, "y": 52, "w": 8, "h": 5}, "fieldConfig": {"defaults": {"unit": "none", "noValue": "未启用或尚未成功采集", "mappings": [{"type": "value", "options": {"0": {"text": "正常", "color": "green"}, "1": {"text": "窗口已满", "color": "yellow"}, "2": {"text": "可能漏采", "color": "red"}}}]}, "overrides": []}, "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "graphMode": "none"}, "description": "0：窗口未满；1：窗口已满，建议增大条数；2：窗口已满且与上次没有重叠，可能漏采。接口不保证完整归档。"}
   ]
 }
 EOF
@@ -893,12 +875,8 @@ note "正在启动 Grafana、Loki、VictoriaMetrics 和 Alloy"
 cd "$STACK_DIR"
 "${COMPOSE[@]}" pull
 "${COMPOSE[@]}" up -d
-if [ -n "$XUI_API_URL" ]; then
-  "${COMPOSE[@]}" restart xui-exporter
-else
-  docker rm -f gla-xui-exporter >/dev/null 2>&1 || true
-fi
 "${COMPOSE[@]}" restart alloy
+"${COMPOSE[@]}" restart xui-exporter
 
 note "正在验证容器状态"
 "${COMPOSE[@]}" ps
@@ -912,7 +890,7 @@ cat <<EOF
 Grafana 地址：http://服务器_IP:${GRAFANA_PORT}
 Grafana 用户名：admin
 Grafana 密码：${GRAFANA_ADMIN_PASSWORD}
-Xray 日志采集：${ENABLE_XRAY}
+Xray 数据采集：中心端统一通过 3x-ui API 获取
 
 安全提示：端口 ${GRAFANA_PORT} 已监听在所有服务器网络接口。
 公网使用前，请在云防火墙或服务器防火墙中仅允许你的管理 IP 访问。
@@ -927,7 +905,7 @@ install_manager() {
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-GLA_VERSION="2.1.1"
+GLA_VERSION="3.0.0"
 STACK_DIR="${STACK_DIR:-/opt/xray-log-dashboard}"
 COMPOSE_FILE="$STACK_DIR/compose.yaml"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
@@ -984,7 +962,7 @@ show_header() {
   else
     printf 'GeoIP 归属解析   [未启用]\n'
   fi
-  printf '本机 3x-ui 采集 %s\n' "$(xui_state)"
+  printf '3x-ui API 中心采集 %s\n' "$(xui_state)"
 }
 
 compose() {
@@ -1005,7 +983,7 @@ show_status() {
     printf '未找到面板配置。可能仍保留 Docker 数据卷。\n'
   fi
 
-  local image volume mountpoint log_path
+  local image volume mountpoint
   printf '\n项目镜像占用：\n'
   for image in grafana/grafana:latest grafana/loki:latest grafana/alloy:latest victoriametrics/victoria-metrics:latest python:3.12-alpine; do
     docker image ls "$image"
@@ -1018,15 +996,10 @@ show_status() {
     du -sh "$mountpoint"
   done < <(docker volume ls -q --filter label=com.docker.compose.project=xray-log-dashboard)
 
-  log_path="$(sed -n 's/^[[:space:]]*__path__[[:space:]]*=[[:space:]]*"\(.*\)",/\1/p' "$STACK_DIR/alloy/config.alloy" 2>/dev/null | head -n 1)"
-  if [ -n "$log_path" ] && [ -e "$log_path" ]; then
-    printf '\nXray 原始访问日志占用：\n'
-    du -sh "$log_path"
-  fi
 }
 
 show_logs() {
-  printf '\n服务日志\n\n1. Grafana\n2. Loki\n3. VictoriaMetrics\n4. Alloy\n5. 本机 3x-ui 流量采集\n0. 返回\n'
+  printf '\n服务日志\n\n1. Grafana\n2. Loki\n3. VictoriaMetrics\n4. Alloy\n5. 3x-ui API 中心采集（流量与日志）\n0. 返回\n'
   read -rp "请选择服务: " choice
   case "$choice" in
     1) compose logs -f --tail=100 grafana 2>&1 | format_service_log_utc8 || true ;;
@@ -1061,7 +1034,7 @@ service_control_menu() {
 5. 仅重启 Loki
 6. 仅重启 VictoriaMetrics
 7. 仅重启 Alloy
-8. 仅重启本机 3x-ui 流量采集
+8. 仅重启 3x-ui API 中心采集
 MENU
     read -rp "请输入操作编号 [0-8]: " choice
     case "$choice" in
@@ -1090,7 +1063,7 @@ MENU
 }
 
 show_access_info() {
-  local grafana_bind="0.0.0.0" grafana_port="3000" xui_api_url="" enable_xray="auto" grafana_password=""
+  local grafana_bind="0.0.0.0" grafana_port="3000" grafana_password=""
   if [ -r "$INSTALL_SETTINGS_FILE" ]; then
     set +u
     # Generated by GLA and contains shell-escaped non-secret settings.
@@ -1098,8 +1071,6 @@ show_access_info() {
     set -u
     grafana_bind="${GRAFANA_BIND:-0.0.0.0}"
     grafana_port="${GRAFANA_PORT:-3000}"
-    xui_api_url="${XUI_API_URL:-}"
-    enable_xray="${ENABLE_XRAY:-auto}"
   fi
 
   printf '\n访问与模块信息\n\n'
@@ -1124,12 +1095,8 @@ show_access_info() {
   [ -f "$STACK_DIR/grafana/dashboards/xray-gateway.json" ] && printf '  - Xray 网关流量与连接\n'
   [ -f "$STACK_DIR/grafana/dashboards/server-security.json" ] && printf '  - 服务器安全事件与系统资源\n'
 
-  if [ -n "$xui_api_url" ]; then
-    printf '\n本机 3x-ui API：已配置（Token 不显示）\n'
-  else
-    printf '\n本机 3x-ui API：未启用\n'
-  fi
-  printf 'Xray 日志：    %s\n' "$enable_xray"
+  printf '\n中心端管理的 API 面板（Token 不显示）：\n'
+  panels_command list
 }
 
 download_installer() {
@@ -1143,7 +1110,7 @@ download_installer() {
 }
 
 update_script_and_deploy() {
-  local xui_api_url_is_set="${XUI_API_URL+x}" xui_api_url_override="${XUI_API_URL-}"
+  local xui_local_host_is_set="${XUI_LOCAL_HOST+x}" xui_local_host_override="${XUI_LOCAL_HOST-}"
   local enable_geoip_is_set="${ENABLE_GEOIP+x}" enable_geoip_override="${ENABLE_GEOIP-}"
   local geoip_db_path_is_set="${GEOIP_DB_PATH+x}" geoip_db_path_override="${GEOIP_DB_PATH-}"
   [ -r "$INSTALL_SETTINGS_FILE" ] || die "未找到安装配置：$INSTALL_SETTINGS_FILE"
@@ -1152,9 +1119,9 @@ update_script_and_deploy() {
   # This file is created locally by the installer and contains no password.
   . "$INSTALL_SETTINGS_FILE"
   set +a
-  if [ "$xui_api_url_is_set" = x ]; then
-    XUI_API_URL="$xui_api_url_override"
-    export XUI_API_URL
+  if [ "$xui_local_host_is_set" = x ]; then
+    XUI_LOCAL_HOST="$xui_local_host_override"
+    export XUI_LOCAL_HOST
   fi
   if [ "$enable_geoip_is_set" = x ]; then
     ENABLE_GEOIP="$enable_geoip_override"
@@ -1171,36 +1138,55 @@ update_script_and_deploy() {
   GLA_ACTION=install bash <(download_installer)
 }
 
-configure_xui_api() {
-  local current_url="" answer
-  if [ -r "$INSTALL_SETTINGS_FILE" ]; then
-    set +u
-    . "$INSTALL_SETTINGS_FILE"
-    set -u
-    current_url="${XUI_API_URL:-}"
-  fi
+panels_command() {
+  # Use the bundled container runtime; no host Python installation required.
+  docker run --rm -i --network none \
+    -e XUI_PANELS_FILE=/run/secrets/xui-panels.json \
+    -v "$STACK_DIR/secrets:/run/secrets" \
+    -v "$STACK_DIR/assets/xui_exporter.py:/app/xui_exporter.py:ro" \
+    python:3.12-alpine python3 /app/xui_exporter.py panels "$@"
+}
 
-  printf '\n中央服务器 3x-ui API 流量采集配置\n'
-  if [ -n "$current_url" ]; then
-    printf '当前地址：%s\n' "$current_url"
-  else
-    printf '当前状态：未启用\n'
-  fi
-  printf '\n请输入中央服务器本机 3x-ui 的完整 HTTPS API 地址。\n'
-  printf '格式：https://面板域名/面板路径/panel/api/inbounds/list\n'
-  printf '输入 0 可关闭，直接按 Enter 取消。\n'
-  read -rp "3x-ui API 地址: " answer
-  if [ -z "$answer" ]; then
-    printf '已取消。\n'
-    return 1
-  fi
-  if [ "$answer" = 0 ]; then
-    XUI_API_URL=""
-  else
-    XUI_API_URL="$answer"
-  fi
-  export XUI_API_URL
-  update_script_and_deploy
+configure_api_panels() {
+  local action name url token logs interval log_count
+  while true; do
+    printf '\n3x-ui API 中心采集：流量、在线状态与访问日志\n'
+    panels_command list || return 1
+    printf '\n1. 添加或更新面板\n2. 删除面板\n0. 返回\n'
+    read -rp '请选择 [0-2]: ' action
+    case "$action" in
+      0) return 0 ;;
+      1)
+        read -rp '服务器名称（唯一，字母/数字/点/下划线/连字符）: ' name
+        read -rp '完整 HTTPS API 地址（以 /panel/api/inbounds/list 结尾）: ' url
+        printf '请在该服务器的 3x-ui 中开启 access log。中心服务器自己的面板也在这里添加。\n'
+        read -rp '采集访问日志？[Y/n]: ' logs
+        case "$logs" in n|N) logs=false ;; *) logs=true ;; esac
+        read -rp '采集间隔（10-3600 秒，默认 30）: ' interval
+        read -rp '每次获取日志条数（100-10000，默认 1000）: ' log_count
+        read -rsp 'API Token（更新已有面板时留空保留原 Token）: ' token
+        printf '\n'
+        if ! printf '%s' "$token" | panels_command set --name "$name" --url "$url" \
+          --logs "$logs" --interval "${interval:-30}" --log-count "${log_count:-1000}"; then
+          unset token
+          printf '配置失败，请检查地址、名称、间隔和 Token。\n'
+          continue
+        fi
+        unset token
+        compose up -d xui-exporter
+        compose restart xui-exporter
+        printf '配置已生效。API 和日志采集状态请在 Grafana 中查看。\n'
+        ;;
+      2)
+        read -rp '要删除的服务器名称: ' name
+        if panels_command delete --name "$name"; then
+          compose restart xui-exporter
+          printf '已移除采集配置，历史数据保留。\n'
+        fi
+        ;;
+      *) printf '无效选择。\n' ;;
+    esac
+  done
 }
 
 update_stack() {
@@ -1237,7 +1223,7 @@ while true; do
 5. 查看访问地址、凭据与模块
 6. 更新容器镜像
 7. 卸载并删除全部数据
-8. 配置或关闭本机 3x-ui API 流量采集
+8. 管理 3x-ui API 面板（本机与远程的流量、访问日志）
 MENU
   read -rp "请输入操作编号 [0-8]: " choice
   case "$choice" in
@@ -1249,13 +1235,7 @@ MENU
     5) show_access_info; pause ;;
     6) update_stack; pause ;;
     7) uninstall_everything ;;
-    8)
-      if configure_xui_api; then
-        exit 0
-      else
-        pause
-      fi
-      ;;
+    8) configure_api_panels; pause ;;
     *) printf '无效选择。\n'; pause ;;
   esac
 done
@@ -1267,7 +1247,7 @@ show_installer_menu() {
   while true; do
     clear
     cat <<'MENU'
-GLA 2.0.2 - 轻量服务器观测平台
+GLA 3.0.0 - 轻量服务器观测平台
 
 当前状态：[尚未安装或需要重新部署]
 

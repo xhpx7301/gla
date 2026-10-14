@@ -23,32 +23,19 @@ class CollectorModuleConfigurationTest(unittest.TestCase):
         )
         self.assertIn("2.1.x and earlier inferred host metrics", self.script)
 
-    def test_host_and_xui_metrics_are_independently_generated(self):
-        self.assertIn(
-            'if [ "$ENABLE_HOST_METRICS" = true ]; then\n'
-            '  cat >>"$STACK_DIR/alloy/config.alloy"',
-            self.script,
-        )
-        self.assertIn(
-            'if [ -n "$XUI_API_URL" ]; then\n'
-            '  cat >>"$STACK_DIR/alloy/config.alloy"',
-            self.script,
-        )
-        self.assertIn('if [ "$METRICS_REQUIRED" = true ]; then', self.script)
-        self.assertIn(
-            'if [ "$ENABLE_HOST_METRICS" = true ] || [ -n "$XUI_API_URL" ]',
-            self.script,
-        )
+    def test_collector_only_generates_security_and_host_modules(self):
+        self.assertIn('if [ "$ENABLE_HOST_METRICS" = true ]; then', self.script)
+        for obsolete in ('XUI_API_URL', 'ENABLE_XRAY', 'xui-exporter:', 'loki.process "xray_access"'):
+            self.assertNotIn(obsolete, self.script)
+        self.assertIn('compose up -d --remove-orphans', self.script)
 
     def test_manager_exposes_all_collection_modules(self):
         self.assertIn("3. 配置采集模块", self.script)
         self.assertIn("configure_modules()", self.script)
         for module in (
             "主机指标",
-            "Xray 日志",
             "安全日志（SSH/Fail2ban/UFW）",
             "GeoIP 归属解析",
-            "3x-ui API 流量",
             "SSH/UFW 聚合流量",
         ):
             self.assertIn(module, self.script)
@@ -60,12 +47,10 @@ class CollectorModuleConfigurationTest(unittest.TestCase):
         self.assertLess(main_modules, main_stop)
 
         module_labels = (
-            "1. Xray 日志",
-            "2. 安全日志（SSH/Fail2ban/UFW）",
-            "3. 主机指标",
-            "4. GeoIP 归属解析",
-            "5. SSH/UFW 聚合流量",
-            "6. 3x-ui API 流量",
+            "1. 安全日志（SSH/Fail2ban/UFW）",
+            "2. 主机指标",
+            "3. GeoIP 归属解析",
+            "4. SSH/UFW 聚合流量",
         )
         positions = [self.script.index(label) for label in module_labels]
         self.assertEqual(positions, sorted(positions))
@@ -74,13 +59,11 @@ class CollectorModuleConfigurationTest(unittest.TestCase):
         for reminder in (
             "该模块需要 VictoriaMetrics Remote Write 服务",
             "地址无效：必须使用 HTTPS 并以 /api/v1/write 结尾",
-            "地址无效：必须使用 HTTPS 并以 /panel/api/inbounds/list 结尾",
             "无法启用：请先启用主机指标和 VictoriaMetrics 写入",
             "无法启用：请先启用安全日志",
             "无法启用：系统需要 iptables",
             "无法启用：请先启用 UFW",
             "未找到 systemd journal，无法启用安全日志",
-            "请确认 3x-ui/Xray 已启用访问日志及路径权限",
         ):
             self.assertIn(reminder, self.script)
 
@@ -90,20 +73,16 @@ class CollectorModuleConfigurationTest(unittest.TestCase):
             "日志写入",
             "指标写入",
             "当前使用配置",
-            "访问日志路径",
             "SSH Journal",
             "数据库状态",
             "主机指标依赖",
-            "Panel API 地址",
             "内容已隐藏",
         ):
             self.assertIn(label, self.script)
-        self.assertIn("show_xray_current_config", self.script)
         self.assertIn("show_security_current_config", self.script)
         self.assertIn("show_host_metrics_current_config", self.script)
         self.assertIn("show_geoip_current_config", self.script)
         self.assertIn("show_security_traffic_current_config", self.script)
-        self.assertIn("show_xui_current_config", self.script)
         self.assertNotIn("grep -E 'server   =|url =|__path__ ='", self.script)
 
     def test_manager_can_diagnose_central_write_health(self):
@@ -122,12 +101,11 @@ class CollectorModuleConfigurationTest(unittest.TestCase):
         self.assertIn("loki.write.central", self.script)
         self.assertIn("prometheus.remote_write.central", self.script)
         self.assertIn("node_time_seconds", self.script)
-        self.assertIn("xui_exporter_up", self.script)
         self.assertIn("curl --config -", self.script)
         self.assertIn("请输入操作编号 [0-12]", self.script)
         self.assertIn('[[ "$age" =~ ^[0-9]+([.][0-9]+)?$ ]]', self.script)
         self.assertIn("grep -Eiv 'without error'", self.script)
-        self.assertIn('GLA_VERSION="2.4.0"', self.script)
+        self.assertIn('GLA_VERSION="3.0.0"', self.script)
 
     def test_write_errors_have_chinese_diagnosis_and_source_checks(self):
         for text in (
@@ -140,8 +118,6 @@ class CollectorModuleConfigurationTest(unittest.TestCase):
             "中文诊断：目标端口拒绝连接",
             "中文诊断：连接超时",
             "本地采集源",
-            "在 3x-ui/Xray 中启用访问日志",
-            "文件可读，但最近 10 分钟没有更新",
             "采集配置已生成，等待中央最新样本验证",
         ):
             self.assertIn(text, self.script)
