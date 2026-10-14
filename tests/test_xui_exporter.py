@@ -881,7 +881,7 @@ class ExporterTest(unittest.TestCase):
                 bot.handle_callback(dict(callback, data="trafficnotify:panels:1"))
                 self.assertTrue(bot.traffic_notify_show_panels(420))
                 self.assertFalse(bot.traffic_notify_show_panels(421))
-                self.assertIn("🖥 面板明细：开启", request.call_args.args[2]["text"])
+                self.assertIn("🖥 分组面板明细：开启", request.call_args.args[2]["text"])
                 self.assertEqual(bot.db.execute("SELECT * FROM traffic_notify_settings").fetchone(),
                                  (420, 1, "23:20"))
                 bot.db.close()
@@ -925,7 +925,21 @@ class ExporterTest(unittest.TestCase):
                 bot.handle_callback(dict(callback, data=group_button["callback_data"]))
                 self.assertIn("📊 总计：4.00 KiB", request.call_args.args[2]["text"])
                 bot.handle_message(dict(message, text="/traffic_panels"))
-                self.assertIn("📊 总计：11.00 KiB", request.call_args.args[2]["text"])
+                text = request.call_args.args[2]["text"]
+                self.assertIn("🖥 分组面板累计流量", text)
+                other, selected = text.split("👥 分组：" + group + "\n", 1)
+                self.assertIn("👥 分组：other\n\n🖥 面板：node-a\n⬆️ 上行：4.00 KiB\n⬇️ 下行：4.00 KiB\n📊 总计：8.00 KiB", other)
+                self.assertIn("🖥 面板：node-a\n⬆️ 上行：1.00 KiB\n⬇️ 下行：2.00 KiB\n📊 总计：3.00 KiB", selected)
+                self.assertIn("🖥 面板：node-b\n⬆️ 上行：512 B\n⬇️ 下行：512 B\n📊 总计：1.00 KiB", selected)
+                self.assertEqual(text.count("🖥 面板：node-a"), 2)
+                self.assertNotIn("📊 总计：11.00 KiB", text)
+                # The unfiltered view's button opens the same group-by-panel detail.
+                bot.handle_message(dict(message, text="/traffic"))
+                panel_all = json.loads(request.call_args.args[2]["reply_markup"])["inline_keyboard"][0][0]
+                self.assertEqual(panel_all["text"], "🖥 查看分组面板明细")
+                bot.handle_callback(dict(callback, data=panel_all["callback_data"]))
+                self.assertEqual(request.call_args.args[2]["text"].split("🕒 查询时间：")[0],
+                                 text.split("🕒 查询时间：")[0])
                 self.assertFalse(bot.traffic_notify_show_panels(420))
                 self.assertEqual(bot.db.execute("SELECT * FROM traffic_notify_baselines").fetchall(), [])
                 request.reset_mock()
@@ -966,9 +980,17 @@ class ExporterTest(unittest.TestCase):
                               "➕ 较上次新增：1000 B（⬆️ 500 B / ⬇️ 500 B）", text)
                 self.assertIn("👥 分组：missing\n⚠️ 当前没有可用面板的流量数据", text)
                 self.assertIn("部分流量首次记录", text)
-                self.assertIn("🖥 面板：node-a\n⬆️ 上行：110 B\n⬇️ 下行：220 B\n📊 总计：330 B\n"
-                              "➕ 较上次新增：15 B", text)
-                self.assertEqual(text.count("🖥 面板：node-a"), 1)
+                shared, second = text.split("👥 分组：second\n", 1)
+                second, _ = second.split("👥 分组：missing\n", 1)
+                self.assertIn("🖥 面板：node-a\n⬆️ 上行：100 B\n⬇️ 下行：200 B\n📊 总计：300 B\n"
+                              "➕ 较上次新增：0 B", shared)
+                self.assertIn("🖥 面板：node-b\n⬆️ 上行：1.46 KiB\n⬇️ 下行：2.44 KiB\n📊 总计：3.91 KiB\n"
+                              "➕ 较上次新增：1000 B", shared)
+                self.assertIn("🖥 面板：node-a\n⬆️ 上行：10 B\n⬇️ 下行：20 B\n📊 总计：30 B\n"
+                              "➕ 较上次新增：15 B", second)
+                self.assertIn("🖥 面板：node-b\n⬆️ 上行：50 B\n⬇️ 下行：50 B\n📊 总计：100 B\n"
+                              "🆕 较上次新增：首次记录", second)
+                self.assertEqual(text.count("🖥 面板：node-a"), 2)
                 self.assertNotIn("unsubscribed", text)
                 self.assertEqual(bot.db.execute(
                     "SELECT up,down FROM traffic_notify_baselines WHERE server='node-c'").fetchone(), (9000, 9000))

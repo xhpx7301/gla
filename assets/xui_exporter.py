@@ -235,7 +235,7 @@ class TelegramBot:
         {"command": "groups", "description": "查看客户端分组"},
         {"command": "online", "description": "查看在线客户端"},
         {"command": "traffic", "description": "查看分组累计流量"},
-        {"command": "traffic_panels", "description": "查看各面板累计流量"},
+        {"command": "traffic_panels", "description": "查看分组各面板累计流量"},
         {"command": "online_notify", "description": "管理上线通知"},
         {"command": "watch", "description": "订阅分组上线通知"},
         {"command": "unwatch", "description": "取消分组上线通知"},
@@ -379,7 +379,7 @@ class TelegramBot:
         return (f"📊 定时流量通知：{'开启' if enabled else '关闭'}\n"
                 f"🕒 通知时间：每天 {notify_time}（UTC+8）\n"
                 f"👥 通知分组：{'、'.join(groups) if groups else '未设置'}\n"
-                f"🖥 面板明细：{'开启' if show_panels else '关闭'}", {
+                f"🖥 分组面板明细：{'开启' if show_panels else '关闭'}", {
                     "inline_keyboard": [
                         [{"text": "🔔 开启通知" if not enabled else "🔕 关闭通知",
                           "callback_data": f"trafficnotify:toggle:{0 if enabled else 1}"}],
@@ -388,7 +388,7 @@ class TelegramBot:
                         [{"text": "➕ 新增分组", "callback_data": "trafficnotify:add"},
                          {"text": "➖ 移除分组", "callback_data": "trafficnotify:remove"}],
                         [{"text": "🧪 发送测试通知", "callback_data": "trafficnotify:test"}],
-                        [{"text": "🖥 关闭面板明细" if show_panels else "🖥 开启面板明细",
+                        [{"text": "🖥 关闭分组面板明细" if show_panels else "🖥 开启分组面板明细",
                           "callback_data": f"trafficnotify:panels:{0 if show_panels else 1}"}],
                         [{"text": "↩️ 返回主菜单", "callback_data": "menu:home"}],
                     ]})
@@ -453,11 +453,12 @@ class TelegramBot:
             delta_up = max(0, up - previous[0]) if previous else 0
             delta_down = max(0, down - previous[1]) if previous else 0
             values = (up, down, delta_up, delta_down, int(previous is not None), 1)
-            for total in (group_values[group], panel_values.setdefault(server, [0, 0, 0, 0, 0, 0])):
-                for index, value in enumerate(values):
-                    total[index] += value
+            for index, value in enumerate(values):
+                group_values[group][index] += value
+            panel_values.setdefault(group, {})[server] = values
             current_values.append((group, server, up, down))
         rows = []
+        show_panels = self.traffic_notify_show_panels(chat_id)
         for group, (up, down, delta_up, delta_down, tracked, count) in sorted(
                 group_values.items(), key=lambda entry: (-(entry[1][0] + entry[1][1]), entry[0])):
             if not count:
@@ -465,27 +466,36 @@ class TelegramBot:
             else:
                 rows.append(f"👥 分组：{group}\n{self.traffic_details(up, down)}\n"
                             + self.traffic_delta_text(delta_up, delta_down, tracked, count))
-        if self.traffic_notify_show_panels(chat_id) and panel_values:
-            rows.append("🖥 各面板流量明细（仅汇总通知分组）")
-            for server, (up, down, delta_up, delta_down, tracked, count) in sorted(
-                    panel_values.items(), key=lambda entry: (-(entry[1][0] + entry[1][1]), entry[0])):
-                rows.append(f"🖥 面板：{server}\n{self.traffic_details(up, down)}\n"
-                            + self.traffic_delta_text(delta_up, delta_down, tracked, count))
+                if show_panels:
+                    for server, (panel_up, panel_down, panel_delta_up, panel_delta_down, panel_tracked, _) in sorted(
+                            panel_values[group].items(), key=lambda entry: (-(entry[1][0] + entry[1][1]), entry[0])):
+                        rows.append(f"🖥 面板：{server}\n{self.traffic_details(panel_up, panel_down)}\n"
+                                    + self.traffic_delta_text(panel_delta_up, panel_delta_down, panel_tracked, 1))
         return rows, current_values
 
     def send_traffic_query(self, chat_id, argument="", by_panel=False):
         series, servers_up = self.snapshot()
         totals = {}
-        for item in series.values():
-            if item["server"] in servers_up and (not argument or item["group"] == argument):
-                total = totals.setdefault(item["server"] if by_panel else item["group"], [0, 0])
-                total[0] += item["up"]
-                total[1] += item["down"]
-        rows = [f"{'🖥 面板' if by_panel else '👥 分组'}：{name}\n{self.traffic_details(up, down)}"
-                for name, (up, down) in sorted(totals.items(), key=lambda entry: (-(sum(entry[1])), entry[0]))]
-        title = "🖥 各面板累计流量" if by_panel else "📈 分组累计流量"
+        panel_values = {}
+        for (group, server), (up, down) in self.traffic_totals(series, servers_up).items():
+            if argument and group != argument:
+                continue
+            total = totals.setdefault(group, [0, 0])
+            total[0] += up
+            total[1] += down
+            panel_values.setdefault(group, {})[server] = (up, down)
+        rows = []
+        for group, (up, down) in sorted(totals.items(), key=lambda entry: (-sum(entry[1]), entry[0])):
+            if by_panel:
+                panels = [f"🖥 面板：{server}\n{self.traffic_details(panel_up, panel_down)}"
+                          for server, (panel_up, panel_down) in sorted(
+                              panel_values[group].items(), key=lambda entry: (-sum(entry[1]), entry[0]))]
+                rows.append(f"👥 分组：{group}\n\n" + "\n\n".join(panels))
+            else:
+                rows.append(f"👥 分组：{group}\n{self.traffic_details(up, down)}")
+        title = "🖥 分组面板累计流量" if by_panel else "📈 分组累计流量"
         scope = f"\n👥 筛选分组：{argument}" if argument else ""
-        note = ("ℹ️ 按面板汇总客户端累计流量，按累计总量排序。" if by_panel else
+        note = ("ℹ️ 按分组列出各面板的客户端累计流量，分组及组内面板按累计总量排序。" if by_panel else
                 "ℹ️ 同名分组跨面板汇总，按累计总量排序。")
         reply = (title + scope + "\n\n" + ("\n\n".join(rows) if rows else "📭 没有匹配的流量数据")
                  + "\n\n" + note + self.report_footer(servers_up))
@@ -494,7 +504,7 @@ class TelegramBot:
             self.pending_traffic_views[(chat_id, token)] = argument
         target = "groups" if by_panel else "panels"
         keyboard = {"inline_keyboard": [
-            [{"text": "👥 查看分组累计流量" if by_panel else "🖥 查看各面板流量",
+            [{"text": "👥 查看分组累计流量" if by_panel else "🖥 查看分组面板明细",
               "callback_data": f"trafficview:{target}:{token}"}],
             [{"text": "↩️ 返回主菜单", "callback_data": "menu:home"}],
         ]}
@@ -807,7 +817,7 @@ class TelegramBot:
                      "/groups - 查看客户端分组\n"
                      "/online [分组] - 查看在线客户端及流量\n"
                      "/traffic [分组] - 查看累计流量\n"
-                     "/traffic_panels [分组] - 查看各面板累计流量\n"
+                     "/traffic_panels [分组] - 查看各分组在各面板的累计流量\n"
                      "/online_notify - 管理上线通知分组并发送测试\n"
                      "/watch [分组] - 订阅上线通知\n"
                      "/unwatch [分组] - 取消订阅\n"
