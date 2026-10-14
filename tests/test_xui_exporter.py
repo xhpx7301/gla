@@ -684,7 +684,7 @@ class ExporterTest(unittest.TestCase):
             finally:
                 bot.db.close()
 
-    def test_telegram_scheduled_traffic_notifications_include_panel_totals_and_deltas(self):
+    def test_telegram_scheduled_traffic_notifications_summarize_groups_and_optional_panels(self):
         workers = [EXPORTER.PanelWorker({"name": name}) for name in ("node-a", "node-b")]
         clients = [
             {"email": "alice", "group": "shared", "traffic": {"up": 1024, "down": 2048}},
@@ -709,13 +709,18 @@ class ExporterTest(unittest.TestCase):
                     EXPORTER.timedelta(hours=8))).timestamp())
                 bot.process_traffic_notifications(report_time)
                 first = request.call_args.args[2]["text"]
-                self.assertIn("🖥 面板：node-a", first)
-                self.assertIn("🖥 面板：node-b", first)
+                self.assertNotIn("🖥 面板：", first)
+                self.assertIn("👥 分组：shared\n⬆️ 上行：2.00 KiB\n⬇️ 下行：3.00 KiB\n📊 总计：5.00 KiB", first)
                 self.assertIn("🆕 较上次新增：首次记录", first)
                 self.assertNotIn("分组：other", first)
                 request.reset_mock()
                 bot.process_traffic_notifications(report_time + 300)
                 request.assert_not_called()
+                bot.handle_message({"chat": {"id": 420}, "from": {"id": 42},
+                                    "text": "/traffic_notify panels on"})
+                request.reset_mock()
+                bot.process_traffic_notifications(report_time + 600)
+                request.assert_not_called()  # Changing presentation does not resend today's report.
 
                 workers[0].metrics = EXPORTER.render_metrics("node-a", [], [], [
                     {"email": "alice", "group": "shared", "traffic": {"up": 2048, "down": 3072}},
@@ -727,6 +732,10 @@ class ExporterTest(unittest.TestCase):
                 next_day = report_time + 86400
                 bot.process_traffic_notifications(next_day)
                 second = request.call_args.args[2]["text"]
+                self.assertIn("👥 分组：shared\n⬆️ 上行：3.50 KiB\n⬇️ 下行：5.00 KiB\n📊 总计：8.50 KiB", second)
+                self.assertIn("➕ 较上次新增：3.50 KiB（⬆️ 1.50 KiB / ⬇️ 2.00 KiB）", second)
+                self.assertEqual(second.count("🖥 面板：node-a"), 1)
+                self.assertEqual(second.count("🖥 面板：node-b"), 1)
                 self.assertIn("➕ 较上次新增：2.00 KiB（⬆️ 1.00 KiB / ⬇️ 1.00 KiB）", second)
                 self.assertIn("➕ 较上次新增：1.50 KiB（⬆️ 512 B / ⬇️ 1.00 KiB）", second)
             finally:
@@ -843,12 +852,126 @@ class ExporterTest(unittest.TestCase):
                 bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/traffic_notify test"})
                 text = request.call_args.args[2]["text"]
                 self.assertIn("🧪 流量通知测试", text)
-                self.assertIn("🖥 面板：node-a", text)
-                self.assertIn("当前累计：3.00 KiB", text)
+                self.assertNotIn("🖥 面板：node-a", text)
+                self.assertIn("📊 总计：3.00 KiB", text)
+                self.assertIn("➕ 较上次新增：1.50 KiB", text)
+                bot.handle_message({"chat": {"id": 420}, "from": {"id": 42},
+                                    "text": "/traffic_notify panels on"})
+                bot.send_traffic_notify_test(420)
+                self.assertIn("🖥 面板：node-a", request.call_args.args[2]["text"])
                 self.assertEqual(bot.db.execute("SELECT * FROM traffic_notify_baselines").fetchone(),
                                  (420, "shared", "node-a", 512, 1024))
                 self.assertEqual(bot.db.execute("SELECT * FROM traffic_notify_runs").fetchone(),
                                  (420, "2026-10-13"))
+            finally:
+                bot.db.close()
+
+    def test_traffic_panel_option_upgrades_old_database_and_persists_per_chat(self):
+        config = {"token": "bot-token", "allowed_user_ids": [42]}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
+            # An existing installation has no table for the new presentation option.
+            with EXPORTER.sqlite3.connect(str(pathlib.Path(directory) / "telegram.sqlite")) as legacy:
+                legacy.execute("CREATE TABLE traffic_notify_settings (chat_id INTEGER PRIMARY KEY, enabled INTEGER, notify_time TEXT)")
+                legacy.execute("INSERT INTO traffic_notify_settings VALUES (420,1,'23:20')")
+            legacy.close()
+            bot = EXPORTER.TelegramBot(config, [], directory)
+            try:
+                self.assertFalse(bot.traffic_notify_show_panels(420))
+                callback = {"id": "panels", "from": {"id": 42}, "message": {"chat": {"id": 420}}}
+                bot.handle_callback(dict(callback, data="trafficnotify:panels:1"))
+                self.assertTrue(bot.traffic_notify_show_panels(420))
+                self.assertFalse(bot.traffic_notify_show_panels(421))
+                self.assertIn("🖥 面板明细：开启", request.call_args.args[2]["text"])
+                self.assertEqual(bot.db.execute("SELECT * FROM traffic_notify_settings").fetchone(),
+                                 (420, 1, "23:20"))
+                bot.db.close()
+                bot = EXPORTER.TelegramBot(config, [], directory)
+                self.assertTrue(bot.traffic_notify_show_panels(420))
+                bot.handle_callback(dict(callback, data="trafficnotify:panels:2"))
+                self.assertTrue(bot.traffic_notify_show_panels(420))
+                bot.handle_callback(dict(callback, data="trafficnotify:panels:0", **{"from": {"id": 99}}))
+                self.assertTrue(bot.traffic_notify_show_panels(420))
+                bot.handle_callback(dict(callback, data="trafficnotify:panels:0"))
+                self.assertFalse(bot.traffic_notify_show_panels(420))
+            finally:
+                bot.db.close()
+
+    def test_traffic_panel_query_buttons_keep_group_filter_and_do_not_change_baselines(self):
+        workers = [EXPORTER.PanelWorker({"name": name}) for name in ("node-a", "node-b", "node-c")]
+        group = "Aurora 极光云瓶 " + "长分组名" * 20
+        workers[0].metrics = EXPORTER.render_metrics("node-a", [], [], [
+            {"email": "alice", "group": group, "traffic": {"up": 1024, "down": 2048}},
+            {"email": "bob", "group": "other", "traffic": {"up": 4096, "down": 4096}}])
+        workers[1].metrics = EXPORTER.render_metrics("node-b", [], [], [
+            {"email": "alice", "group": group, "traffic": {"up": 512, "down": 512}}])
+        workers[2].metrics = [EXPORTER.metric("xui_exporter_up", 0, server="node-c")]
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, workers, directory)
+            message = {"chat": {"id": 420}, "from": {"id": 42}}
+            callback = {"id": "view", "from": {"id": 42}, "message": {"chat": {"id": 420}}}
+            try:
+                bot.handle_message(dict(message, text="/traffic " + group))
+                report = request.call_args.args[2]
+                self.assertIn("📊 总计：4.00 KiB", report["text"])
+                panel_button = json.loads(report["reply_markup"])["inline_keyboard"][0][0]
+                self.assertLessEqual(len(panel_button["callback_data"].encode()), 64)
+                bot.handle_callback(dict(callback, data=panel_button["callback_data"]))
+                report = request.call_args.args[2]
+                self.assertIn("🖥 面板：node-a\n⬆️ 上行：1.00 KiB\n⬇️ 下行：2.00 KiB\n📊 总计：3.00 KiB", report["text"])
+                self.assertIn("🖥 面板：node-b", report["text"])
+                self.assertNotIn("8.00 KiB", report["text"])
+                self.assertIn("以下面板暂不可用，未计入本次结果：node-c", report["text"])
+                group_button = json.loads(report["reply_markup"])["inline_keyboard"][0][0]
+                bot.handle_callback(dict(callback, data=group_button["callback_data"]))
+                self.assertIn("📊 总计：4.00 KiB", request.call_args.args[2]["text"])
+                bot.handle_message(dict(message, text="/traffic_panels"))
+                self.assertIn("📊 总计：11.00 KiB", request.call_args.args[2]["text"])
+                self.assertFalse(bot.traffic_notify_show_panels(420))
+                self.assertEqual(bot.db.execute("SELECT * FROM traffic_notify_baselines").fetchall(), [])
+                request.reset_mock()
+                bot.handle_callback(dict(callback, data=panel_button["callback_data"], **{"from": {"id": 99}}))
+                request.assert_called_once()
+                self.assertEqual(request.call_args.args[1], "answerCallbackQuery")
+                bot.pending_traffic_views.clear()
+                bot.handle_callback(dict(callback, data=panel_button["callback_data"]))
+                self.assertIn("选项已过期", request.call_args.args[2]["text"])
+            finally:
+                bot.db.close()
+
+    def test_group_and_panel_deltas_handle_counter_resets_new_data_and_outages(self):
+        workers = [EXPORTER.PanelWorker({"name": name}) for name in ("node-a", "node-b", "node-c")]
+        workers[0].metrics = EXPORTER.render_metrics("node-a", [], [], [
+            {"email": "alice", "group": "shared", "traffic": {"up": 100, "down": 200}},
+            {"email": "other", "group": "second", "traffic": {"up": 10, "down": 20}},
+            {"email": "ignored", "group": "unsubscribed", "traffic": {"up": 9999, "down": 9999}}])
+        workers[1].metrics = EXPORTER.render_metrics("node-b", [], [], [
+            {"email": "bob", "group": "shared", "traffic": {"up": 1500, "down": 2500}},
+            {"email": "new", "group": "second", "traffic": {"up": 50, "down": 50}}])
+        workers[2].metrics = [EXPORTER.metric("xui_exporter_up", 0, server="node-c")]
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, workers, directory)
+            try:
+                with bot.db:
+                    bot.db.execute("INSERT INTO traffic_notify_settings VALUES (420,1,'20:00')")
+                    bot.db.executemany("INSERT INTO traffic_notify_groups VALUES (420,?)", [("shared",), ("second",), ("missing",)])
+                    bot.db.executemany("INSERT INTO traffic_notify_baselines VALUES (420,?,?,?,?)", [
+                        ("shared", "node-a", 1000, 2000), ("shared", "node-b", 1000, 2000),
+                        ("shared", "node-c", 9000, 9000), ("second", "node-a", 5, 10)])
+                bot.set_traffic_notify_panels(420, True)
+                now = EXPORTER.datetime(2026, 10, 14, 20, 0, tzinfo=EXPORTER.timezone(
+                    EXPORTER.timedelta(hours=8))).timestamp()
+                bot.process_traffic_notifications(now)
+                text = request.call_args.args[2]["text"]
+                self.assertIn("👥 分组：shared\n⬆️ 上行：1.56 KiB\n⬇️ 下行：2.64 KiB\n📊 总计：4.20 KiB\n"
+                              "➕ 较上次新增：1000 B（⬆️ 500 B / ⬇️ 500 B）", text)
+                self.assertIn("👥 分组：missing\n⚠️ 当前没有可用面板的流量数据", text)
+                self.assertIn("部分流量首次记录", text)
+                self.assertIn("🖥 面板：node-a\n⬆️ 上行：110 B\n⬇️ 下行：220 B\n📊 总计：330 B\n"
+                              "➕ 较上次新增：15 B", text)
+                self.assertEqual(text.count("🖥 面板：node-a"), 1)
+                self.assertNotIn("unsubscribed", text)
+                self.assertEqual(bot.db.execute(
+                    "SELECT up,down FROM traffic_notify_baselines WHERE server='node-c'").fetchone(), (9000, 9000))
             finally:
                 bot.db.close()
 

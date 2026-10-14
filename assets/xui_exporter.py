@@ -235,6 +235,7 @@ class TelegramBot:
         {"command": "groups", "description": "查看客户端分组"},
         {"command": "online", "description": "查看在线客户端"},
         {"command": "traffic", "description": "查看分组累计流量"},
+        {"command": "traffic_panels", "description": "查看各面板累计流量"},
         {"command": "online_notify", "description": "管理上线通知"},
         {"command": "watch", "description": "订阅分组上线通知"},
         {"command": "unwatch", "description": "取消分组上线通知"},
@@ -257,12 +258,14 @@ class TelegramBot:
         self.db.execute("CREATE TABLE IF NOT EXISTS traffic_notify_groups (chat_id INTEGER, group_name TEXT, PRIMARY KEY(chat_id,group_name))")
         self.db.execute("CREATE TABLE IF NOT EXISTS traffic_notify_baselines (chat_id INTEGER, group_name TEXT, server TEXT, up INTEGER NOT NULL, down INTEGER NOT NULL, PRIMARY KEY(chat_id,group_name,server))")
         self.db.execute("CREATE TABLE IF NOT EXISTS traffic_notify_runs (chat_id INTEGER PRIMARY KEY, sent_date TEXT NOT NULL)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS traffic_notify_options (chat_id INTEGER PRIMARY KEY, show_panels INTEGER NOT NULL DEFAULT 0)")
         self.db.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)")
         self.offset = 0
         self.pending_groups = {}
         self.pending_online_groups = {}
         self.pending_traffic_groups = {}
         self.pending_traffic_times = set()
+        self.pending_traffic_views = {}
         self.notification_cooldown_seconds = validate_notification_cooldown(
             config.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS))
 
@@ -370,11 +373,13 @@ class TelegramBot:
     def traffic_notify_keyboard(self, chat_id):
         row = self.db.execute("SELECT enabled,notify_time FROM traffic_notify_settings WHERE chat_id=?", (chat_id,)).fetchone()
         enabled, notify_time = row if row else (0, "20:00")
+        show_panels = self.traffic_notify_show_panels(chat_id)
         groups = [item[0] for item in self.db.execute(
             "SELECT group_name FROM traffic_notify_groups WHERE chat_id=? ORDER BY group_name", (chat_id,))]
         return (f"📊 定时流量通知：{'开启' if enabled else '关闭'}\n"
                 f"🕒 通知时间：每天 {notify_time}（UTC+8）\n"
-                f"👥 通知分组：{'、'.join(groups) if groups else '未设置'}", {
+                f"👥 通知分组：{'、'.join(groups) if groups else '未设置'}\n"
+                f"🖥 面板明细：{'开启' if show_panels else '关闭'}", {
                     "inline_keyboard": [
                         [{"text": "🔔 开启通知" if not enabled else "🔕 关闭通知",
                           "callback_data": f"trafficnotify:toggle:{0 if enabled else 1}"}],
@@ -383,6 +388,8 @@ class TelegramBot:
                         [{"text": "➕ 新增分组", "callback_data": "trafficnotify:add"},
                          {"text": "➖ 移除分组", "callback_data": "trafficnotify:remove"}],
                         [{"text": "🧪 发送测试通知", "callback_data": "trafficnotify:test"}],
+                        [{"text": "🖥 关闭面板明细" if show_panels else "🖥 开启面板明细",
+                          "callback_data": f"trafficnotify:panels:{0 if show_panels else 1}"}],
                         [{"text": "↩️ 返回主菜单", "callback_data": "menu:home"}],
                     ]})
 
@@ -401,6 +408,98 @@ class TelegramBot:
             if previous is None or previous[0] != notify_time:
                 self.db.execute("DELETE FROM traffic_notify_runs WHERE chat_id=?", (chat_id,))
 
+    def traffic_notify_show_panels(self, chat_id):
+        row = self.db.execute("SELECT show_panels FROM traffic_notify_options WHERE chat_id=?",
+                              (chat_id,)).fetchone()
+        return bool(row[0]) if row else False
+
+    def set_traffic_notify_panels(self, chat_id, enabled):
+        with self.db:
+            self.db.execute("INSERT INTO traffic_notify_options VALUES (?,?) "
+                            "ON CONFLICT(chat_id) DO UPDATE SET show_panels=excluded.show_panels",
+                            (chat_id, int(enabled)))
+
+    @staticmethod
+    def traffic_totals(series, servers_up):
+        totals = {}
+        for item in series.values():
+            if item["server"] in servers_up:
+                total = totals.setdefault((item["group"], item["server"]), [0, 0])
+                total[0] += item["up"]
+                total[1] += item["down"]
+        return totals
+
+    @staticmethod
+    def traffic_delta_text(delta_up, delta_down, tracked, count):
+        if not tracked:
+            return "🆕 较上次新增：首次记录"
+        text = (f"➕ 较上次新增：{format_bytes(delta_up + delta_down)}"
+                f"（⬆️ {format_bytes(delta_up)} / ⬇️ {format_bytes(delta_down)}）")
+        if tracked < count:
+            text += "\nℹ️ 部分流量首次记录，新增仅统计已有记录的流量。"
+        return text
+
+    def traffic_notification_rows(self, chat_id, groups, totals):
+        """Keep per-group, per-panel baselines while presenting compact totals."""
+        group_values = {group: [0, 0, 0, 0, 0, 0] for group in groups}
+        panel_values = {}
+        current_values = []
+        for (group, server), (up, down) in totals.items():
+            if group not in group_values:
+                continue
+            previous = self.db.execute(
+                "SELECT up,down FROM traffic_notify_baselines WHERE chat_id=? AND group_name=? AND server=?",
+                (chat_id, group, server)).fetchone()
+            delta_up = max(0, up - previous[0]) if previous else 0
+            delta_down = max(0, down - previous[1]) if previous else 0
+            values = (up, down, delta_up, delta_down, int(previous is not None), 1)
+            for total in (group_values[group], panel_values.setdefault(server, [0, 0, 0, 0, 0, 0])):
+                for index, value in enumerate(values):
+                    total[index] += value
+            current_values.append((group, server, up, down))
+        rows = []
+        for group, (up, down, delta_up, delta_down, tracked, count) in sorted(
+                group_values.items(), key=lambda entry: (-(entry[1][0] + entry[1][1]), entry[0])):
+            if not count:
+                rows.append(f"👥 分组：{group}\n⚠️ 当前没有可用面板的流量数据")
+            else:
+                rows.append(f"👥 分组：{group}\n{self.traffic_details(up, down)}\n"
+                            + self.traffic_delta_text(delta_up, delta_down, tracked, count))
+        if self.traffic_notify_show_panels(chat_id) and panel_values:
+            rows.append("🖥 各面板流量明细（仅汇总通知分组）")
+            for server, (up, down, delta_up, delta_down, tracked, count) in sorted(
+                    panel_values.items(), key=lambda entry: (-(entry[1][0] + entry[1][1]), entry[0])):
+                rows.append(f"🖥 面板：{server}\n{self.traffic_details(up, down)}\n"
+                            + self.traffic_delta_text(delta_up, delta_down, tracked, count))
+        return rows, current_values
+
+    def send_traffic_query(self, chat_id, argument="", by_panel=False):
+        series, servers_up = self.snapshot()
+        totals = {}
+        for item in series.values():
+            if item["server"] in servers_up and (not argument or item["group"] == argument):
+                total = totals.setdefault(item["server"] if by_panel else item["group"], [0, 0])
+                total[0] += item["up"]
+                total[1] += item["down"]
+        rows = [f"{'🖥 面板' if by_panel else '👥 分组'}：{name}\n{self.traffic_details(up, down)}"
+                for name, (up, down) in sorted(totals.items(), key=lambda entry: (-(sum(entry[1])), entry[0]))]
+        title = "🖥 各面板累计流量" if by_panel else "📈 分组累计流量"
+        scope = f"\n👥 筛选分组：{argument}" if argument else ""
+        note = ("ℹ️ 按面板汇总客户端累计流量，按累计总量排序。" if by_panel else
+                "ℹ️ 同名分组跨面板汇总，按累计总量排序。")
+        reply = (title + scope + "\n\n" + ("\n\n".join(rows) if rows else "📭 没有匹配的流量数据")
+                 + "\n\n" + note + self.report_footer(servers_up))
+        token = hashlib.sha256(argument.encode()).hexdigest()[:16] if argument else "all"
+        if argument:
+            self.pending_traffic_views[(chat_id, token)] = argument
+        target = "groups" if by_panel else "panels"
+        keyboard = {"inline_keyboard": [
+            [{"text": "👥 查看分组累计流量" if by_panel else "🖥 查看各面板流量",
+              "callback_data": f"trafficview:{target}:{token}"}],
+            [{"text": "↩️ 返回主菜单", "callback_data": "menu:home"}],
+        ]}
+        self.send(chat_id, reply, keyboard)
+
     def send_traffic_notify_test(self, chat_id):
         """Send current traffic without changing the scheduled notification state."""
         now = time.time()
@@ -414,25 +513,10 @@ class TelegramBot:
         if not servers_up:
             self.send(chat_id, "🧪 流量通知测试\n\n⚠️ 当前没有可用面板，暂时无法获取流量数据。")
             return
-        totals = {}
-        for item in series.values():
-            if item["server"] in servers_up:
-                total = totals.setdefault((item["group"], item["server"]), [0, 0])
-                total[0] += item["up"]
-                total[1] += item["down"]
-        rows = []
-        for group in groups:
-            group_totals = [(server, totals[(group, server)]) for server in sorted(servers_up)
-                            if (group, server) in totals]
-            if not group_totals:
-                rows.append(f"👥 分组：{group}\n⚠️ 当前没有可用面板的流量数据")
-                continue
-            rows.append(f"👥 分组：{group}")
-            for server, (up, down) in group_totals:
-                rows.append(f"🖥 面板：{server}\n"
-                            f"📊 当前累计：{format_bytes(up + down)}（⬆️ {format_bytes(up)} / ⬇️ {format_bytes(down)}）")
+        rows, _ = self.traffic_notification_rows(chat_id, groups, self.traffic_totals(series, servers_up))
         text = (f"🧪 流量通知测试\n🕒 当前时间：{local_now.strftime('%Y-%m-%d %H:%M')}（UTC+8）\n\n"
-                + "\n\n".join(rows) + self.report_footer(servers_up))
+                + "\n\n".join(rows) + "\n\nℹ️ 测试不会更新流量对比记录或当天发送状态。"
+                + self.report_footer(servers_up))
         self.send(chat_id, text)
 
     def online_notify_keyboard(self, chat_id):
@@ -553,14 +637,7 @@ class TelegramBot:
         series, servers_up = self.snapshot()
         if not servers_up:
             return
-        totals = {}
-        for item in series.values():
-            if item["server"] not in servers_up:
-                continue
-            key = (item["group"], item["server"])
-            total = totals.setdefault(key, [0, 0])
-            total[0] += item["up"]
-            total[1] += item["down"]
+        totals = self.traffic_totals(series, servers_up)
         settings = self.db.execute(
             "SELECT chat_id,notify_time FROM traffic_notify_settings WHERE enabled=1").fetchall()
         for chat_id, notify_time in settings:
@@ -573,29 +650,7 @@ class TelegramBot:
                 "SELECT group_name FROM traffic_notify_groups WHERE chat_id=? ORDER BY group_name", (chat_id,))]
             if not groups:
                 continue
-            available = sorted({server for group, server in totals if group in groups})
-            rows = []
-            current_values = []
-            for group in groups:
-                group_totals = [(server, totals[(group, server)]) for server in available
-                                if (group, server) in totals]
-                if not group_totals:
-                    rows.append(f"👥 分组：{group}\n⚠️ 当前没有可用面板的流量数据")
-                    continue
-                rows.append(f"👥 分组：{group}")
-                for server, (up, down) in group_totals:
-                    previous = self.db.execute(
-                        "SELECT up,down FROM traffic_notify_baselines WHERE chat_id=? AND group_name=? AND server=?",
-                        (chat_id, group, server)).fetchone()
-                    delta_up = max(0, up - previous[0]) if previous else 0
-                    delta_down = max(0, down - previous[1]) if previous else 0
-                    delta_text = (f"➕ 较上次新增：{format_bytes(delta_up + delta_down)}"
-                                  f"（⬆️ {format_bytes(delta_up)} / ⬇️ {format_bytes(delta_down)}）"
-                                  if previous else "🆕 较上次新增：首次记录")
-                    rows.append(f"🖥 面板：{server}\n"
-                                f"📊 累计：{format_bytes(up + down)}（⬆️ {format_bytes(up)} / ⬇️ {format_bytes(down)}）\n"
-                                f"{delta_text}")
-                    current_values.append((group, server, up, down))
+            rows, current_values = self.traffic_notification_rows(chat_id, groups, totals)
             text = (f"📊 分组流量日报\n🕒 {current_date} {notify_time}（UTC+8）\n\n"
                     + "\n\n".join(rows) + self.report_footer(servers_up))
             try:
@@ -752,6 +807,7 @@ class TelegramBot:
                      "/groups - 查看客户端分组\n"
                      "/online [分组] - 查看在线客户端及流量\n"
                      "/traffic [分组] - 查看累计流量\n"
+                     "/traffic_panels [分组] - 查看各面板累计流量\n"
                      "/online_notify - 管理上线通知分组并发送测试\n"
                      "/watch [分组] - 订阅上线通知\n"
                      "/unwatch [分组] - 取消订阅\n"
@@ -774,6 +830,10 @@ class TelegramBot:
                 return
             if action == "groups" and not value:
                 self.send_traffic_notify_groups(chat_id)
+                return
+            if action == "panels" and value in ("on", "off"):
+                self.set_traffic_notify_panels(chat_id, value == "on")
+                self.send_traffic_notify_settings(chat_id, "✅ 面板明细设置已更新\n\n")
                 return
             if action in ("on", "off") and not value:
                 enabled = int(action == "on")
@@ -800,7 +860,8 @@ class TelegramBot:
                 self.send_traffic_notify_settings(chat_id, f"✅ {'已添加' if action == 'add' else '已移除'}分组：{value}\n\n")
                 return
             self.send(chat_id, "用法：/traffic_notify、/traffic_notify test、/traffic_notify on、/traffic_notify off、"
-                      "/traffic_notify time 20:00、/traffic_notify add 分组、/traffic_notify remove 分组")
+                      "/traffic_notify time 20:00、/traffic_notify panels on|off、"
+                      "/traffic_notify add 分组、/traffic_notify remove 分组")
             return
         elif command == "/online_notify":
             if argument == "test":
@@ -839,17 +900,9 @@ class TelegramBot:
             reply = (f"🟢 在线客户端：{len(rows)} 个\n👥 筛选分组：{argument or '全部'}\n\n"
                      + ("\n\n".join(blocks) if blocks else "📭 没有匹配的在线客户端")
                      + "\n\nℹ️ 流量为客户端累计用量。" + self.report_footer(servers_up))
-        elif command == "/traffic":
-            totals = {}
-            for item in series.values():
-                if argument and item["group"] != argument:
-                    continue
-                total = totals.setdefault(item["group"], [0, 0])
-                total[0] += item["up"]; total[1] += item["down"]
-            rows = [f"👥 分组：{group}\n" + self.traffic_details(values[0], values[1])
-                    for group, values in sorted(totals.items(), key=lambda row: (-sum(row[1]), row[0]))]
-            reply = ("📈 分组累计流量\n\n" + ("\n\n".join(rows) if rows else "📭 没有匹配的分组流量")
-                     + "\n\nℹ️ 同名分组跨面板汇总，按累计总量排序。" + self.report_footer(servers_up))
+        elif command in ("/traffic", "/traffic_panels"):
+            self.send_traffic_query(chat_id, argument, by_panel=command == "/traffic_panels")
+            return
         elif command in ("/watch", "/unwatch") and not argument:
             if command == "/watch":
                 choices = groups
@@ -904,6 +957,17 @@ class TelegramBot:
         if data in menu_commands:
             telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
             self.handle_message({"chat": {"id": chat_id}, "from": {"id": user_id}, "text": menu_commands[data]})
+            return
+        match = re.fullmatch(r"trafficview:(groups|panels):(all|[0-9a-f]{16})", data)
+        if match:
+            view, token = match.groups()
+            argument = "" if token == "all" else self.pending_traffic_views.get((chat_id, token))
+            if argument is None:
+                telegram_request(self.config["token"], "answerCallbackQuery", {
+                    "callback_query_id": callback_id, "text": "选项已过期，请重新查询累计流量。"})
+                return
+            telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
+            self.send_traffic_query(chat_id, argument, by_panel=view == "panels")
             return
         match = re.fullmatch(r"onlinenotify:(toggle|groups|add|remove|test)(?::(\d+))?", data)
         if match:
@@ -965,9 +1029,18 @@ class TelegramBot:
             title = "👥 请选择要订阅上线通知的分组：" if action == "add" else "👥 请选择要取消订阅的分组："
             self.send(chat_id, title, {"inline_keyboard": buttons})
             return
-        match = re.fullmatch(r"trafficnotify:(toggle|time|groups|test|add|remove)(?::(\d+))?", data)
+        match = re.fullmatch(r"trafficnotify:(toggle|panels|time|groups|test|add|remove)(?::(\d+))?", data)
         if match:
             action, index_text = match.groups()
+            if action == "panels":
+                if index_text not in ("0", "1"):
+                    telegram_request(self.config["token"], "answerCallbackQuery", {
+                        "callback_query_id": callback_id, "text": "无效的面板明细开关选项。"})
+                    return
+                self.set_traffic_notify_panels(chat_id, index_text == "1")
+                telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
+                self.send_traffic_notify_settings(chat_id, "✅ 面板明细设置已更新\n\n")
+                return
             if action == "groups":
                 telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
                 self.send_traffic_notify_groups(chat_id)
