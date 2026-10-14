@@ -201,6 +201,7 @@ class TelegramBot:
         self.db.execute("CREATE TABLE IF NOT EXISTS subscriptions (chat_id INTEGER, group_name TEXT, PRIMARY KEY(chat_id,group_name))")
         self.db.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)")
         self.offset = 0
+        self.pending_groups = {}
 
     def snapshot(self):
         series = {}
@@ -227,8 +228,20 @@ class TelegramBot:
             item["down"] = item["down"] if item["server"] in servers_up else 0
         return series, servers_up
 
-    def send(self, chat_id, text):
-        telegram_request(self.config["token"], "sendMessage", {"chat_id": chat_id, "text": text})
+    @staticmethod
+    def main_keyboard():
+        return {"keyboard": [
+            [{"text": "📡 状态"}, {"text": "👥 分组"}],
+            [{"text": "🟢 在线客户端"}, {"text": "📈 累计流量"}],
+            [{"text": "🔔 添加订阅"}, {"text": "🔕 取消订阅"}],
+            [{"text": "📋 我的订阅"}, {"text": "❔ 帮助"}],
+        ], "resize_keyboard": True, "is_persistent": True}
+
+    def send(self, chat_id, text, reply_markup=None):
+        payload = {"chat_id": chat_id, "text": text}
+        if reply_markup is not None:
+            payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False, separators=(",", ":"))
+        telegram_request(self.config["token"], "sendMessage", payload)
 
     def register_commands(self):
         telegram_request(self.config["token"], "setMyCommands", {
@@ -275,10 +288,17 @@ class TelegramBot:
         command, _, argument = text.partition(" ")
         command = command.split("@", 1)[0].lower()
         argument = argument.strip()
+        command = {
+            "📡 状态": "/status", "👥 分组": "/groups", "🟢 在线客户端": "/online",
+            "📈 累计流量": "/traffic", "🔔 添加订阅": "/watch",
+            "🔕 取消订阅": "/unwatch", "📋 我的订阅": "/watches", "❔ 帮助": "/help",
+        }.get(command, command)
         if command == "/id":
             self.send(chat_id, f"您的 Telegram ID：{user_id}\n当前 Chat ID：{chat_id}")
             return
         if user_id not in allowed_users and chat_id not in allowed_chats:
+            if command in ("/start", "/help"):
+                self.send(chat_id, "此机器人仅供授权用户使用。请先发送 /id 获取您的 Telegram 用户 ID。")
             return
         series, _ = self.snapshot()
         groups = sorted({item["group"] for item in series.values()})
@@ -292,6 +312,8 @@ class TelegramBot:
                      "/unwatch 分组 - 取消订阅\n"
                      "/watches - 查看已订阅分组\n"
                      "/id - 显示您的 Telegram ID")
+            self.send(chat_id, reply, self.main_keyboard())
+            return
         elif command == "/status":
             series, servers_up = self.snapshot()
             panel_names = [worker.panel["name"] for worker in self.workers]
@@ -314,6 +336,24 @@ class TelegramBot:
                 total[0] += item["up"]; total[1] += item["down"]
             rows = [f"{group} | 上行 {format_bytes(values[0])} | 下行 {format_bytes(values[1])} | 总计 {format_bytes(sum(values))}" for group, values in sorted(totals.items())]
             reply = "累计流量：\n" + ("\n".join(rows) if rows else "没有匹配的分组流量")
+        elif command in ("/watch", "/unwatch") and not argument:
+            if command == "/watch":
+                choices = groups
+                title = "请选择要订阅上线通知的分组："
+            else:
+                choices = [row[0] for row in self.db.execute(
+                    "SELECT group_name FROM subscriptions WHERE chat_id=? ORDER BY group_name", (chat_id,))]
+                title = "请选择要取消订阅的分组："
+            self.pending_groups[chat_id] = (command, choices)
+            buttons = [[{"text": group, "callback_data": f"{command[1:]}:{index}"}]
+                       for index, group in enumerate(choices[:50])]
+            if len(choices) > 50:
+                title += "\n仅显示前 50 个；也可直接输入分组名称。"
+            if not choices:
+                reply = "目前沒有可選分組。" if command == "/watch" else "目前沒有已訂閱分組。"
+            else:
+                self.send(chat_id, title, {"inline_keyboard": buttons})
+                return
         elif command in ("/watch", "/unwatch") and argument:
             if argument not in groups:
                 reply = f"没有找到分组：{argument}。使用 /groups 查看分组。"
@@ -328,7 +368,38 @@ class TelegramBot:
             reply = "已订阅分组：\n" + ("\n".join(rows) if rows else "暂无订阅")
         else:
             reply = "无法识别命令。发送 /help 查看命令。"
-        self.send(chat_id, reply[:4000])
+        self.send(chat_id, reply[:4000], self.main_keyboard())
+
+    def handle_callback(self, callback):
+        callback_id = callback.get("id", "")
+        message = callback.get("message", {})
+        chat_id = message.get("chat", {}).get("id")
+        user_id = callback.get("from", {}).get("id")
+        allowed_users = set(self.config.get("allowed_user_ids", []))
+        allowed_chats = set(self.config.get("allowed_chat_ids", []))
+        if user_id not in allowed_users and chat_id not in allowed_chats:
+            telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id, "text": "未授权"})
+            return
+        match = re.fullmatch(r"(watch|unwatch):(\d+)", callback.get("data", ""))
+        pending = self.pending_groups.get(chat_id)
+        if not match or not pending or pending[0] != "/" + match[1]:
+            telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id, "text": "选项已过期，请重新打开菜单。"})
+            return
+        index = int(match[2])
+        if index >= len(pending[1]):
+            telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id, "text": "选项已过期，请重新打开菜单。"})
+            return
+        group = pending[1][index]
+        with self.db:
+            if match[1] == "watch":
+                self.db.execute("INSERT OR IGNORE INTO subscriptions VALUES (?,?)", (chat_id, group))
+                reply = f"已订阅分组：{group}"
+            else:
+                self.db.execute("DELETE FROM subscriptions WHERE chat_id=? AND group_name=?", (chat_id, group))
+                reply = f"已取消订阅：{group}"
+        self.pending_groups.pop(chat_id, None)
+        telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
+        self.send(chat_id, reply, self.main_keyboard())
 
     def run(self):
         try:
@@ -350,6 +421,11 @@ class TelegramBot:
                             self.handle_message(update["message"])
                         except ERRORS as error:
                             print(f"Telegram 命令处理失败 ({error_kind(error)})", file=sys.stderr, flush=True)
+                    elif "callback_query" in update:
+                        try:
+                            self.handle_callback(update["callback_query"])
+                        except ERRORS as error:
+                            print(f"Telegram 按钮处理失败 ({error_kind(error)})", file=sys.stderr, flush=True)
             except ERRORS as error:
                 print(f"Telegram 连接失败 ({error_kind(error)})", file=sys.stderr, flush=True)
                 time.sleep(5)

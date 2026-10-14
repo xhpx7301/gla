@@ -301,6 +301,32 @@ class ExporterTest(unittest.TestCase):
             finally:
                 bot.db.close()
 
+    def test_telegram_start_shows_main_keyboard_and_watch_commands_offer_group_buttons(self):
+        worker = EXPORTER.PanelWorker({"name": "node-a", "url": "https://panel.example.com/panel/api/inbounds/list"})
+        worker.metrics = [
+            EXPORTER.metric("xui_exporter_up", 1, server="node-a"),
+            EXPORTER.metric("xui_client_online", 0, server="node-a", email="alice", group="Aurora 极光云瓶"),
+        ]
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, [worker], directory)
+            try:
+                bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/start"})
+                keyboard = json.loads(request.call_args.args[2]["reply_markup"])
+                self.assertTrue(keyboard["is_persistent"])
+                self.assertEqual(keyboard["keyboard"][0][0]["text"], "📡 状态")
+                bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/watch"})
+                picker = json.loads(request.call_args.args[2]["reply_markup"])
+                self.assertEqual(picker["inline_keyboard"][0][0]["callback_data"], "watch:0")
+                bot.handle_callback({"id": "query-1", "from": {"id": 42},
+                                     "message": {"chat": {"id": 420}}, "data": "watch:0"})
+                self.assertIn((420, "Aurora 极光云瓶"), bot.db.execute(
+                    "SELECT chat_id,group_name FROM subscriptions").fetchall())
+                bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/unwatch"})
+                picker = json.loads(request.call_args.args[2]["reply_markup"])
+                self.assertEqual(picker["inline_keyboard"][0][0]["callback_data"], "unwatch:0")
+            finally:
+                bot.db.close()
+
 
 if __name__ == "__main__":
     unittest.main()
