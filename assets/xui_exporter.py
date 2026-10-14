@@ -37,10 +37,10 @@ PANELS_FILE = os.environ.get("XUI_PANELS_FILE", "")
 STATE_DIR = os.environ.get("XUI_STATE_DIR", "/var/lib/xui")
 LOKI_URL = os.environ.get("XUI_LOKI_URL", "http://alloy:3500/loki/api/v1/push")
 TELEGRAM_CONFIG_FILE = os.environ.get("XUI_TELEGRAM_CONFIG_FILE", "/run/secrets/telegram-config.json")
-DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 1800
-PREVIOUS_DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 600
+DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 3600
+PREVIOUS_DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = (600, 1800)
 MAX_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 86400
-TELEGRAM_ONLINE_CONFIRMATION_SAMPLES = 4
+TELEGRAM_ONLINE_CONFIRMATION_SAMPLES = 10
 TIMEOUT = float(os.environ.get("XUI_API_TIMEOUT", "10"))
 SERVER_NAME = os.environ.get("SERVER_NAME", "").strip() or "unknown"
 GEOIP_CITY_DB = os.environ.get("GEOIP_CITY_DB", "/var/lib/gla/geoip/GeoLite2-City.mmdb")
@@ -153,7 +153,7 @@ def validate_notification_cooldown(value):
 
 
 def configured_notification_cooldown(value):
-    if value == PREVIOUS_DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS:
+    if value in PREVIOUS_DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS:
         return DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS
     return validate_notification_cooldown(value)
 
@@ -312,7 +312,7 @@ class TelegramBot:
             [{"text": "📖 命令说明", "callback_data": "menu:commands"}],
         ]}
 
-    def send(self, chat_id, text, reply_markup=None):
+    def send(self, chat_id, text, reply_markup=None, entities=None):
         # Reports can grow beyond Telegram's message limit. Split at line
         # boundaries and count UTF-16 units so emoji also fit safely.
         chunks, current, units = [], "", 0
@@ -332,11 +332,22 @@ class TelegramBot:
                 units += size
         if current:
             chunks.append(current)
+        chunk_offset = 0
         for index, chunk in enumerate(chunks):
             payload = {"chat_id": chat_id, "text": chunk}
+            chunk_units = len(chunk.encode("utf-16-le")) // 2
+            chunk_entities = []
+            for entity in entities or []:
+                start = max(entity["offset"], chunk_offset)
+                end = min(entity["offset"] + entity["length"], chunk_offset + chunk_units)
+                if start < end:
+                    chunk_entities.append({**entity, "offset": start - chunk_offset, "length": end - start})
+            if chunk_entities:
+                payload["entities"] = json.dumps(chunk_entities, ensure_ascii=False, separators=(",", ":"))
             if reply_markup is not None and index == len(chunks) - 1:
                 payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False, separators=(",", ":"))
             telegram_request(self.config["token"], "sendMessage", payload)
+            chunk_offset += chunk_units
 
     @staticmethod
     def report_time():
@@ -608,20 +619,39 @@ class TelegramBot:
         ip_record = worker.last_ip_for_client(item["email"]) if worker else None
         if ip_record:
             location, network = ip_attribution(ip_record["ip"])
+            network_label = "运营商" if network in {"中国电信", "中国联通", "中国移动"} else "网络组织"
             ip_text = (f"🌐 最近记录 IP：{ip_record['ip']}\n"
-                       f"📍 归属地：{location}\n🏢 网络组织：{network}")
+                       f"📍 归属地：{location}\n🏢 {network_label}：{network}")
             if ip_record.get("time"):
                 ip_text += f"\n🕒 IP 记录时间：{ip_record['time']}"
         else:
             ip_text = "🌐 最近记录 IP：暂无记录"
         inbounds = self.inbound_names_for_item(item)
-        inbound_lines = "\n".join(f"  • {inbound}" for inbound in inbounds) or "  未找到配置关联"
+        if len(inbounds) > 1:
+            inbound_text = "\n" + "\n".join(f"  • {inbound}" for inbound in inbounds)
+        else:
+            inbound_text = inbounds[0] if inbounds else "未找到配置关联"
         title = "🧪 上线通知测试" if test else "🟢 客户端上线"
         status = "在线" if item.get("online") else "离线"
         suffix = f"\n\nℹ️ 测试样例，客户端当前状态：{status}。不会记录在线状态或通知冷却。" if test else ""
         return (f"{title}\n\n👤 客户端：{item['email']}\n👥 分组：{item['group']}\n"
-                f"🔗 关联入站：\n{inbound_lines}\n🖥 面板：{item['server']}\n{ip_text}\n\n"
+                f"🔗 关联入站：{inbound_text}\n🖥 面板：{item['server']}\n{ip_text}\n\n"
                 f"🕒 检测时间：{self.report_time()}{suffix}")
+
+    def send_online_notification(self, chat_id, notification):
+        match = re.search(r"^🌐 最近记录 IP：([^\n]+)$", notification, re.MULTILINE)
+        try:
+            address = str(ipaddress.ip_address(match[1])) if match else None
+        except ValueError:
+            address = None
+        if address is None:
+            self.send(chat_id, notification)
+            return
+        # Telegram entity offsets count UTF-16 units, including emoji before the IP.
+        entities = [{"type": "code", "offset": len(notification[:match.start(1)].encode("utf-16-le")) // 2,
+                     "length": len(match[1].encode("utf-16-le")) // 2}]
+        keyboard = {"inline_keyboard": [[{"text": f"📋 {address}", "copy_text": {"text": address}}]]}
+        self.send(chat_id, notification, reply_markup=keyboard, entities=entities)
 
     def send_online_notify_test(self, chat_id):
         series, servers_up = self.snapshot()
@@ -637,7 +667,7 @@ class TelegramBot:
         if not rows:
             self.send(chat_id, "🧪 上线通知测试\n\n已订阅分组中没有客户端数据，无法生成测试样例。")
             return
-        self.send(chat_id, self.online_notification_text(rows[0], test=True))
+        self.send_online_notification(chat_id, self.online_notification_text(rows[0], test=True))
 
     def process_traffic_notifications(self, now=None):
         now = time.time() if now is None else now
@@ -743,7 +773,7 @@ class TelegramBot:
             notification = self.online_notification_text(item)
             for chat_id in eligible_chats:
                 try:
-                    self.send(chat_id, notification)
+                    self.send_online_notification(chat_id, notification)
                 except ERRORS as error:
                     print(f"Telegram 通知发送失败 ({error_kind(error)})", file=sys.stderr, flush=True)
                 else:
@@ -1227,12 +1257,17 @@ def format_ip_record_time(value):
         return ""
     raw = str(value).strip()
     try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
+        if re.fullmatch(r"\d{10}(?:\d{3})?(?:\.\d+)?", raw):
+            seconds = float(raw)
+            parsed = datetime.fromtimestamp(seconds / 1000 if seconds >= 1e12 else seconds, timezone.utc)
+        else:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (ValueError, OverflowError, OSError):
         return raw
-    # 3X-UI timestamps without an offset are treated as UTC, as on a default Linux host.
+    # The panel's unzoned IP-log text is already Beijing local time. Treating
+    # it as UTC adds eight hours again and can put a record after detection.
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=timezone(timedelta(hours=8)))
     beijing = parsed.astimezone(timezone(timedelta(hours=8)))
     return beijing.strftime("%Y-%m-%d %H:%M:%S") + "（UTC+8）"
 
@@ -1252,6 +1287,24 @@ COUNTRY_NAMES_ZH = {
     "CN": "中国", "HK": "香港", "MO": "澳门", "TW": "台湾", "US": "美国",
     "JP": "日本", "SG": "新加坡", "GB": "英国", "DE": "德国", "KR": "韩国",
     "CA": "加拿大", "AU": "澳大利亚", "FR": "法国", "NL": "荷兰", "RU": "俄罗斯",
+}
+CHINA_SUBDIVISION_NAMES_ZH = {
+    "AH": "安徽", "BJ": "北京", "CQ": "重庆", "FJ": "福建", "GS": "甘肃",
+    "GD": "广东", "GX": "广西", "GZ": "贵州", "HI": "海南", "HE": "河北",
+    "HL": "黑龙江", "HA": "河南", "HB": "湖北", "HN": "湖南", "NM": "内蒙古",
+    "JS": "江苏", "JX": "江西", "JL": "吉林", "LN": "辽宁", "NX": "宁夏",
+    "QH": "青海", "SN": "陕西", "SD": "山东", "SH": "上海", "SX": "山西",
+    "SC": "四川", "TJ": "天津", "XJ": "新疆", "XZ": "西藏", "YN": "云南",
+    "ZJ": "浙江",
+    "Anhui": "安徽", "Beijing": "北京", "Chongqing": "重庆", "Fujian": "福建",
+    "Gansu": "甘肃", "Guangdong": "广东", "Guangxi": "广西", "Guizhou": "贵州",
+    "Hainan": "海南", "Hebei": "河北", "Heilongjiang": "黑龙江", "Henan": "河南",
+    "Hong Kong": "香港", "Hubei": "湖北", "Hunan": "湖南", "Inner Mongolia": "内蒙古",
+    "Jiangsu": "江苏", "Jiangxi": "江西", "Jilin": "吉林", "Liaoning": "辽宁",
+    "Macau": "澳门", "Ningxia": "宁夏", "Qinghai": "青海", "Shaanxi": "陕西",
+    "Shandong": "山东", "Shanghai": "上海", "Shanxi": "山西", "Sichuan": "四川",
+    "Taiwan": "台湾", "Tianjin": "天津", "Tibet": "西藏", "Xinjiang": "新疆",
+    "Yunnan": "云南", "Zhejiang": "浙江",
 }
 
 
@@ -1276,12 +1329,23 @@ def ip_attribution(address):
     if iso_code == "CN":
         city = (city_data.get("city", {}).get("names", {}).get("zh-CN")
                 or city_data.get("city", {}).get("names", {}).get("en"))
-        location = f"中国{city}" if city else "中国大陆"
+        subdivisions = city_data.get("subdivisions", [])
+        subdivision = subdivisions[0] if subdivisions and isinstance(subdivisions[0], dict) else {}
+        province = (subdivision.get("names", {}).get("zh-CN")
+                    or subdivision.get("names", {}).get("en")
+                    or subdivision.get("iso_code", ""))
+        province = CHINA_SUBDIVISION_NAMES_ZH.get(province, province)
+        province = province.removesuffix("省")
+        if province:
+            location = f"{province}{city}" if city else f"中国{province}"
+        else:
+            location = "中国大陆"
     elif iso_code and COUNTRY_NAMES_ZH.get(iso_code):
         city = (city_data.get("city", {}).get("names", {}).get("zh-CN")
                 or city_data.get("city", {}).get("names", {}).get("en"))
         country_name = COUNTRY_NAMES_ZH[iso_code]
-        location = f"{country_name}·{city}" if city else country_name
+        location = (country_name if iso_code in {"HK", "MO", "TW"}
+                    else f"{country_name}·{city}" if city else country_name)
     elif country_name:
         city = (city_data.get("city", {}).get("names", {}).get("zh-CN")
                 or city_data.get("city", {}).get("names", {}).get("en"))

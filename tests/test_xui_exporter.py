@@ -64,9 +64,9 @@ class ExporterTest(unittest.TestCase):
                 mock.patch.object(EXPORTER.TelegramBot, "report_time", return_value="test-time"), \
                 mock.patch.object(panel, "last_ip_for_client", return_value={
                     "ip": "203.0.113.1", "time": "2026-10-14 16:30:00（UTC+8）"}), \
-                mock.patch.object(EXPORTER, "ip_attribution", return_value=("中国深圳", "中国电信")):
+                mock.patch.object(EXPORTER, "ip_attribution", return_value=("广东深圳", "中国电信")):
             bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42],
-                                        "notification_cooldown_seconds": 1800}, [panel], directory)
+                                        "notification_cooldown_seconds": 3600}, [panel], directory)
             try:
                 with bot.db:
                     bot.db.execute("INSERT INTO subscriptions VALUES (?,?)", (420, "shared"))
@@ -81,23 +81,33 @@ class ExporterTest(unittest.TestCase):
                     panel.metrics = EXPORTER.render_metrics("node-a", [inbound], ["alice"], clients)
                 bot.process_online()
                 send.assert_not_called()
-                for timestamp in (1120, 1150, 1180):
+                for timestamp in range(1120, 1331, 30):
                     with mock.patch.object(EXPORTER.time, "time", return_value=timestamp):
                         panel.metrics = EXPORTER.render_metrics("node-a", [inbound], ["alice"], clients)
                     bot.process_online()
+                    if timestamp < 1330:
+                        send.assert_not_called()
                 message = send.call_args.args[2]["text"]
-                self.assertIn("👤 客户端：alice\n👥 分组：shared\n🔗 关联入站：\n  • VLESS-443\n🖥 面板：node-a", message)
+                self.assertIn("👤 客户端：alice\n👥 分组：shared\n🔗 关联入站：VLESS-443\n🖥 面板：node-a", message)
                 self.assertNotIn("端口 443", message)
                 self.assertNotIn("/ vless", message)
                 self.assertIn("🌐 最近记录 IP：203.0.113.1", message)
-                self.assertIn("📍 归属地：中国深圳\n🏢 网络组织：中国电信", message)
+                self.assertIn("📍 归属地：广东深圳\n🏢 运营商：中国电信", message)
                 self.assertIn("🕒 IP 记录时间：2026-10-14 16:30:00（UTC+8）", message)
+                payload = send.call_args.args[2]
+                self.assertEqual(json.loads(payload["reply_markup"])["inline_keyboard"][0][0]["copy_text"],
+                                 {"text": "203.0.113.1"})
+                entity, = json.loads(payload["entities"])
+                encoded = message.encode("utf-16-le")
+                self.assertEqual(encoded[entity["offset"] * 2:(entity["offset"] + entity["length"]) * 2]
+                                 .decode("utf-16-le"), "203.0.113.1")
+                self.assertEqual(entity["type"], "code")
             finally:
                 bot.db.close()
 
     def test_ip_log_formats_from_supported_panel_versions_are_normalized(self):
         self.assertEqual(EXPORTER.latest_ip_record(["203.0.113.1 (2026-10-14 08:30:00)"]),
-                         {"ip": "203.0.113.1", "time": "2026-10-14 16:30:00（UTC+8）"})
+                         {"ip": "203.0.113.1", "time": "2026-10-14 08:30:00（UTC+8）"})
         self.assertEqual(EXPORTER.latest_ip_record([
             {"ip": "2001:4860:4860::8888", "time": "2026-10-14T08:30:00Z", "node": "node-a"}]),
             {"ip": "2001:4860:4860::8888", "time": "2026-10-14 16:30:00（UTC+8）"})
@@ -106,16 +116,99 @@ class ExporterTest(unittest.TestCase):
             {"ip": "203.0.113.2", "time": "2026-10-14 20:30:00（UTC+8）"})
         self.assertIsNone(EXPORTER.latest_ip_record(["no valid IP"] ))
 
+    def test_ip_record_time_does_not_add_eight_hours_to_beijing_panel_time(self):
+        expected = "2026-10-14 23:54:46（UTC+8）"
+        seconds = int(EXPORTER.datetime(2026, 10, 14, 15, 54, 46,
+                                       tzinfo=EXPORTER.timezone.utc).timestamp())
+        for value in ("2026-10-14 23:54:46", "2026-10-14T23:54:46+08:00",
+                      "2026-10-14T15:54:46Z", "2026-10-14T11:54:46-04:00",
+                      seconds, seconds * 1000):
+            with self.subTest(value=value):
+                self.assertEqual(EXPORTER.format_ip_record_time(value), expected)
+        self.assertEqual(EXPORTER.format_ip_record_time(""), "")
+        self.assertEqual(EXPORTER.format_ip_record_time("unrecognized"), "unrecognized")
+
+    def test_notification_layout_and_copy_for_ipv6_and_missing_ip(self):
+        worker = EXPORTER.PanelWorker({"name": "node-a"})
+        item = {"server": "node-a", "email": "客户😀<&>", "group": "Aurora", "online": 1}
+        address = "2001:4860:4860::8888"
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request, \
+                mock.patch.object(worker, "last_ip_for_client", return_value={"ip": address, "time": ""}) as ip_log, \
+                mock.patch.object(EXPORTER, "ip_attribution", return_value=("中国深圳", "中国移动")) as attribution:
+            bot = EXPORTER.TelegramBot({"token": "bot-token"}, [worker], directory)
+            try:
+                for network in ("中国电信", "中国联通", "中国移动", "Example Networks"):
+                    attribution.return_value = ("中国深圳", network)
+                    text = bot.online_notification_text(item)
+                    label = "网络组织" if network == "Example Networks" else "运营商"
+                    self.assertIn(f"🏢 {label}：{network}", text)
+                worker.client_inbounds = {item["email"]: ["main", "fallback"]}
+                text = bot.online_notification_text(item, test=True)
+                self.assertIn("🔗 关联入站：\n  • main\n  • fallback\n🖥 面板：", text)
+                bot.send_online_notification(420, text)
+                payload = request.call_args.args[2]
+                entity, = json.loads(payload["entities"])
+                encoded = text.encode("utf-16-le")
+                self.assertEqual(encoded[entity["offset"] * 2:(entity["offset"] + entity["length"]) * 2]
+                                 .decode("utf-16-le"), address)
+                button = json.loads(payload["reply_markup"])["inline_keyboard"][0][0]
+                self.assertEqual(button["copy_text"], {"text": address})
+                self.assertNotIn("parse_mode", payload)
+                self.assertIn(item["email"], payload["text"])
+                ip_log.return_value = None
+                worker.client_inbounds = {}
+                text = bot.online_notification_text(item)
+                self.assertIn("🔗 关联入站：未找到配置关联\n", text)
+                bot.send_online_notification(420, text)
+                payload = request.call_args.args[2]
+                self.assertNotIn("entities", payload)
+                self.assertNotIn("reply_markup", payload)
+            finally:
+                bot.db.close()
+
+    def test_notification_ip_entity_survives_message_splitting(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
+            bot = EXPORTER.TelegramBot({"token": "bot-token"}, [], directory)
+            try:
+                # A long inbound list puts the IP in a later chunk after emoji.
+                text = "🟢 客户端上线\n" + "  • 入站😀\n" * 500 + "🌐 最近记录 IP：203.0.113.1\n🕒 检测时间：test"
+                bot.send_online_notification(420, text)
+                payloads = [call.args[2] for call in request.call_args_list]
+                self.assertGreater(len(payloads), 1)
+                self.assertEqual("".join(payload["text"] for payload in payloads), text)
+                tagged = [payload for payload in payloads if "entities" in payload]
+                self.assertEqual(len(tagged), 1)
+                entity, = json.loads(tagged[0]["entities"])
+                encoded = tagged[0]["text"].encode("utf-16-le")
+                self.assertEqual(encoded[entity["offset"] * 2:(entity["offset"] + entity["length"]) * 2]
+                                 .decode("utf-16-le"), "203.0.113.1")
+                self.assertEqual(json.loads(payloads[-1]["reply_markup"])["inline_keyboard"][0][0]["copy_text"],
+                                 {"text": "203.0.113.1"})
+            finally:
+                bot.db.close()
+
     def test_ip_attribution_uses_local_city_and_asn_records(self):
         def lookup(path, address):
             if path == EXPORTER.GEOIP_CITY_DB:
-                return {"country": {"iso_code": "CN"}, "city": {"names": {"zh-CN": "深圳"}}}
+                return {"country": {"iso_code": "CN"}, "city": {"names": {"zh-CN": "深圳"}},
+                        "subdivisions": [{"names": {"zh-CN": "广东"}}]}
             return {"autonomous_system_number": 4134, "autonomous_system_organization": "CHINANET"}
         with mock.patch.object(EXPORTER, "mmdb_record", side_effect=lookup):
-            self.assertEqual(EXPORTER.ip_attribution("203.0.113.1"), ("中国深圳", "中国电信"))
+            self.assertEqual(EXPORTER.ip_attribution("203.0.113.1"), ("广东深圳", "中国电信"))
         with mock.patch.object(EXPORTER, "mmdb_record", side_effect=[
                 {}, {"autonomous_system_number": 4837, "autonomous_system_organization": "CHINA169"}]):
             self.assertEqual(EXPORTER.ip_attribution("203.0.113.1"), ("中国大陆", "中国联通"))
+        for city_data, expected in (
+                ({"country": {"iso_code": "CN"}, "city": {"names": {"zh-CN": "汕尾"}},
+                  "subdivisions": [{"names": {"zh-CN": "广东省"}}]}, "广东汕尾"),
+                ({"country": {"iso_code": "CN"}, "subdivisions": [{"names": {"zh-CN": "广东"}}]}, "中国广东"),
+                ({"country": {"iso_code": "CN"}, "city": {"names": {"zh-CN": "汕尾"}}}, "中国大陆"),
+                ({"country": {"iso_code": "HK"}, "city": {"names": {"zh-CN": "香港"}}}, "香港"),
+                ({"country": {"iso_code": "MO"}, "city": {"names": {"zh-CN": "澳门"}}}, "澳门"),
+                ({"country": {"iso_code": "TW"}, "city": {"names": {"zh-CN": "台北"}}}, "台湾")):
+            with self.subTest(expected=expected), mock.patch.object(EXPORTER, "mmdb_record", side_effect=[
+                    city_data, {"autonomous_system_organization": "Example Networks"}]):
+                self.assertEqual(EXPORTER.ip_attribution("203.0.113.1")[0], expected)
         with mock.patch.object(EXPORTER, "mmdb_record", side_effect=[
                 {"country": {"iso_code": "US", "names": {"en": "United States"}},
                  "city": {"names": {"en": "Los Angeles"}}},
@@ -371,14 +464,12 @@ class ExporterTest(unittest.TestCase):
                 worker.metrics[-1] = EXPORTER.metric("xui_metrics_last_success_timestamp_seconds", 1060, server="node-a")
                 bot.process_online()
                 self.assertEqual(request.call_count, 3)
-                worker.metrics[-1] = EXPORTER.metric("xui_metrics_last_success_timestamp_seconds", 1090, server="node-a")
-                bot.process_online()
-                self.assertEqual(request.call_count, 3)
-                worker.metrics[-1] = EXPORTER.metric("xui_metrics_last_success_timestamp_seconds", 1120, server="node-a")
-                bot.process_online()
-                self.assertEqual(request.call_count, 3)
-                worker.metrics[-1] = EXPORTER.metric("xui_metrics_last_success_timestamp_seconds", 1150, server="node-a")
-                bot.process_online()
+                for timestamp in range(1090, 1331, 30):
+                    worker.metrics[-1] = EXPORTER.metric("xui_metrics_last_success_timestamp_seconds", timestamp,
+                                                         server="node-a")
+                    bot.process_online()
+                    if timestamp < 1330:
+                        self.assertEqual(request.call_count, 3)
                 self.assertEqual(request.call_args.args[1], "sendMessage")
                 self.assertEqual(request.call_args.args[2]["chat_id"], 420)
                 self.assertIn("客户端上线", request.call_args.args[2]["text"])
@@ -401,12 +492,17 @@ class ExporterTest(unittest.TestCase):
             with mock.patch.object(EXPORTER, "read_token", return_value="123:secret"):
                 loaded = EXPORTER.telegram_config(config_path)
                 self.assertEqual(loaded["allowed_user_ids"], [42])
-                self.assertEqual(loaded["notification_cooldown_seconds"], 1800)
+                self.assertEqual(loaded["notification_cooldown_seconds"], 3600)
             config_path.write_text(json.dumps({"token_file": "/run/secrets/telegram-bot.token",
                                                "allowed_user_ids": [42],
                                                "notification_cooldown_seconds": 600}), encoding="utf-8")
             with mock.patch.object(EXPORTER, "read_token", return_value="123:secret"):
-                self.assertEqual(EXPORTER.telegram_config(config_path)["notification_cooldown_seconds"], 1800)
+                self.assertEqual(EXPORTER.telegram_config(config_path)["notification_cooldown_seconds"], 3600)
+            config_path.write_text(json.dumps({"token_file": "/run/secrets/telegram-bot.token",
+                                               "allowed_user_ids": [42],
+                                               "notification_cooldown_seconds": 1800}), encoding="utf-8")
+            with mock.patch.object(EXPORTER, "read_token", return_value="123:secret"):
+                self.assertEqual(EXPORTER.telegram_config(config_path)["notification_cooldown_seconds"], 3600)
             config_path.write_text(json.dumps({"token_file": "/run/secrets/telegram-bot.token",
                                                "allowed_user_ids": [42],
                                                "notification_cooldown_seconds": 1200}), encoding="utf-8")
@@ -581,6 +677,8 @@ class ExporterTest(unittest.TestCase):
                 self.assertIn("客户端：alice", text)
                 self.assertIn("当前状态：离线", text)
                 self.assertIn("最近记录 IP：203.0.113.5", text)
+                self.assertEqual(json.loads(request.call_args.args[2]["reply_markup"])["inline_keyboard"][0][0]["copy_text"],
+                                 {"text": "203.0.113.5"})
                 self.assertEqual(bot.db.execute("SELECT COUNT(*) FROM notification_cooldowns").fetchone(), (0,))
                 self.assertEqual(bot.db.execute("SELECT COUNT(*) FROM online_confirmations").fetchone(), (0,))
             finally:
@@ -631,10 +729,8 @@ class ExporterTest(unittest.TestCase):
 
                 request.reset_mock()
                 sample(1000, False)
-                sample(1030, True)
-                sample(1060, True)
-                sample(1090, True)
-                sample(1120, True)
+                for timestamp in range(1030, 1301, 30):
+                    sample(timestamp, True)
                 self.assertEqual([call.args[2]["chat_id"] for call in request.call_args_list], [421])
                 self.assertIsNone(bot.db.execute(
                     "SELECT notified_at FROM notification_cooldowns WHERE chat_id=420").fetchone())
@@ -643,10 +739,8 @@ class ExporterTest(unittest.TestCase):
                 sample(1150, True)  # Enabling does not replay an already confirmed client.
                 request.assert_not_called()
                 sample(1180, False)
-                sample(1210, True)
-                sample(1240, True)
-                sample(1270, True)
-                sample(1300, True)
+                for timestamp in range(1210, 1481, 30):
+                    sample(timestamp, True)
                 self.assertEqual({call.args[2]["chat_id"] for call in request.call_args_list}, {420, 421})
             finally:
                 bot.db.close()
@@ -1052,18 +1146,18 @@ class ExporterTest(unittest.TestCase):
                 bot = EXPORTER.TelegramBot(config, [panel], directory)
                 sample(1090, emails)
                 request.assert_not_called()
-                sample(1120, [emails[0]])  # second consecutive online sample
-                request.assert_not_called()
-                sample(1150, [emails[0]])  # third consecutive online sample
-                request.assert_not_called()
-                sample(1180, [emails[0]])  # fourth consecutive online sample
+                for timestamp in range(1120, 1361, 30):
+                    sample(timestamp, [emails[0]])
+                    if timestamp < 1360:
+                        request.assert_not_called()
+                # The tenth distinct successful online sample confirms the client.
                 request.assert_called_once()
                 self.assertIn(f"客户端：{emails[0]}", request.call_args.args[2]["text"])
                 sample(1210, [emails[0]])  # prolonged online does not repeat notifications
                 request.assert_called_once()
                 self.assertEqual(bot.db.execute(
                     "SELECT consecutive_online FROM online_confirmations WHERE email=?",
-                    (emails[0],)).fetchone(), (4,))
+                    (emails[0],)).fetchone(), (10,))
             finally:
                 bot.db.close()
 
@@ -1090,13 +1184,10 @@ class ExporterTest(unittest.TestCase):
                     bot.process_online()
 
                 sample(1000, False, True)  # offline migration must reset node-a's old state
-                sample(1030, True, True)
-                request.assert_not_called()
-                sample(1060, True, True)
-                request.assert_not_called()
-                sample(1090, True, True)
-                request.assert_not_called()
-                sample(1120, True, True)
+                for timestamp in range(1030, 1301, 30):
+                    sample(timestamp, True, True)
+                    if timestamp < 1300:
+                        request.assert_not_called()
                 request.assert_called_once()
                 self.assertIn("面板：node-a", request.call_args.args[2]["text"])
             finally:
@@ -1108,7 +1199,7 @@ class ExporterTest(unittest.TestCase):
             {"email": "alice", "group": "shared", "traffic": {}},
             {"email": "bob", "group": "shared", "traffic": {}},
         ])
-        config = {"token": "bot-token", "allowed_user_ids": [42], "notification_cooldown_seconds": 1800}
+        config = {"token": "bot-token", "allowed_user_ids": [42], "notification_cooldown_seconds": 3600}
         with tempfile.TemporaryDirectory() as directory, \
                 mock.patch.object(EXPORTER, "telegram_request") as request, \
                 mock.patch.object(EXPORTER, "time") as clock, \
@@ -1133,25 +1224,18 @@ class ExporterTest(unittest.TestCase):
                              {"email": "bob", "group": "shared", "traffic": {}}])
                     bot.process_online()
 
-                set_online(True, False)
-                self.assertEqual(request.call_count, 0)
-                set_online(True, False)
-                self.assertEqual(request.call_count, 0)
-                set_online(True, False)
-                self.assertEqual(request.call_count, 0)
-                set_online(True, False)
+                for _ in range(10):
+                    set_online(True, False)
                 self.assertEqual(request.call_count, 2)
                 now[0] = 1200
                 set_online(False, False)
-                set_online(True, False)
-                set_online(True, False)
-                set_online(True, False)
-                set_online(True, False)  # Alice still cooling down
+                for _ in range(10):
+                    set_online(True, False)
+                # Alice is still cooling down.
                 self.assertEqual(request.call_count, 2)
-                set_online(True, True)
-                set_online(True, True)
-                set_online(True, True)
-                set_online(True, True)  # Bob has an independent cooldown
+                for _ in range(10):
+                    set_online(True, True)
+                # Bob has an independent cooldown.
                 self.assertEqual(request.call_count, 4)
 
                 # Recreate the bot against the same state database.
@@ -1159,24 +1243,22 @@ class ExporterTest(unittest.TestCase):
                 bot = EXPORTER.TelegramBot(config, [panel], directory)
                 now[0] = 1500
                 set_online(False, False)
-                set_online(True, True)
-                set_online(True, True)
-                set_online(True, True)
-                set_online(True, True)  # persisted cooldown suppresses both
+                for _ in range(10):
+                    set_online(True, True)
+                # Persisted cooldown suppresses both.
                 self.assertEqual(request.call_count, 4)
 
                 set_online(False, False)
-                now[0] = 3001
-                set_online(True, True)
-                set_online(True, True)
-                set_online(True, True)
-                set_online(True, True)  # cooldown expired; notify both chats
+                now[0] = 5000
+                for _ in range(10):
+                    set_online(True, True)
+                # Cooldown expired; notify both chats.
                 self.assertEqual(request.call_count, 8)
                 sent_chats = [call.args[2]["chat_id"] for call in request.call_args_list]
                 self.assertEqual(sent_chats, [420, 421, 420, 421, 420, 421, 420, 421])
                 rows = bot.db.execute("SELECT chat_id,server,email,notified_at FROM notification_cooldowns ORDER BY chat_id,email").fetchall()
                 self.assertEqual(len(rows), 4)
-                self.assertEqual({row[3] for row in rows}, {3001})
+                self.assertEqual({row[3] for row in rows}, {5000})
             finally:
                 bot.db.close()
 
