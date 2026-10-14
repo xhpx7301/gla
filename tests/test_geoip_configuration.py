@@ -47,7 +47,7 @@ class GeoIpConfigurationTest(unittest.TestCase):
         self.assertIn("XUI_ASN_VOLUME_LINE", script)
         self.assertIn("GEOIP_CITY_DB", exporter)
         self.assertIn("GEOIP_ASN_DB", exporter)
-        self.assertIn("maxminddb==2.7.1", dockerfile)
+        self.assertIn("maxminddb==2.7.0", dockerfile)
 
 
 if __name__ == "__main__":
