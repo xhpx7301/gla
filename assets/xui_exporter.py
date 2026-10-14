@@ -179,6 +179,19 @@ def format_bytes(value):
 
 
 class TelegramBot:
+    COMMANDS = [
+        {"command": "start", "description": "显示主菜单"},
+        {"command": "help", "description": "机器人帮助"},
+        {"command": "status", "description": "检查机器人状态"},
+        {"command": "id", "description": "显示您的 Telegram ID"},
+        {"command": "groups", "description": "查看客户端分组"},
+        {"command": "online", "description": "查看在线客户端"},
+        {"command": "traffic", "description": "查看分组累计流量"},
+        {"command": "watch", "description": "订阅分组上线通知"},
+        {"command": "unwatch", "description": "取消分组上线通知"},
+        {"command": "watches", "description": "查看已订阅分组"},
+    ]
+
     def __init__(self, config, workers, state_dir):
         self.config = config
         self.workers = workers
@@ -217,6 +230,11 @@ class TelegramBot:
     def send(self, chat_id, text):
         telegram_request(self.config["token"], "sendMessage", {"chat_id": chat_id, "text": text})
 
+    def register_commands(self):
+        telegram_request(self.config["token"], "setMyCommands", {
+            "commands": json.dumps(self.COMMANDS, ensure_ascii=False, separators=(",", ":"))
+        })
+
     def process_online(self):
         series, servers_up = self.snapshot()
         if not servers_up:
@@ -251,16 +269,37 @@ class TelegramBot:
         user_id = message.get("from", {}).get("id")
         allowed_users = set(self.config.get("allowed_user_ids", []))
         allowed_chats = set(self.config.get("allowed_chat_ids", []))
-        if not isinstance(chat_id, int) or (user_id not in allowed_users and chat_id not in allowed_chats):
+        if not isinstance(chat_id, int):
             return
         text = (message.get("text") or "").strip()
         command, _, argument = text.partition(" ")
         command = command.split("@", 1)[0].lower()
         argument = argument.strip()
+        if command == "/id":
+            self.send(chat_id, f"您的 Telegram ID：{user_id}\n当前 Chat ID：{chat_id}")
+            return
+        if user_id not in allowed_users and chat_id not in allowed_chats:
+            return
         series, _ = self.snapshot()
         groups = sorted({item["group"] for item in series.values()})
         if command in ("/start", "/help"):
-            reply = "命令：\n/groups 查看分组\n/online [分组] 查看在线客户端\n/traffic [分组] 查看累计流量\n/watch <分组> 订阅上线通知\n/unwatch <分组> 取消订阅\n/watches 查看订阅"
+            reply = ("3x-ui 分组监控机器人\n\n"
+                     "/status - 检查面板和在线状态\n"
+                     "/groups - 查看客户端分组\n"
+                     "/online [分组] - 查看在线客户端及流量\n"
+                     "/traffic [分组] - 查看累计流量\n"
+                     "/watch 分组 - 订阅上线通知\n"
+                     "/unwatch 分组 - 取消订阅\n"
+                     "/watches - 查看已订阅分组\n"
+                     "/id - 显示您的 Telegram ID")
+        elif command == "/status":
+            series, servers_up = self.snapshot()
+            panel_names = [worker.panel["name"] for worker in self.workers]
+            online_count = sum(1 for item in series.values() if item["online"] and item["server"] in servers_up)
+            panel_lines = [f"{name}：{'正常' if name in servers_up else '不可用'}" for name in panel_names]
+            reply = ("机器人运行正常\n"
+                     f"面板：{len(servers_up)}/{len(panel_names)} 正常\n"
+                     f"在线客户端：{online_count}\n\n" + ("\n".join(panel_lines) if panel_lines else "尚未配置面板"))
         elif command == "/groups":
             reply = "当前分组：\n" + ("\n".join(groups) if groups else "暂无数据")
         elif command == "/online":
@@ -292,6 +331,11 @@ class TelegramBot:
         self.send(chat_id, reply[:4000])
 
     def run(self):
+        try:
+            self.register_commands()
+            print("Telegram command menu registered", flush=True)
+        except ERRORS as error:
+            print(f"Telegram 命令菜单注册失败 ({error_kind(error)})", file=sys.stderr, flush=True)
         next_check = 0
         while True:
             if time.monotonic() >= next_check:

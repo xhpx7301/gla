@@ -278,6 +278,29 @@ class ExporterTest(unittest.TestCase):
             with mock.patch.object(EXPORTER, "read_token", return_value="123:secret"):
                 self.assertEqual(EXPORTER.telegram_config(config_path)["allowed_user_ids"], [42])
 
+    def test_telegram_registers_native_command_menu_and_exposes_id_safely(self):
+        worker = EXPORTER.PanelWorker({"name": "node-a", "url": "https://panel.example.com/panel/api/inbounds/list"})
+        worker.metrics = [EXPORTER.metric("xui_exporter_up", 1, server="node-a")]
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, [worker], directory)
+            try:
+                bot.register_commands()
+                self.assertEqual(request.call_args.args[1], "setMyCommands")
+                commands = json.loads(request.call_args.args[2]["commands"])
+                self.assertEqual(commands[0], {"command": "start", "description": "显示主菜单"})
+                self.assertIn({"command": "id", "description": "显示您的 Telegram ID"}, commands)
+                bot.handle_message({"chat": {"id": 999}, "from": {"id": 77}, "text": "/id"})
+                self.assertIn("77", request.call_args.args[2]["text"])
+                self.assertIn("999", request.call_args.args[2]["text"])
+                previous_calls = request.call_count
+                bot.handle_message({"chat": {"id": 999}, "from": {"id": 77}, "text": "/status"})
+                self.assertEqual(request.call_count, previous_calls)
+                bot.handle_message({"chat": {"id": 999}, "from": {"id": 42}, "text": "/status"})
+                self.assertIn("机器人运行正常", request.call_args.args[2]["text"])
+                self.assertIn("node-a：正常", request.call_args.args[2]["text"])
+            finally:
+                bot.db.close()
+
 
 if __name__ == "__main__":
     unittest.main()
