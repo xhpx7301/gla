@@ -249,7 +249,7 @@ class ExporterTest(unittest.TestCase):
                 bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/groups"})
                 self.assertIn("shared", request.call_args.args[2]["text"])
                 bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/traffic shared"})
-                self.assertIn("上行 1.00 KiB", request.call_args.args[2]["text"])
+                self.assertIn("⬆️ 上行：1.00 KiB", request.call_args.args[2]["text"])
                 bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/watch shared"})
                 bot.process_online()  # first successful observation establishes a quiet baseline
                 worker.metrics[1] = EXPORTER.metric("xui_client_online", 0, server="node-a", email="alice", group="shared")
@@ -301,6 +301,64 @@ class ExporterTest(unittest.TestCase):
             finally:
                 bot.db.close()
 
+    def test_telegram_old_button_labels_execute_the_corresponding_commands(self):
+        worker = EXPORTER.PanelWorker({"name": "node-a"})
+        worker.metrics = EXPORTER.render_metrics("node-a", [], ["alice"], [
+            {"email": "alice", "group": "Aurora 极光云瓶", "traffic": {"up": 1024, "down": 2048}}])
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request, \
+                mock.patch.object(EXPORTER.TelegramBot, "report_time", return_value="2026-10-14 18:00:00（UTC+8）"):
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, [worker], directory)
+            try:
+                for label, command in bot.BUTTON_COMMANDS.items():
+                    with self.subTest(label=label):
+                        message = {"chat": {"id": 420}, "from": {"id": 42}}
+                        bot.handle_message(dict(message, text=command))
+                        expected = request.call_args.args[2]
+                        request.reset_mock()
+                        bot.handle_message(dict(message, text=label))
+                        self.assertEqual(request.call_args.args[2], expected)
+                        self.assertEqual(json.loads(request.call_args_list[0].args[2]["reply_markup"]),
+                                         {"remove_keyboard": True})
+                        self.assertIn("inline_keyboard", json.loads(request.call_args_list[1].args[2]["reply_markup"]))
+                for row in bot.main_keyboard()["inline_keyboard"]:
+                    for button in row:
+                        with self.subTest(callback=button["callback_data"]):
+                            bot.handle_callback({"id": "menu-query", "from": {"id": 42},
+                                                 "message": {"chat": {"id": 420}}, "data": button["callback_data"]})
+                            actual = request.call_args.args[2]
+                            bot.handle_message({"chat": {"id": 420}, "from": {"id": 42},
+                                                "text": bot.BUTTON_COMMANDS[button["text"]]})
+                            self.assertEqual(actual, request.call_args.args[2])
+            finally:
+                bot.db.close()
+
+    def test_telegram_reports_flag_unavailable_panels_and_keep_long_results_complete(self):
+        workers = [EXPORTER.PanelWorker({"name": "node-a"}), EXPORTER.PanelWorker({"name": "node-b"})]
+        workers[0].metrics = EXPORTER.render_metrics("node-a", [], ["alice"], [
+            {"email": "alice", "group": "Aurora", "traffic": {"up": 1024, "down": 2048}}])
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request, \
+                mock.patch.object(EXPORTER, "time") as clock:
+            clock.time.return_value = 1791936000  # 2026-10-14 08:00:00 UTC+8
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, workers, directory)
+            try:
+                bot.handle_message({"chat": {"id": 42}, "from": {"id": 42}, "text": "/online"})
+                report = request.call_args.args[2]["text"]
+                self.assertIn("👤 客户端：alice\n👥 分组：Aurora\n🖥 面板：node-a", report)
+                self.assertIn("📊 总计：3.00 KiB", report)
+                self.assertIn("未计入本次结果：node-b", report)
+                self.assertIn("2026-10-14 08:00:00（UTC+8）", report)
+                request.reset_mock()
+                content = "👤 客户端：alice\n⬆️ 上行：1.00 KiB\n\n" * 200
+                bot.send(42, content, bot.main_keyboard())
+                messages = [call.args[2] for call in request.call_args_list]
+                self.assertGreater(len(messages), 1)
+                self.assertEqual("".join(message["text"] for message in messages), content)
+                self.assertTrue(all(len(message["text"].encode("utf-16-le")) // 2 <= 3500 for message in messages))
+                self.assertTrue(all("reply_markup" not in message for message in messages[:-1]))
+                self.assertIn("reply_markup", messages[-1])
+            finally:
+                bot.db.close()
+
     def test_telegram_start_shows_main_keyboard_and_watch_commands_offer_group_buttons(self):
         worker = EXPORTER.PanelWorker({"name": "node-a", "url": "https://panel.example.com/panel/api/inbounds/list"})
         worker.metrics = [
@@ -311,9 +369,15 @@ class ExporterTest(unittest.TestCase):
             bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, [worker], directory)
             try:
                 bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/start"})
+                removal = json.loads(request.call_args_list[-2].args[2]["reply_markup"])
+                self.assertEqual(removal, {"remove_keyboard": True})
                 keyboard = json.loads(request.call_args.args[2]["reply_markup"])
-                self.assertTrue(keyboard["is_persistent"])
-                self.assertEqual(keyboard["keyboard"][0][0]["text"], "📡 状态")
+                self.assertNotIn("keyboard", keyboard)
+                self.assertEqual(keyboard["inline_keyboard"][0][0]["text"], "📡 状态")
+                self.assertEqual(keyboard["inline_keyboard"][0][0]["callback_data"], "menu:status")
+                bot.handle_callback({"id": "menu-query", "from": {"id": 42},
+                                     "message": {"chat": {"id": 420}}, "data": "menu:status"})
+                self.assertIn("机器人运行正常", request.call_args.args[2]["text"])
                 bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/watch"})
                 picker = json.loads(request.call_args.args[2]["reply_markup"])
                 self.assertEqual(picker["inline_keyboard"][0][0]["callback_data"], "watch:0")

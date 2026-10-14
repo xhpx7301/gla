@@ -179,9 +179,16 @@ def format_bytes(value):
 
 
 class TelegramBot:
+    BUTTON_COMMANDS = {
+        "📡 状态": "/status", "👥 分组": "/groups", "🟢 在线客户端": "/online",
+        "📈 累计流量": "/traffic", "🔔 添加订阅": "/watch",
+        "🔕 取消订阅": "/unwatch", "📋 我的订阅": "/watches", "❔ 帮助": "/help",
+        "📖 命令说明": "/commands",
+    }
     COMMANDS = [
         {"command": "start", "description": "显示主菜单"},
         {"command": "help", "description": "机器人帮助"},
+        {"command": "commands", "description": "查看完整命令及用法"},
         {"command": "status", "description": "检查机器人状态"},
         {"command": "id", "description": "显示您的 Telegram ID"},
         {"command": "groups", "description": "查看客户端分组"},
@@ -230,18 +237,61 @@ class TelegramBot:
 
     @staticmethod
     def main_keyboard():
-        return {"keyboard": [
-            [{"text": "📡 状态"}, {"text": "👥 分组"}],
-            [{"text": "🟢 在线客户端"}, {"text": "📈 累计流量"}],
-            [{"text": "🔔 添加订阅"}, {"text": "🔕 取消订阅"}],
-            [{"text": "📋 我的订阅"}, {"text": "❔ 帮助"}],
-        ], "resize_keyboard": True, "is_persistent": True}
+        return {"inline_keyboard": [
+            [{"text": "📡 状态", "callback_data": "menu:status"},
+             {"text": "👥 分组", "callback_data": "menu:groups"}],
+            [{"text": "🟢 在线客户端", "callback_data": "menu:online"},
+             {"text": "📈 累计流量", "callback_data": "menu:traffic"}],
+            [{"text": "🔔 添加订阅", "callback_data": "menu:watch"},
+             {"text": "🔕 取消订阅", "callback_data": "menu:unwatch"}],
+            [{"text": "📋 我的订阅", "callback_data": "menu:watches"},
+             {"text": "❔ 帮助", "callback_data": "menu:help"}],
+            [{"text": "📖 命令说明", "callback_data": "menu:commands"}],
+        ]}
 
     def send(self, chat_id, text, reply_markup=None):
-        payload = {"chat_id": chat_id, "text": text}
-        if reply_markup is not None:
-            payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False, separators=(",", ":"))
-        telegram_request(self.config["token"], "sendMessage", payload)
+        # Reports can grow beyond Telegram's message limit. Split at line
+        # boundaries and count UTF-16 units so emoji also fit safely.
+        chunks, current, units = [], "", 0
+        for line in text.splitlines(keepends=True):
+            for char in line:
+                size = len(char.encode("utf-16-le")) // 2
+                if units + size > 3500:
+                    boundary = current.rfind("\n") + 1
+                    if boundary:
+                        chunks.append(current[:boundary])
+                        current = current[boundary:]
+                        units = len(current.encode("utf-16-le")) // 2
+                    else:
+                        chunks.append(current)
+                        current, units = "", 0
+                current += char
+                units += size
+        if current:
+            chunks.append(current)
+        for index, chunk in enumerate(chunks):
+            payload = {"chat_id": chat_id, "text": chunk}
+            if reply_markup is not None and index == len(chunks) - 1:
+                payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False, separators=(",", ":"))
+            telegram_request(self.config["token"], "sendMessage", payload)
+
+    @staticmethod
+    def report_time():
+        return datetime.fromtimestamp(time.time(), timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S") + "（UTC+8）"
+
+    @staticmethod
+    def traffic_details(up, down):
+        return (f"⬆️ 上行：{format_bytes(up)}\n"
+                f"⬇️ 下行：{format_bytes(down)}\n"
+                f"📊 总计：{format_bytes(up + down)}")
+
+    def report_footer(self, servers_up):
+        unavailable = [worker.panel["name"] for worker in self.workers
+                       if worker.panel["name"] not in servers_up]
+        note = ""
+        if unavailable:
+            note = "\n⚠️ 以下面板暂不可用，未计入本次结果：" + "、".join(unavailable)
+        return note + "\n\n🕒 查询时间：" + self.report_time()
 
     def register_commands(self):
         telegram_request(self.config["token"], "setMyCommands", {
@@ -273,7 +323,7 @@ class TelegramBot:
             chats = [row[0] for row in self.db.execute("SELECT chat_id FROM subscriptions WHERE group_name=?", (group,))]
             for chat_id in chats:
                 try:
-                    self.send(chat_id, f"客户端上线\n分组：{group}\n客户端：{email}\n面板：{server}")
+                    self.send(chat_id, f"🟢 客户端上线\n\n👤 客户端：{email}\n👥 分组：{group}\n🖥 面板：{server}\n\n🕒 检测时间：{self.report_time()}")
                 except ERRORS as error:
                     print(f"Telegram 通知发送失败 ({error_kind(error)})", file=sys.stderr, flush=True)
 
@@ -285,14 +335,15 @@ class TelegramBot:
         if not isinstance(chat_id, int):
             return
         text = (message.get("text") or "").strip()
+        # Old reply keyboards send the entire label, including spaces.
+        # Resolve it before parsing slash command arguments.
+        legacy_command = {label.replace("\ufe0f", ""): command
+                          for label, command in self.BUTTON_COMMANDS.items()}.get(text.replace("\ufe0f", ""))
+        if legacy_command:
+            text = legacy_command
         command, _, argument = text.partition(" ")
         command = command.split("@", 1)[0].lower()
         argument = argument.strip()
-        command = {
-            "📡 状态": "/status", "👥 分组": "/groups", "🟢 在线客户端": "/online",
-            "📈 累计流量": "/traffic", "🔔 添加订阅": "/watch",
-            "🔕 取消订阅": "/unwatch", "📋 我的订阅": "/watches", "❔ 帮助": "/help",
-        }.get(command, command)
         if command == "/id":
             self.send(chat_id, f"您的 Telegram ID：{user_id}\n当前 Chat ID：{chat_id}")
             return
@@ -300,33 +351,65 @@ class TelegramBot:
             if command in ("/start", "/help"):
                 self.send(chat_id, "此机器人仅供授权用户使用。请先发送 /id 获取您的 Telegram 用户 ID。")
             return
-        series, _ = self.snapshot()
+        if legacy_command:
+            self.send(chat_id, "菜单已更新，请使用聊天消息下方的按钮。", {"remove_keyboard": True})
+            self.send(chat_id, "👇 请选择：", self.main_keyboard())
+        series, servers_up = self.snapshot()
         groups = sorted({item["group"] for item in series.values()})
-        if command in ("/start", "/help"):
-            reply = ("3x-ui 分组监控机器人\n\n"
+        if command == "/start":
+            name = message.get("from", {}).get("first_name") or "朋友"
+            self.send(chat_id, f"👋 你好，{name}！\n🤖 欢迎使用 GLA 分组监控机器人。", {"remove_keyboard": True})
+            self.send(chat_id, "👇 请选择：", self.main_keyboard())
+            return
+        elif command == "/help":
+            reply = ("🤖 欢迎使用 GLA 分组监控机器人！\n"
+                     "您可以查询各面板的状态、分组在线客户端和累计流量，"
+                     "也可以订阅指定分组的客户端上线通知。\n\n"
+                     "👇 请选择：")
+            self.send(chat_id, reply, self.main_keyboard())
+            return
+        elif command == "/commands":
+            reply = ("📖 命令说明\n\n"
+                     "/start - 显示主菜单\n"
+                     "/help - 显示功能介绍与操作菜单\n"
+                     "/commands - 查看完整命令及用法\n"
                      "/status - 检查面板和在线状态\n"
                      "/groups - 查看客户端分组\n"
                      "/online [分组] - 查看在线客户端及流量\n"
                      "/traffic [分组] - 查看累计流量\n"
-                     "/watch 分组 - 订阅上线通知\n"
-                     "/unwatch 分组 - 取消订阅\n"
+                     "/watch [分组] - 订阅上线通知\n"
+                     "/unwatch [分组] - 取消订阅\n"
                      "/watches - 查看已订阅分组\n"
-                     "/id - 显示您的 Telegram ID")
+                     "/id - 显示您的 Telegram ID\n\n"
+                     "[分组] 可省略；订阅和取消订阅时会显示分组选择按钮。\n"
+                     "示例：/online Aurora 极光云瓶\n"
+                     "流量为面板返回的累计值。")
             self.send(chat_id, reply, self.main_keyboard())
             return
         elif command == "/status":
             series, servers_up = self.snapshot()
             panel_names = [worker.panel["name"] for worker in self.workers]
             online_count = sum(1 for item in series.values() if item["online"] and item["server"] in servers_up)
-            panel_lines = [f"{name}：{'正常' if name in servers_up else '不可用'}" for name in panel_names]
-            reply = ("机器人运行正常\n"
-                     f"面板：{len(servers_up)}/{len(panel_names)} 正常\n"
-                     f"在线客户端：{online_count}\n\n" + ("\n".join(panel_lines) if panel_lines else "尚未配置面板"))
+            panel_lines = [f"{'🟢' if name in servers_up else '🔴'} {name}：{'正常' if name in servers_up else '不可用'}" for name in panel_names]
+            reply = ("📡 运行状态\n\n🤖 机器人运行正常\n"
+                     f"🖥 面板：{len(servers_up)}/{len(panel_names)} 正常\n"
+                     f"👥 在线分组：{len({item['group'] for item in series.values() if item['online']})}\n"
+                     f"🟢 在线客户端：{online_count}\n\n" + ("\n".join(panel_lines) if panel_lines else "尚未配置面板")
+                     + "\n\n🕒 查询时间：" + self.report_time())
         elif command == "/groups":
-            reply = "当前分组：\n" + ("\n".join(groups) if groups else "暂无数据")
+            blocks = []
+            for group in groups:
+                members = [item for item in series.values() if item["group"] == group]
+                blocks.append(f"👥 分组：{group}\n🟢 在线：{sum(item['online'] for item in members)}/{len(members)} 个客户端")
+            reply = "👥 客户端分组\n\n" + ("\n\n".join(blocks) if blocks else "📭 暂无分组数据") + self.report_footer(servers_up)
         elif command == "/online":
             rows = [item for item in series.values() if item["online"] and (not argument or item["group"] == argument)]
-            reply = "在线客户端：\n" + ("\n".join(f"{x['group']} | {x['email']} | {x['server']} | 上行 {format_bytes(x['up'])} | 下行 {format_bytes(x['down'])} | 总计 {format_bytes(x['up'] + x['down'])}" for x in sorted(rows, key=lambda x: (x["group"], x["email"]))) if rows else "没有匹配的在线客户端")
+            blocks = [f"👤 客户端：{item['email']}\n👥 分组：{item['group']}\n🖥 面板：{item['server']}\n"
+                      + self.traffic_details(item['up'], item['down'])
+                      for item in sorted(rows, key=lambda item: (item['group'], item['server'], item['email']))]
+            reply = (f"🟢 在线客户端：{len(rows)} 个\n👥 筛选分组：{argument or '全部'}\n\n"
+                     + ("\n\n".join(blocks) if blocks else "📭 没有匹配的在线客户端")
+                     + "\n\nℹ️ 流量为客户端累计用量。" + self.report_footer(servers_up))
         elif command == "/traffic":
             totals = {}
             for item in series.values():
@@ -334,23 +417,25 @@ class TelegramBot:
                     continue
                 total = totals.setdefault(item["group"], [0, 0])
                 total[0] += item["up"]; total[1] += item["down"]
-            rows = [f"{group} | 上行 {format_bytes(values[0])} | 下行 {format_bytes(values[1])} | 总计 {format_bytes(sum(values))}" for group, values in sorted(totals.items())]
-            reply = "累计流量：\n" + ("\n".join(rows) if rows else "没有匹配的分组流量")
+            rows = [f"👥 分组：{group}\n" + self.traffic_details(values[0], values[1])
+                    for group, values in sorted(totals.items(), key=lambda row: (-sum(row[1]), row[0]))]
+            reply = ("📈 分组累计流量\n\n" + ("\n\n".join(rows) if rows else "📭 没有匹配的分组流量")
+                     + "\n\nℹ️ 同名分组跨面板汇总，按累计总量排序。" + self.report_footer(servers_up))
         elif command in ("/watch", "/unwatch") and not argument:
             if command == "/watch":
                 choices = groups
-                title = "请选择要订阅上线通知的分组："
+                title = "🔔 请选择要订阅上线通知的分组："
             else:
                 choices = [row[0] for row in self.db.execute(
                     "SELECT group_name FROM subscriptions WHERE chat_id=? ORDER BY group_name", (chat_id,))]
-                title = "请选择要取消订阅的分组："
+                title = "🔕 请选择要取消订阅的分组："
             self.pending_groups[chat_id] = (command, choices)
             buttons = [[{"text": group, "callback_data": f"{command[1:]}:{index}"}]
                        for index, group in enumerate(choices[:50])]
             if len(choices) > 50:
                 title += "\n仅显示前 50 个；也可直接输入分组名称。"
             if not choices:
-                reply = "目前沒有可選分組。" if command == "/watch" else "目前沒有已訂閱分組。"
+                reply = "目前没有可选分组。" if command == "/watch" else "目前没有已订阅分组。"
             else:
                 self.send(chat_id, title, {"inline_keyboard": buttons})
                 return
@@ -359,16 +444,16 @@ class TelegramBot:
                 reply = f"没有找到分组：{argument}。使用 /groups 查看分组。"
             elif command == "/watch":
                 with self.db: self.db.execute("INSERT OR IGNORE INTO subscriptions VALUES (?,?)", (chat_id, argument))
-                reply = f"已订阅分组：{argument}"
+                reply = f"🔔 已订阅分组：{argument}"
             else:
                 with self.db: self.db.execute("DELETE FROM subscriptions WHERE chat_id=? AND group_name=?", (chat_id, argument))
-                reply = f"已取消订阅：{argument}"
+                reply = f"🔕 已取消订阅：{argument}"
         elif command == "/watches":
             rows = [row[0] for row in self.db.execute("SELECT group_name FROM subscriptions WHERE chat_id=? ORDER BY group_name", (chat_id,))]
-            reply = "已订阅分组：\n" + ("\n".join(rows) if rows else "暂无订阅")
+            reply = "📋 已订阅分组\n\n" + ("\n".join(f"🔔 {group}" for group in rows) if rows else "📭 暂无订阅")
         else:
             reply = "无法识别命令。发送 /help 查看命令。"
-        self.send(chat_id, reply[:4000], self.main_keyboard())
+        self.send(chat_id, reply)
 
     def handle_callback(self, callback):
         callback_id = callback.get("id", "")
@@ -380,7 +465,17 @@ class TelegramBot:
         if user_id not in allowed_users and chat_id not in allowed_chats:
             telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id, "text": "未授权"})
             return
-        match = re.fullmatch(r"(watch|unwatch):(\d+)", callback.get("data", ""))
+        menu_commands = {"menu:status": "/status", "menu:groups": "/groups",
+                         "menu:online": "/online", "menu:traffic": "/traffic",
+                         "menu:watch": "/watch", "menu:unwatch": "/unwatch",
+                         "menu:watches": "/watches", "menu:help": "/help",
+                         "menu:commands": "/commands"}
+        data = callback.get("data", "")
+        if data in menu_commands:
+            telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
+            self.handle_message({"chat": {"id": chat_id}, "from": {"id": user_id}, "text": menu_commands[data]})
+            return
+        match = re.fullmatch(r"(watch|unwatch):(\d+)", data)
         pending = self.pending_groups.get(chat_id)
         if not match or not pending or pending[0] != "/" + match[1]:
             telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id, "text": "选项已过期，请重新打开菜单。"})
@@ -393,13 +488,13 @@ class TelegramBot:
         with self.db:
             if match[1] == "watch":
                 self.db.execute("INSERT OR IGNORE INTO subscriptions VALUES (?,?)", (chat_id, group))
-                reply = f"已订阅分组：{group}"
+                reply = f"🔔 已订阅分组：{group}"
             else:
                 self.db.execute("DELETE FROM subscriptions WHERE chat_id=? AND group_name=?", (chat_id, group))
-                reply = f"已取消订阅：{group}"
+                reply = f"🔕 已取消订阅：{group}"
         self.pending_groups.pop(chat_id, None)
         telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
-        self.send(chat_id, reply, self.main_keyboard())
+        self.send(chat_id, reply)
 
     def run(self):
         try:
