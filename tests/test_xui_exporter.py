@@ -34,9 +34,16 @@ class ExporterTest(unittest.TestCase):
             self.assertIn("SERVER_NAME=node-a", output.getvalue())
             self.assertIn("SSH_LOGIN_URL=https://ssh.example.com/api/ssh-login", output.getvalue())
             self.assertIn(f"SSH_LOGIN_KEY={key}", output.getvalue())
+            output = io.StringIO()
+            with mock.patch("sys.stdout", output):
+                EXPORTER.ssh_login_cli(["list", "--format", "tsv"])
+            self.assertEqual(output.getvalue().splitlines(), ["node-a\t192.0.2.4/32, 2001:db8::/64"])
             EXPORTER.ssh_login_cli(["set-cidrs", "--name", "node-a", "--cidrs", ""])
             config = json.loads(pathlib.Path(EXPORTER.SSH_LOGIN_CONFIG_FILE).read_text(encoding="utf-8"))
             self.assertEqual(config["servers"]["node-a"]["allowed_cidrs"], [])
+        manager = (pathlib.Path(__file__).parents[1] / "deploy-xray-grafana-loki-alloy.sh").read_text(encoding="utf-8")
+        self.assertGreaterEqual(manager.count("if ! select_ssh_login_server; then"), 3)
+        self.assertEqual(manager.count("read -rp '服务器名称（仅字母、数字、点、下划线、连字符）: ' name"), 1)
 
     def test_ssh_login_cidr_allowlist_supports_ipv4_and_ipv6(self):
         self.assertTrue(EXPORTER.ssh_login_ip_allowed(

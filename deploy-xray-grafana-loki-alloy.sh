@@ -1270,6 +1270,27 @@ ssh_login_state() {
   fi
 }
 
+select_ssh_login_server() {
+  local rows choice i=0 name trusted
+  local -a names=() cidrs=()
+  rows="$(ssh_login_command list --format tsv)" || return 1
+  if [ -z "$rows" ]; then
+    printf '尚未添加服务器，请先添加。\n'
+    return 1
+  fi
+  while IFS=$'\t' read -r name trusted; do
+    names+=("$name")
+    cidrs+=("$trusted")
+    i=$((i + 1))
+    printf '%s. %s  可信来源=%s\n' "$i" "$name" "$trusted"
+  done <<<"$rows"
+  read -rp "请选择服务器 [1-$i]，0 返回: " choice
+  if [[ ! "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt "$i" ]; then
+    return 1
+  fi
+  SELECTED_SSH_NAME="${names[$((choice - 1))]}"
+}
+
 configure_ssh_login() {
   local action name cidrs url
   while true; do
@@ -1293,7 +1314,11 @@ configure_ssh_login() {
         fi
         ;;
       3)
-        read -rp '服务器名称: ' name
+        if ! select_ssh_login_server; then
+          printf '未选择服务器。\n'
+          continue
+        fi
+        name="$SELECTED_SSH_NAME"
         read -rp '可信登录来源 CIDR，多个用逗号分隔；留空表示全部告警: ' cidrs
         if [ -z "$cidrs" ] && ! confirm '留空后所有成功登录都会触发告警。继续修改？'; then
           printf '已取消。\n'
@@ -1302,12 +1327,20 @@ configure_ssh_login() {
         fi
         ;;
       4)
-        read -rp '服务器名称: ' name
+        if ! select_ssh_login_server; then
+          printf '未选择服务器。\n'
+          continue
+        fi
+        name="$SELECTED_SSH_NAME"
         printf '\n以下命令请在对应子服务器以 root 执行：\n'
         ssh_login_command install-command --name "$name"
         ;;
       5)
-        read -rp '要删除的服务器名称: ' name
+        if ! select_ssh_login_server; then
+          printf '未选择服务器。\n'
+          continue
+        fi
+        name="$SELECTED_SSH_NAME"
         if confirm "删除 $name 的告警配置？子服务器采集脚本不会自动卸载"; then
           ssh_login_command delete --name "$name"
         fi

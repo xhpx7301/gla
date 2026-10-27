@@ -1930,6 +1930,7 @@ def ssh_login_cli(argv):
     parser.add_argument("--name")
     parser.add_argument("--cidrs", default="")
     parser.add_argument("--url")
+    parser.add_argument("--format", choices=("display", "tsv"), default="display")
     args = parser.parse_args(argv)
     path = Path(SSH_LOGIN_CONFIG_FILE)
     config = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"servers": {}}
@@ -1944,8 +1945,12 @@ def ssh_login_cli(argv):
             print("尚未添加服务器")
         for name, item in sorted(servers.items()):
             cidrs = item.get("allowed_cidrs", [])
-            print(f"{name}\t可信来源={', '.join(cidrs) if cidrs else '无（所有登录均告警）'}")
-        if config.get("ingest_url"):
+            trusted = ", ".join(cidrs) if cidrs else "无（所有登录均告警）"
+            if args.format == "tsv":
+                print(f"{name}\t{trusted}")
+            else:
+                print(f"{name}\t可信来源={trusted}")
+        if args.format == "display" and config.get("ingest_url"):
             print(f"接收地址：{config['ingest_url']}")
         return
     if args.operation == "delete":
