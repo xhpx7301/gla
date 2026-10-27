@@ -1264,9 +1264,18 @@ ssh_login_state() {
   if [ ! -f "$STACK_DIR/secrets/ssh-login-config.json" ]; then
     printf '[未配置]'
   else
-    local count
-    count="$(ssh_login_command status 2>/dev/null | cut -d'台' -f1 | awk '{print $1}')"
-    printf '[%s 台已登记]' "${count:-0}"
+    local status count endpoint
+    status="$(ssh_login_command status --format tsv 2>/dev/null || true)"
+    IFS=$'\t' read -r count endpoint <<<"$status"
+    if [[ ! "$count" =~ ^[0-9]+$ ]] || [[ ! "$endpoint" =~ ^[01]$ ]]; then
+      printf '[状态未知]'
+    elif [ "$count" -eq 0 ]; then
+      printf '[未配置]'
+    elif [ "$endpoint" -eq 0 ]; then
+      printf '[已登记 %s 台；未设置接收地址]' "$count"
+    else
+      printf '[已启用 %s 台]' "$count"
+    fi
   fi
 }
 

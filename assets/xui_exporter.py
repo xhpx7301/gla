@@ -1938,7 +1938,10 @@ def ssh_login_cli(argv):
         raise ValueError("SSH 告警配置格式无效")
     servers = config.setdefault("servers", {})
     if args.operation == "status":
-        print(f"{len(servers)} 台服务器；接收地址：{'已设置' if config.get('ingest_url') else '未设置'}")
+        if args.format == "tsv":
+            print(f"{len(servers)}\t{1 if config.get('ingest_url') else 0}")
+        else:
+            print(f"{len(servers)} 台服务器；接收地址：{'已设置' if config.get('ingest_url') else '未设置'}")
         return
     if args.operation == "list":
         if not servers:
