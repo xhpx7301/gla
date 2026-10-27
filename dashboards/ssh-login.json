@@ -1,0 +1,61 @@
+{
+  "uid": "ssh-login",
+  "title": "SSH 登录记录",
+  "timezone": "Asia/Shanghai",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-24h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "server",
+        "label": "服务器",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "loki" },
+        "definition": "label_values({job=\"ssh-login\"}, server)",
+        "query": "label_values({job=\"ssh-login\"}, server)",
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "current": { "selected": true, "text": "全部", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "成功登录次数",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{ "refId": "A", "expr": "sum(count_over_time({job=\"ssh-login\",server=~\"$server\"}[$__range]))", "instant": true }],
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 5 },
+      "fieldConfig": { "defaults": { "noValue": "0" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "area", "justifyMode": "auto" }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "登录趋势",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{ "refId": "A", "expr": "sum(count_over_time({job=\"ssh-login\",server=~\"$server\"}[$__interval]))", "legendFormat": "登录次数" }],
+      "gridPos": { "x": 6, "y": 0, "w": 18, "h": 8 },
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "single", "sort": "none" } }
+    },
+    {
+      "id": 3,
+      "type": "logs",
+      "title": "全部成功登录详情",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{ "refId": "A", "expr": "{job=\"ssh-login\",server=~\"$server\"} | json | line_format `服务器={{.server}} | 用户={{.user}} | 来源IP={{.source_ip}} | 端口={{.source_port}} | 认证={{.auth_method}} | 归属={{.location}} | 网络={{.network}}`" }],
+      "gridPos": { "x": 0, "y": 8, "w": 24, "h": 14 },
+      "options": { "dedupStrategy": "none", "enableLogDetails": true, "showCommonLabels": false, "wrapLogMessage": true, "sortOrder": "Descending" }
+    }
+  ],
+  "annotations": { "list": [] },
+  "links": [],
+  "timepicker": {},
+  "version": 1
+}

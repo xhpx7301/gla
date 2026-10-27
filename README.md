@@ -80,6 +80,38 @@ Telegram 左下角的原生菜单按钮由 Telegram 客户端控制文字，Bot 
 
 使用 API 采集日志时，必须在 3x-ui/Xray 开启 access log，并确保面板能读取它。`/server/xraylogs/:count` 扫描当前日志文件，再返回最近 N 条解析记录；文件很大时轮询也会消耗服务器资源，应配置日志轮转。原始行和 `[api -> api]` 不会完整保留，接口没有增量游标。采集器使用持久化去重记录，Loki 写入失败时重试，并在窗口已满或与上次采集没有重叠时提示风险，但日志轮转、长时间断连和高吞吐仍可能漏采。默认每 30 秒取 1000 条，首次启用只回填最近 1 小时。API 状态正常代表请求和转发成功，不证明此时有新访问记录。来源 IP 的“连接数”始终是日志记录数，无法从 API 得到每条连接的精确字节数或持续时间。
 
+## 轻量 SSH 登录告警
+
+SSH 登录告警可不在子服务器运行 Alloy。PAM 在 SSH 会话成功打开时触发本地脚本，脚本用 `systemd-run` 异步发送一条 HTTPS 事件到中心端；发送失败不会阻止 SSH 登录。中心端将事件写入现有 Loki，并按服务器独立的 CIDR 白名单决定是否向 Telegram Bot 授权用户发送告警。Grafana 的“SSH 登录记录”仪表盘可按服务器筛选全部成功会话。
+
+中心端重新运行 `gla` 更新部署后，在 Nginx Proxy Manager 添加 HTTPS Proxy Host：转发主机 `gla-xui-exporter`、端口 `9105`，域名路径由该 Host 根路径转发。该入口在容器网络内提供，公网访问必须启用 TLS；事件接口还要求每台服务器的独立密钥。不要给该 Proxy Host 配置会重写 `/api/ssh-login` 路径的自定义规则。
+
+为每台服务器生成独立密钥，并在中心端 `/opt/xray-log-dashboard/secrets/ssh-login-config.json` 中配置服务器名称、密钥和可信来源网段。空白名单表示所有登录都属于陌生 IP：
+
+```json
+{
+  "servers": {
+    "server-a": {
+      "key": "替换为64位十六进制随机密钥",
+      "allowed_cidrs": ["203.0.113.8/32", "2001:db8::8/128"]
+    }
+  }
+}
+```
+
+可用 `openssl rand -hex 32` 生成密钥。该配置文件应保持权限 `600`，密钥只用于对应服务器；配置后执行 `docker compose -f /opt/xray-log-dashboard/compose.yaml restart xui-exporter`。在子服务器以 root 执行安装命令，替换服务器名、中心端 HTTPS 域名和该服务器密钥：
+
+```bash
+SERVER_NAME=server-a \
+SSH_LOGIN_URL=https://ssh-ingest.example.com/api/ssh-login \
+SSH_LOGIN_KEY=替换为对应密钥 \
+bash <(curl -fsSL https://raw.githubusercontent.com/xhpx7301/gla/main/install-ssh-login-agent.sh)
+```
+
+安装脚本会在 `/etc/pam.d/sshd` 增加可选的 PAM session hook，并把密钥保存在 root-only 的 `/etc/gla/ssh-login.env`。卸载时运行 `bash <(curl -fsSL https://raw.githubusercontent.com/xhpx7301/gla/main/install-ssh-login-agent.sh) uninstall`，PAM 原文件备份保留在 `/etc/pam.d/sshd.gla-backup`。建议先保持当前 SSH 管理会话，再用第二个会话验证配置，避免误配置 PAM 影响登录。
+
+此方案记录成功打开的 SSH 会话，不记录认证失败；PAM 标准字段不提供可靠的认证方式和来源端口，因此这些字段显示为未知/空。Loki 只用 `job` 和 `server` 作标签，IP 与用户名留在 JSON 日志正文中，避免高基数标签。首次启用不会补录历史事件。
+
 SSH 端口入站流量和 UFW 默认拒绝流量仅在 UFW 已启用且配置了指标写入时自动采集。采集器每 30 秒使用仅计数、随后立即返回的防火墙链生成聚合字节数，不会创建来源 IP 标签，也不改变放行或拒绝决定。SSH 端口流量包含正常会话和扫描；UFW 默认拒绝流量仅代表最终落入默认 INPUT 拒绝策略的流量。
 
 Xray 来源 IP 的“连接次数”和 3x-ui 的“流量字节数”是两种不同口径。普通 access log 没有每条连接的字节数，因此项目不会把来源 IP 连接次数伪装成精确流量。

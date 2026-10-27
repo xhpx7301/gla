@@ -6,6 +6,7 @@ enables background polling so slow remote panels cannot block Prometheus.
 """
 
 import argparse
+import hmac
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -37,6 +38,7 @@ PANELS_FILE = os.environ.get("XUI_PANELS_FILE", "")
 STATE_DIR = os.environ.get("XUI_STATE_DIR", "/var/lib/xui")
 LOKI_URL = os.environ.get("XUI_LOKI_URL", "http://alloy:3500/loki/api/v1/push")
 TELEGRAM_CONFIG_FILE = os.environ.get("XUI_TELEGRAM_CONFIG_FILE", "/run/secrets/telegram-config.json")
+SSH_LOGIN_CONFIG_FILE = os.environ.get("XUI_SSH_LOGIN_CONFIG_FILE", "/run/secrets/ssh-login-config.json")
 DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 3600
 PREVIOUS_DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = (600, 1800)
 MAX_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 86400
@@ -1647,8 +1649,83 @@ WORKERS = []
 
 
 class MetricsHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        if self.path != "/api/ssh-login":
+            self.send_error(404)
+            return
+        try:
+            self.handle_ssh_login()
+        except (ValueError, TypeError, KeyError, OSError, RuntimeError, sqlite3.Error) as error:
+            print(f"SSH 登录事件处理失败 ({error_kind(error)})", file=sys.stderr, flush=True)
+            self.send_error(400, "invalid event")
+
+    def handle_ssh_login(self):
+        config_path = Path(SSH_LOGIN_CONFIG_FILE)
+        if not config_path.is_file():
+            self.send_error(503, "SSH login intake is not configured")
+            return
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        servers = config.get("servers", {}) if isinstance(config, dict) else {}
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > 4096:
+            self.send_error(413)
+            return
+        fields = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"), strict_parsing=True)
+        event = {key: values[0] for key, values in fields.items() if values}
+        server = event.get("server", "")
+        server_config = servers.get(server) if isinstance(servers, dict) else None
+        supplied_key = self.headers.get("X-GLA-Key", "")
+        if (not isinstance(server_config, dict) or not isinstance(server_config.get("key"), str)
+                or not hmac.compare_digest(supplied_key, server_config["key"])):
+            self.send_error(403)
+            return
+        username = event.get("user", "")
+        try:
+            address = ipaddress.ip_address(event.get("source_ip", ""))
+        except ValueError:
+            self.send_error(400, "invalid source IP")
+            return
+        if (not username or len(username) > 128 or any(ord(char) < 32 for char in username)
+                or not NAME_RE.fullmatch(server)):
+            self.send_error(400, "invalid login fields")
+            return
+        now_ns = time.time_ns()
+        event_time = event.get("event_time", "")
+        try:
+            parsed_time = datetime.fromisoformat(event_time.replace("Z", "+00:00"))
+            if parsed_time.tzinfo is None:
+                raise ValueError("timezone is required")
+            timestamp = int(parsed_time.timestamp() * 1_000_000_000)
+            if abs(timestamp - now_ns) > 300_000_000_000:
+                timestamp = now_ns
+        except ValueError:
+            timestamp = now_ns
+        try:
+            location, network = ip_attribution(str(address))
+        except Exception:
+            location, network = "归属地未知", "网络组织未知"
+        record = {"event": "ssh_login", "server": server, "user": username,
+                  "source_ip": str(address), "source_port": event.get("source_port", ""),
+                  "auth_method": event.get("auth_method", "unknown"),
+                  "location": location, "network": network}
+        loki_ok = True
+        try:
+            push_loki([{"stream": {"job": "ssh-login", "server": server},
+                       "values": [[str(timestamp), json.dumps(record, ensure_ascii=False, separators=(",", ":"))]]}])
+        except ERRORS as error:
+            loki_ok = False
+            print(f"SSH 登录事件 Loki 写入失败 ({error_kind(error)})", file=sys.stderr, flush=True)
+        if not ssh_login_ip_allowed(address, server_config.get("allowed_cidrs", [])):
+            notify_ssh_login(record)
+        self.send_response(204 if loki_ok else 503)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self):
         if self.path not in ("/metrics", "/metrics?"):
+            self.send_error(404)
+            return
+        if self.headers.get("X-Forwarded-For") or self.headers.get("X-Real-IP"):
             self.send_error(404)
             return
         try:
@@ -1668,6 +1745,73 @@ class MetricsHandler(BaseHTTPRequestHandler):
 
     def log_message(self, *_args):
         pass
+
+
+def ssh_login_ip_allowed(address, cidrs):
+    for cidr in cidrs:
+        try:
+            if address in ipaddress.ip_network(cidr, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+_SSH_LOGIN_NOTIFY_LOCK = threading.Lock()
+
+
+def ssh_login_notify_allowed(record, config):
+    cooldown = config.get("notify_cooldown_seconds", 600)
+    if type(cooldown) is not int or cooldown < 0 or cooldown > 86400:
+        cooldown = 600
+    path = Path(STATE_DIR) / "ssh-login.sqlite"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _SSH_LOGIN_NOTIFY_LOCK:
+        db = sqlite3.connect(str(path), timeout=10)
+        try:
+            db.execute("CREATE TABLE IF NOT EXISTS notifications (server TEXT, source_ip TEXT, user TEXT, notified_at REAL NOT NULL, PRIMARY KEY(server,source_ip,user))")
+            now = time.time()
+            row = db.execute("SELECT notified_at FROM notifications WHERE server=? AND source_ip=? AND user=?",
+                             (record["server"], record["source_ip"], record["user"])).fetchone()
+            if row is not None and cooldown and now - float(row[0]) < cooldown:
+                return False
+        finally:
+            db.close()
+    return True
+
+
+def record_ssh_login_notification(record):
+    path = Path(STATE_DIR) / "ssh-login.sqlite"
+    with _SSH_LOGIN_NOTIFY_LOCK:
+        db = sqlite3.connect(str(path), timeout=10)
+        try:
+            with db:
+                db.execute("INSERT OR REPLACE INTO notifications VALUES (?,?,?,?)",
+                           (record["server"], record["source_ip"], record["user"], time.time()))
+                db.execute("DELETE FROM notifications WHERE notified_at < ?", (time.time() - 7 * 86400,))
+        finally:
+            db.close()
+
+
+def notify_ssh_login(record):
+    config = telegram_config()
+    if not config or not ssh_login_notify_allowed(record, config):
+        return
+    chats = sorted(set(config.get("allowed_chat_ids", []) + config.get("allowed_user_ids", [])))
+    text = ("🚨 陌生 IP SSH 登录\n\n"
+            f"🖥 服务器：{record['server']}\n"
+            f"👤 用户：{record['user']}\n"
+            f"🌐 来源 IP：{record['source_ip']}\n"
+            f"📍 归属地：{record['location']}\n"
+            f"🏢 网络：{record['network']}\n"
+            f"🔐 认证方式：{record['auth_method']}\n"
+            f"🕒 时间：{datetime.now(timezone(timedelta(hours=8))):%Y-%m-%d %H:%M:%S}（UTC+8）")
+    for chat_id in chats:
+        try:
+            telegram_request(config["token"], "sendMessage", {"chat_id": chat_id, "text": text})
+            record_ssh_login_notification(record)
+        except ERRORS as error:
+            print(f"SSH 登录 Telegram 通知失败 ({error_kind(error)})", file=sys.stderr, flush=True)
 
 
 def panels_cli(argv):

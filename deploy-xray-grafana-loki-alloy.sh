@@ -330,7 +330,9 @@ install -d -m 0750 "$STACK_DIR" "$STACK_DIR/alloy" \
 download_asset assets/xui_exporter.py "$STACK_DIR/assets/xui_exporter.py"
 download_asset assets/xui-exporter.Dockerfile "$STACK_DIR/assets/xui-exporter.Dockerfile"
 [ -f "$STACK_DIR/secrets/xui-panels.json" ] || printf '[]\n' >"$STACK_DIR/secrets/xui-panels.json"
+[ -f "$STACK_DIR/secrets/ssh-login-config.json" ] || printf '{"servers":{}}\n' >"$STACK_DIR/secrets/ssh-login-config.json"
 chmod 0600 "$STACK_DIR/secrets/xui-panels.json"
+chmod 0600 "$STACK_DIR/secrets/ssh-login-config.json"
 # Migrate an existing local-panel URL and Token into the shared API panel list.
 # Once migrated, removing the panel in the manager also stops its collection.
 if [ -n "$XUI_API_URL" ]; then
@@ -507,6 +509,7 @@ ${SECURITY_TRAFFIC_VOLUME_LINE}
       XUI_STATE_DIR: /var/lib/xui
       XUI_LOKI_URL: http://alloy:3500/loki/api/v1/push
       XUI_TELEGRAM_CONFIG_FILE: /run/secrets/telegram-config.json
+      XUI_SSH_LOGIN_CONFIG_FILE: /run/secrets/ssh-login-config.json
       GEOIP_CITY_DB: /var/lib/gla/geoip/GeoLite2-City.mmdb
       GEOIP_ASN_DB: /var/lib/gla/geoip/GeoLite2-ASN.mmdb
 ${XUI_EXTRA_HOST_LINE}
@@ -518,6 +521,9 @@ ${XUI_ASN_VOLUME_LINE}
       - xui-state:/var/lib/xui
     depends_on:
       - alloy
+    networks:
+      - default
+      - npm
 
 volumes:
   grafana-data:
@@ -730,6 +736,7 @@ EOF
 note "正在安装 Xray 和服务器安全仪表盘"
 download_asset dashboards/xray-gateway.json "$STACK_DIR/grafana/dashboards/xray-gateway.json"
 download_asset dashboards/server-security.json "$STACK_DIR/grafana/dashboards/server-security.json"
+download_asset dashboards/ssh-login.json "$STACK_DIR/grafana/dashboards/ssh-login.json"
 
 cat >"$STACK_DIR/grafana/dashboards/xray-access.json" <<'EOF'
 {
@@ -1170,6 +1177,7 @@ show_access_info() {
   [ -f "$STACK_DIR/grafana/dashboards/xray-access.json" ] && printf '  - Xray 访问日志\n'
   [ -f "$STACK_DIR/grafana/dashboards/xray-gateway.json" ] && printf '  - Xray 网关流量与连接\n'
   [ -f "$STACK_DIR/grafana/dashboards/server-security.json" ] && printf '  - 服务器安全事件与系统资源\n'
+  [ -f "$STACK_DIR/grafana/dashboards/ssh-login.json" ] && printf '  - SSH 登录记录\n'
 
   printf '\n中心端管理的 API 面板（Token 不显示）：\n'
   panels_command list

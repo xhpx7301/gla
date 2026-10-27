@@ -69,6 +69,15 @@ class DashboardTableTest(unittest.TestCase):
             {"x": 0, "y": 47, "w": 24, "h": 9},
         )
 
+    def test_ssh_login_dashboard_queries_all_server_events_without_ip_labels(self):
+        dashboard = load_dashboard("ssh-login.json")
+        self.assertEqual(dashboard["uid"], "ssh-login")
+        self.assertIn("label_values({job=\"ssh-login\"}, server)", dashboard["templating"]["list"][0]["query"])
+        expression = dashboard["panels"][2]["targets"][0]["expr"]
+        self.assertIn("| json", expression)
+        self.assertIn("source_ip", expression)
+        self.assertNotIn("source_ip=", expression)
+
     def test_gateway_tables_are_chinese_and_sorted(self):
         client = panel_by_id(self.gateway, 6)
         inbound = panel_by_id(self.gateway, 7)

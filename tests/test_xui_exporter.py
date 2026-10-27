@@ -4,6 +4,10 @@ import json
 import pathlib
 import sys
 import tempfile
+import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 import unittest
 from unittest import mock
 
@@ -15,6 +19,70 @@ SPEC.loader.exec_module(EXPORTER)
 
 
 class ExporterTest(unittest.TestCase):
+    def test_ssh_login_cidr_allowlist_supports_ipv4_and_ipv6(self):
+        self.assertTrue(EXPORTER.ssh_login_ip_allowed(
+            EXPORTER.ipaddress.ip_address("203.0.113.9"), ["203.0.113.0/24"]))
+        self.assertTrue(EXPORTER.ssh_login_ip_allowed(
+            EXPORTER.ipaddress.ip_address("2001:db8::9"), ["2001:db8::/64"]))
+        self.assertFalse(EXPORTER.ssh_login_ip_allowed(
+            EXPORTER.ipaddress.ip_address("198.51.100.9"), ["203.0.113.0/24"]))
+
+    def test_ssh_login_notification_has_persistent_cooldown(self):
+        record = {"server": "node-a", "user": "root", "source_ip": "203.0.113.9",
+                  "location": "中国广东深圳", "network": "中国电信", "auth_method": "unknown"}
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(EXPORTER, "STATE_DIR", directory), \
+                mock.patch.object(EXPORTER, "telegram_config", return_value={
+                    "token": "bot-token", "allowed_user_ids": [42], "allowed_chat_ids": [],
+                    "notification_cooldown_seconds": 600}), \
+                mock.patch.object(EXPORTER, "telegram_request") as send:
+            EXPORTER.notify_ssh_login(record)
+            EXPORTER.notify_ssh_login(record)
+            self.assertEqual(send.call_count, 1)
+            self.assertIn("203.0.113.9", send.call_args.args[2]["text"])
+
+    def test_ssh_login_http_endpoint_authenticates_writes_and_notifies_by_cidr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = pathlib.Path(directory) / "ssh-login-config.json"
+            config_path.write_text(json.dumps({"servers": {
+                "trusted-node": {"key": "a" * 64, "allowed_cidrs": ["192.0.2.0/24"]},
+                "unknown-node": {"key": "b" * 64, "allowed_cidrs": []},
+            }}), encoding="utf-8")
+            server = EXPORTER.ThreadingHTTPServer(("127.0.0.1", 0), EXPORTER.MetricsHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with mock.patch.object(EXPORTER, "SSH_LOGIN_CONFIG_FILE", str(config_path)), \
+                        mock.patch.object(EXPORTER, "push_loki") as push, \
+                        mock.patch.object(EXPORTER, "notify_ssh_login") as notify:
+                    timestamp = EXPORTER.datetime.now(EXPORTER.timezone.utc).isoformat()
+                    for name, key, source in (("trusted-node", "a" * 64, "192.0.2.9"),
+                                              ("unknown-node", "b" * 64, "198.51.100.9")):
+                        body = urllib.parse.urlencode({"server": name, "user": "root",
+                                                       "source_ip": source, "event_time": timestamp}).encode()
+                        request = urllib.request.Request(
+                            f"http://127.0.0.1:{server.server_port}/api/ssh-login", data=body,
+                            headers={"X-GLA-Key": key}, method="POST")
+                        with urllib.request.urlopen(request, timeout=3) as response:
+                            self.assertEqual(response.status, 204)
+                    self.assertEqual(push.call_count, 2)
+                    self.assertEqual(notify.call_count, 1)
+                    self.assertEqual(notify.call_args.args[0]["server"], "unknown-node")
+                    self.assertEqual(push.call_args.args[0][0]["stream"],
+                                     {"job": "ssh-login", "server": "unknown-node"})
+
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/api/ssh-login", data=b"server=unknown-node",
+                        headers={"X-GLA-Key": "wrong"}, method="POST")
+                    with self.assertRaises(urllib.error.HTTPError) as error:
+                        urllib.request.urlopen(request, timeout=3)
+                    self.assertEqual(error.exception.code, 403)
+                    self.assertEqual(push.call_count, 2)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
     def test_client_groups_are_scoped_per_panel_and_escape_metric_labels(self):
         clients_a = [{"email": "alice", "group": "shared", "traffic": {"up": 1}},
                      {"email": "same-email", "group": 'A"组\\线路', "traffic": {}},
