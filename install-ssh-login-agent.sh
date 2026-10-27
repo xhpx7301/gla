@@ -17,6 +17,19 @@ PAM_LINE='session optional pam_exec.so quiet type=open_session /usr/local/sbin/g
 
 die() { printf '错误：%s\n' "$*" >&2; exit 1; }
 
+restore_ssh_auth_config() {
+  if [ -e "$SSH_AUTH_INFO_FILE.gla-backup" ]; then
+    mv -f "$SSH_AUTH_INFO_FILE.gla-backup" "$SSH_AUTH_INFO_FILE"
+  else
+    rm -f "$SSH_AUTH_INFO_FILE"
+  fi
+  if [ -e "$SSH_INCLUDE_MARKER" ]; then
+    sed -i '\|^Include /etc/ssh/sshd_config.d/\*\.conf$|d' "$SSHD_CONFIG_FILE"
+    rm -f "$SSH_INCLUDE_MARKER"
+  fi
+  rm -f "$SSH_AUTH_INFO_MARKER"
+}
+
 if [ "$(id -u)" -ne 0 ]; then
   die "请使用 root 执行。"
 fi
@@ -47,36 +60,21 @@ case "$ACTION" in
       fi
       printf 'ExposeAuthInfo yes\n' >"$SSH_AUTH_INFO_FILE"
       chmod 0644 "$SSH_AUTH_INFO_FILE"
-      if ! sshd -t; then
-        if [ -e "$SSH_AUTH_INFO_FILE.gla-backup" ]; then
-          mv -f "$SSH_AUTH_INFO_FILE.gla-backup" "$SSH_AUTH_INFO_FILE"
+      if sshd_check="$(sshd -t 2>&1)"; then
+        if sshd -T 2>/dev/null | grep -Fqx 'exposeauthinfo yes'; then
+          : >"$SSH_AUTH_INFO_MARKER"
+          chmod 0600 "$SSH_AUTH_INFO_MARKER"
+          if command -v systemctl >/dev/null 2>&1; then
+            systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+          fi
         else
-          rm -f "$SSH_AUTH_INFO_FILE"
+          restore_ssh_auth_config
+          printf '警告：sshd 未启用 ExposeAuthInfo，继续安装登录告警；认证方式可能显示“未知”。\n' >&2
         fi
-        if [ -e "$SSH_INCLUDE_MARKER" ]; then
-          sed -i '\|^Include /etc/ssh/sshd_config.d/\*\.conf$|d' "$SSHD_CONFIG_FILE"
-          rm -f "$SSH_INCLUDE_MARKER"
-        fi
-        rm -f "$SSH_AUTH_INFO_MARKER"
-        die "启用 SSH 认证信息后 sshd 配置检查失败，已恢复原配置。"
-      fi
-      if ! sshd -T 2>/dev/null | grep -Fqx 'exposeauthinfo yes'; then
-        if [ -e "$SSH_AUTH_INFO_FILE.gla-backup" ]; then
-          mv -f "$SSH_AUTH_INFO_FILE.gla-backup" "$SSH_AUTH_INFO_FILE"
-        else
-          rm -f "$SSH_AUTH_INFO_FILE"
-        fi
-        if [ -e "$SSH_INCLUDE_MARKER" ]; then
-          sed -i '\|^Include /etc/ssh/sshd_config.d/\*\.conf$|d' "$SSHD_CONFIG_FILE"
-          rm -f "$SSH_INCLUDE_MARKER"
-        fi
-        rm -f "$SSH_AUTH_INFO_MARKER"
-        die "无法启用 SSH 认证方式识别，请检查 sshd 配置。"
-      fi
-      : >"$SSH_AUTH_INFO_MARKER"
-      chmod 0600 "$SSH_AUTH_INFO_MARKER"
-      if command -v systemctl >/dev/null 2>&1; then
-        systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+      else
+        restore_ssh_auth_config
+        printf '警告：sshd 配置检查未通过，已撤销认证方式配置并继续安装登录告警；认证方式可能显示“未知”。\n' >&2
+        [ -z "$sshd_check" ] || printf 'sshd 诊断：%s\n' "${sshd_check//$'\n'/; }" >&2
       fi
     fi
 

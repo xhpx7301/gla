@@ -71,6 +71,8 @@ class ExporterTest(unittest.TestCase):
         agent = (pathlib.Path(__file__).parents[1] / "install-ssh-login-agent.sh").read_text(encoding="utf-8")
         self.assertIn("Include /etc/ssh/sshd_config.d/*.conf", agent)
         self.assertIn("sshd-include-managed", agent)
+        self.assertIn("继续安装登录告警", agent)
+        self.assertIn("restore_ssh_auth_config", agent)
         self.assertIn("ExposeAuthInfo yes", agent)
         self.assertIn("SSH_USER_AUTH", agent)
         self.assertIn("auth_method='密钥认证'", agent)
