@@ -19,6 +19,25 @@ SPEC.loader.exec_module(EXPORTER)
 
 
 class ExporterTest(unittest.TestCase):
+    def test_ssh_login_management_cli_adds_updates_and_generates_child_command(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(EXPORTER, "SSH_LOGIN_CONFIG_FILE", str(pathlib.Path(directory) / "ssh-login.json")):
+            EXPORTER.ssh_login_cli(["set-url", "--url", "https://ssh.example.com/api/ssh-login"])
+            EXPORTER.ssh_login_cli(["add", "--name", "node-a", "--cidrs", "192.0.2.4/32,2001:db8::/64"])
+            config = json.loads(pathlib.Path(EXPORTER.SSH_LOGIN_CONFIG_FILE).read_text(encoding="utf-8"))
+            key = config["servers"]["node-a"]["key"]
+            self.assertRegex(key, r"^[a-f0-9]{64}$")
+            self.assertEqual(config["servers"]["node-a"]["allowed_cidrs"], ["192.0.2.4/32", "2001:db8::/64"])
+            output = io.StringIO()
+            with mock.patch("sys.stdout", output):
+                EXPORTER.ssh_login_cli(["install-command", "--name", "node-a"])
+            self.assertIn("SERVER_NAME=node-a", output.getvalue())
+            self.assertIn("SSH_LOGIN_URL=https://ssh.example.com/api/ssh-login", output.getvalue())
+            self.assertIn(f"SSH_LOGIN_KEY={key}", output.getvalue())
+            EXPORTER.ssh_login_cli(["set-cidrs", "--name", "node-a", "--cidrs", ""])
+            config = json.loads(pathlib.Path(EXPORTER.SSH_LOGIN_CONFIG_FILE).read_text(encoding="utf-8"))
+            self.assertEqual(config["servers"]["node-a"]["allowed_cidrs"], [])
+
     def test_ssh_login_cidr_allowlist_supports_ipv4_and_ipv6(self):
         self.assertTrue(EXPORTER.ssh_login_ip_allowed(
             EXPORTER.ipaddress.ip_address("203.0.113.9"), ["203.0.113.0/24"]))

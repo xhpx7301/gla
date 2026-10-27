@@ -1041,6 +1041,7 @@ show_header() {
   printf 'VictoriaMetrics 指标存储  %s\n' "$(container_state gla-victoriametrics)"
   printf 'Alloy 安全与资源采集      %s\n' "$(container_state xray-alloy)"
   printf '3x-ui API 流量与日志采集  %s\n' "$(xui_state)"
+  printf 'SSH 登录告警             %s\n' "$(ssh_login_state)"
   if grep -Eq '^ENABLE_GEOIP=true$' "$STACK_DIR/.install.env" 2>/dev/null; then
     printf 'GeoIP 归属解析            [已启用]\n'
   else
@@ -1251,6 +1252,71 @@ telegram_command() {
     python:3.12-alpine python3 /app/xui_exporter.py telegram "$@"
 }
 
+ssh_login_command() {
+  docker run --rm -i --network none \
+    -e XUI_SSH_LOGIN_CONFIG_FILE=/run/secrets/ssh-login-config.json \
+    -v "$STACK_DIR/secrets:/run/secrets" \
+    -v "$STACK_DIR/assets/xui_exporter.py:/app/xui_exporter.py:ro" \
+    python:3.12-alpine python3 /app/xui_exporter.py ssh-login "$@"
+}
+
+ssh_login_state() {
+  if [ ! -f "$STACK_DIR/secrets/ssh-login-config.json" ]; then
+    printf '[未配置]'
+  else
+    local count
+    count="$(ssh_login_command status 2>/dev/null | cut -d'台' -f1 | awk '{print $1}')"
+    printf '[%s 台已登记]' "${count:-0}"
+  fi
+}
+
+configure_ssh_login() {
+  local action name cidrs url
+  while true; do
+    printf '\nSSH 登录告警管理\n\n'
+    ssh_login_command list || true
+    printf '\n1. 设置或修改 HTTPS 接收地址\n2. 添加服务器并生成密钥\n3. 修改可信来源 IP\n4. 生成子服务器安装命令\n5. 删除服务器\n0. 返回\n'
+    read -rp '请选择 [0-5]: ' action
+    case "$action" in
+      0) return 0 ;;
+      1)
+        read -rp 'HTTPS 接收地址（例 https://ssh.example.com/api/ssh-login）: ' url
+        ssh_login_command set-url --url "$url"
+        ;;
+      2)
+        read -rp '服务器名称（仅字母、数字、点、下划线、连字符）: ' name
+        read -rp '可信登录来源 CIDR，多个用逗号分隔；留空表示全部告警: ' cidrs
+        if [ -z "$cidrs" ] && ! confirm '未设置可信来源，所有成功登录都会触发告警。继续添加？'; then
+          printf '已取消。\n'
+        else
+          ssh_login_command add --name "$name" --cidrs "$cidrs" && printf '服务器已添加，请用“生成子服务器安装命令”获取安装命令。\n'
+        fi
+        ;;
+      3)
+        read -rp '服务器名称: ' name
+        read -rp '可信登录来源 CIDR，多个用逗号分隔；留空表示全部告警: ' cidrs
+        if [ -z "$cidrs" ] && ! confirm '留空后所有成功登录都会触发告警。继续修改？'; then
+          printf '已取消。\n'
+        else
+          ssh_login_command set-cidrs --name "$name" --cidrs "$cidrs"
+        fi
+        ;;
+      4)
+        read -rp '服务器名称: ' name
+        printf '\n以下命令请在对应子服务器以 root 执行：\n'
+        ssh_login_command install-command --name "$name"
+        ;;
+      5)
+        read -rp '要删除的服务器名称: ' name
+        if confirm "删除 $name 的告警配置？子服务器采集脚本不会自动卸载"; then
+          ssh_login_command delete --name "$name"
+        fi
+        ;;
+      *) printf '无效选择。\n' ;;
+    esac
+  done
+}
+
 configure_telegram() {
   local action token ids
   while true; do
@@ -1416,26 +1482,28 @@ while true; do
 0. 退出
 1. 更新配置、脚本与仪表盘
 2. 管理 3x-ui API 面板（本机与远程的流量、访问日志）
-3. 管理 Telegram Bot（分组通知与在线查询）
-4. 服务控制
-5. 查看运行状态与资源占用
-6. 查看服务日志
-7. 查看访问地址、凭据与模块
-8. 更新容器镜像
-9. 卸载并删除全部数据
+3. 管理 SSH 登录告警（多服务器与可信 IP）
+4. 管理 Telegram Bot（分组通知与在线查询）
+5. 服务控制
+6. 查看运行状态与资源占用
+7. 查看服务日志
+8. 查看访问地址、凭据与模块
+9. 更新容器镜像
+10. 卸载并删除全部数据
 MENU
-  read -rp "请输入操作编号 [0-9]: " choice
+  read -rp "请输入操作编号 [0-10]: " choice
   case "$choice" in
     0) exit 0 ;;
     1) update_script_and_deploy; exit $? ;;
     2) configure_api_panels; pause ;;
-    3) configure_telegram; pause ;;
-    4) service_control_menu ;;
-    5) show_status; pause ;;
-    6) show_logs; pause ;;
-    7) show_access_info; pause ;;
-    8) update_stack; pause ;;
-    9) uninstall_everything ;;
+    3) configure_ssh_login; pause ;;
+    4) configure_telegram; pause ;;
+    5) service_control_menu ;;
+    6) show_status; pause ;;
+    7) show_logs; pause ;;
+    8) show_access_info; pause ;;
+    9) update_stack; pause ;;
+    10) uninstall_everything ;;
     *) printf '无效选择。\n'; pause ;;
   esac
 done

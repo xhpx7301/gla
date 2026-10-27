@@ -15,6 +15,8 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
+import shlex
 import sqlite3
 import sys
 import tempfile
@@ -1922,12 +1924,77 @@ def telegram_cli(argv):
                                    "notification_cooldown_seconds": cooldown}, ensure_ascii=False, indent=2) + "\n")
 
 
+def ssh_login_cli(argv):
+    parser = argparse.ArgumentParser(description="管理 SSH 登录告警服务器配置")
+    parser.add_argument("operation", choices=("list", "status", "set-url", "add", "set-cidrs", "delete", "install-command"))
+    parser.add_argument("--name")
+    parser.add_argument("--cidrs", default="")
+    parser.add_argument("--url")
+    args = parser.parse_args(argv)
+    path = Path(SSH_LOGIN_CONFIG_FILE)
+    config = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"servers": {}}
+    if not isinstance(config, dict) or not isinstance(config.get("servers", {}), dict):
+        raise ValueError("SSH 告警配置格式无效")
+    servers = config.setdefault("servers", {})
+    if args.operation == "status":
+        print(f"{len(servers)} 台服务器；接收地址：{'已设置' if config.get('ingest_url') else '未设置'}")
+        return
+    if args.operation == "list":
+        if not servers:
+            print("尚未添加服务器")
+        for name, item in sorted(servers.items()):
+            cidrs = item.get("allowed_cidrs", [])
+            print(f"{name}\t可信来源={', '.join(cidrs) if cidrs else '无（所有登录均告警）'}")
+        if config.get("ingest_url"):
+            print(f"接收地址：{config['ingest_url']}")
+        return
+    if args.operation == "delete":
+        if not args.name or args.name not in servers:
+            raise ValueError("服务器不存在")
+        del servers[args.name]
+    elif args.operation == "add":
+        if not args.name or not NAME_RE.fullmatch(args.name):
+            raise ValueError("服务器名称只能使用字母、数字、点、下划线和连字符")
+        if args.name in servers:
+            raise ValueError("该服务器名称已存在")
+        cidrs = [value.strip() for value in args.cidrs.split(",") if value.strip()]
+        for cidr in cidrs:
+            ipaddress.ip_network(cidr, strict=False)
+        servers[args.name] = {"key": secrets.token_hex(32), "allowed_cidrs": cidrs}
+    elif args.operation == "set-cidrs":
+        if not args.name or args.name not in servers:
+            raise ValueError("服务器不存在")
+        cidrs = [value.strip() for value in args.cidrs.split(",") if value.strip()]
+        for cidr in cidrs:
+            ipaddress.ip_network(cidr, strict=False)
+        servers[args.name]["allowed_cidrs"] = cidrs
+    elif args.operation == "install-command":
+        if not args.name or args.name not in servers:
+            raise ValueError("服务器不存在")
+        url = args.url or config.get("ingest_url", "")
+        if not re.fullmatch(r"https://[A-Za-z0-9.-]+(?::[0-9]+)?/api/ssh-login", url):
+            raise ValueError("请先设置有效的 HTTPS 接收地址")
+        key = servers[args.name]["key"]
+        print(f"SERVER_NAME={shlex.quote(args.name)} SSH_LOGIN_URL={shlex.quote(url)} "
+              f"SSH_LOGIN_KEY={shlex.quote(key)} bash <(curl -fsSL "
+              "https://raw.githubusercontent.com/xhpx7301/gla/main/install-ssh-login-agent.sh)")
+        return
+    elif args.operation == "set-url":
+        if not args.url or not re.fullmatch(r"https://[A-Za-z0-9.-]+(?::[0-9]+)?/api/ssh-login", args.url):
+            raise ValueError("接收地址必须是 HTTPS URL，并以 /api/ssh-login 结尾")
+        config["ingest_url"] = args.url
+    atomic_write(path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "panels":
         panels_cli(sys.argv[2:])
         return
     if len(sys.argv) > 1 and sys.argv[1] == "telegram":
         telegram_cli(sys.argv[2:])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "ssh-login":
+        ssh_login_cli(sys.argv[2:])
         return
     if PANELS_FILE:
         panels = load_config(PANELS_FILE)

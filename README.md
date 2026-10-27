@@ -84,29 +84,9 @@ Telegram 左下角的原生菜单按钮由 Telegram 客户端控制文字，Bot 
 
 SSH 登录告警可不在子服务器运行 Alloy。PAM 在 SSH 会话成功打开时触发本地脚本，脚本用 `systemd-run` 异步发送一条 HTTPS 事件到中心端；发送失败不会阻止 SSH 登录。中心端将事件写入现有 Loki，并按服务器独立的 CIDR 白名单决定是否向 Telegram Bot 授权用户发送告警。Grafana 的“SSH 登录记录”仪表盘可按服务器筛选全部成功会话。
 
-中心端重新运行 `gla` 更新部署后，在 Nginx Proxy Manager 添加 HTTPS Proxy Host：转发主机 `gla-xui-exporter`、端口 `9105`，域名路径由该 Host 根路径转发。该入口在容器网络内提供，公网访问必须启用 TLS；事件接口还要求每台服务器的独立密钥。不要给该 Proxy Host 配置会重写 `/api/ssh-login` 路径的自定义规则。
+在中心服务器运行 `gla` 并选择“3. 管理 SSH 登录告警”，使用菜单设置 HTTPS 接收地址、添加服务器、设置可信来源 CIDR，并生成子服务器安装命令。每台服务器自动使用独立随机密钥，安全保存在中心端 `secrets/ssh-login-config.json` 中；不需要手动编辑配置文件或重启容器。菜单状态栏会显示已登记的服务器数量。
 
-为每台服务器生成独立密钥，并在中心端 `/opt/xray-log-dashboard/secrets/ssh-login-config.json` 中配置服务器名称、密钥和可信来源网段。空白名单表示所有登录都属于陌生 IP：
-
-```json
-{
-  "servers": {
-    "server-a": {
-      "key": "替换为64位十六进制随机密钥",
-      "allowed_cidrs": ["203.0.113.8/32", "2001:db8::8/128"]
-    }
-  }
-}
-```
-
-可用 `openssl rand -hex 32` 生成密钥。该配置文件应保持权限 `600`，密钥只用于对应服务器；配置后执行 `docker compose -f /opt/xray-log-dashboard/compose.yaml restart xui-exporter`。在子服务器以 root 执行安装命令，替换服务器名、中心端 HTTPS 域名和该服务器密钥：
-
-```bash
-SERVER_NAME=server-a \
-SSH_LOGIN_URL=https://ssh-ingest.example.com/api/ssh-login \
-SSH_LOGIN_KEY=替换为对应密钥 \
-bash <(curl -fsSL https://raw.githubusercontent.com/xhpx7301/gla/main/install-ssh-login-agent.sh)
-```
+接收地址要求指向 Nginx Proxy Manager 的 HTTPS Proxy Host：转发主机 `gla-xui-exporter`、端口 `9105`，域名路径由该 Host 根路径转发。公网访问必须启用 TLS；不要配置会重写 `/api/ssh-login` 路径的规则。可信来源填写你日常登录所用的公网 IP/CIDR；留空表示该服务器的所有成功登录都会通知。菜单生成的安装命令需在对应子服务器以 root 执行。
 
 安装脚本会在 `/etc/pam.d/sshd` 增加可选的 PAM session hook，并把密钥保存在 root-only 的 `/etc/gla/ssh-login.env`。卸载时运行 `bash <(curl -fsSL https://raw.githubusercontent.com/xhpx7301/gla/main/install-ssh-login-agent.sh) uninstall`，PAM 原文件备份保留在 `/etc/pam.d/sshd.gla-backup`。建议先保持当前 SSH 管理会话，再用第二个会话验证配置，避免误配置 PAM 影响登录。
 
