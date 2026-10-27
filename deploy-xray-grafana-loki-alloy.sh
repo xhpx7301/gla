@@ -1325,13 +1325,102 @@ select_ssh_login_server() {
   SELECTED_SSH_NAME="${names[$((choice - 1))]}"
 }
 
+select_ssh_ip_groups() {
+  local rows choice name cidrs i=0 selected_index
+  local -a names=() selected=() choices=()
+  rows="$(ssh_login_command list-groups --format tsv)" || return 1
+  if [ -z "$rows" ]; then
+    printf '尚未建立可信来源 IP 组；可先返回并进入 IP 组管理添加。\n'
+    SELECTED_IP_GROUPS=""
+    return 0
+  fi
+  printf '可选可信来源 IP 组：\n'
+  while IFS=$'\t' read -r name cidrs; do
+    names+=("$name")
+    i=$((i + 1))
+    printf '%s. %s  [%s]\n' "$i" "$name" "$cidrs"
+  done <<<"$rows"
+  read -rp "输入组编号，可多选并用逗号分隔；留空或 0 表示不选: " choice
+  SELECTED_IP_GROUPS=""
+  [ -z "$choice" ] && return 0
+  IFS=',' read -ra choices <<<"$choice"
+  for selected_index in "${choices[@]}"; do
+    selected_index="${selected_index//[[:space:]]/}"
+    [ "$selected_index" = 0 ] && continue
+    if [[ ! "$selected_index" =~ ^[0-9]+$ ]] || [ "$selected_index" -lt 1 ] || [ "$selected_index" -gt "$i" ]; then
+      return 1
+    fi
+    selected+=("${names[$((selected_index - 1))]}")
+  done
+  SELECTED_IP_GROUPS="$(IFS=,; printf '%s' "${selected[*]}")"
+}
+
+select_ssh_ip_group() {
+  local rows choice name cidrs i=0
+  local -a names=()
+  rows="$(ssh_login_command list-groups --format tsv)" || return 1
+  if [ -z "$rows" ]; then
+    printf '尚未添加可信来源 IP 组。\n'
+    return 1
+  fi
+  while IFS=$'\t' read -r name cidrs; do
+    names+=("$name")
+    i=$((i + 1))
+    printf '%s. %s  [%s]\n' "$i" "$name" "$cidrs"
+  done <<<"$rows"
+  read -rp "请选择 IP 组 [1-$i]，0 返回: " choice
+  if [[ ! "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt "$i" ]; then
+    return 1
+  fi
+  SELECTED_IP_GROUP="${names[$((choice - 1))]}"
+}
+
+configure_ssh_ip_groups() {
+  local action name cidrs
+  while true; do
+    printf '\n可信来源 IP 组管理\n\n'
+    ssh_login_command list-groups || true
+    printf '\n1. 查询 IP 组\n2. 添加 IP 组\n3. 修改 IP 组\n4. 删除 IP 组\n0. 返回\n'
+    read -rp '请选择 [0-4]: ' action
+    case "$action" in
+      0) return 0 ;;
+      1) ssh_login_command list-groups ;;
+      2)
+        read -rp 'IP 组名称（仅字母、数字、点、下划线、连字符）: ' name
+        read -rp '可信来源 CIDR，多个用逗号分隔: ' cidrs
+        ssh_login_command add-group --name "$name" --cidrs "$cidrs"
+        ;;
+      3)
+        if ! select_ssh_ip_group; then
+          printf '未选择 IP 组。\n'
+          continue
+        fi
+        name="$SELECTED_IP_GROUP"
+        read -rp '新的可信来源 CIDR，多个用逗号分隔: ' cidrs
+        ssh_login_command set-group --name "$name" --cidrs "$cidrs"
+        ;;
+      4)
+        if ! select_ssh_ip_group; then
+          printf '未选择 IP 组。\n'
+          continue
+        fi
+        name="$SELECTED_IP_GROUP"
+        if confirm "删除 IP 组 $name？关联服务器会解除该组并对这些来源触发告警"; then
+          ssh_login_command delete-group --name "$name"
+        fi
+        ;;
+      *) printf '无效选择。\n' ;;
+    esac
+  done
+}
+
 configure_ssh_login() {
   local action name cidrs url
   while true; do
     printf '\nSSH 登录告警管理\n\n'
     ssh_login_command list || true
-    printf '\n1. 设置或修改 HTTPS 接收地址\n2. 添加服务器并生成密钥\n3. 修改可信来源 IP\n4. 生成子服务器安装命令\n5. 删除服务器\n0. 返回\n'
-    read -rp '请选择 [0-5]: ' action
+    printf '\n1. 设置或修改 HTTPS 接收地址\n2. 添加服务器并生成密钥\n3. 设置服务器的可信来源 IP 组\n4. 生成子服务器安装命令\n5. 删除服务器\n6. 管理可信来源 IP 组\n0. 返回\n'
+    read -rp '请选择 [0-6]: ' action
     case "$action" in
       0) return 0 ;;
       1)
@@ -1340,11 +1429,14 @@ configure_ssh_login() {
         ;;
       2)
         read -rp '服务器名称（仅字母、数字、点、下划线、连字符）: ' name
-        read -rp '可信登录来源 CIDR，多个用逗号分隔；留空表示全部告警: ' cidrs
-        if [ -z "$cidrs" ] && ! confirm '未设置可信来源，所有成功登录都会触发告警。继续添加？'; then
+        if ! select_ssh_ip_groups; then
+          printf '可信来源 IP 组选择无效。\n'
+          continue
+        fi
+        if [ -z "$SELECTED_IP_GROUPS" ] && ! confirm '未选择可信来源组，所有成功登录都会触发告警。继续添加？'; then
           printf '已取消。\n'
         else
-          ssh_login_command add --name "$name" --cidrs "$cidrs" && printf '服务器已添加，请用“生成子服务器安装命令”获取安装命令。\n'
+          ssh_login_command add --name "$name" --groups "$SELECTED_IP_GROUPS" && printf '服务器已添加，请用“生成子服务器安装命令”获取安装命令。\n'
         fi
         ;;
       3)
@@ -1353,11 +1445,14 @@ configure_ssh_login() {
           continue
         fi
         name="$SELECTED_SSH_NAME"
-        read -rp '可信登录来源 CIDR，多个用逗号分隔；留空表示全部告警: ' cidrs
-        if [ -z "$cidrs" ] && ! confirm '留空后所有成功登录都会触发告警。继续修改？'; then
+        if ! select_ssh_ip_groups; then
+          printf '可信来源 IP 组选择无效。\n'
+          continue
+        fi
+        if [ -z "$SELECTED_IP_GROUPS" ] && ! confirm '未选择可信来源组，该服务器的所有成功登录都会触发告警。继续修改？'; then
           printf '已取消。\n'
         else
-          ssh_login_command set-cidrs --name "$name" --cidrs "$cidrs"
+          ssh_login_command set-groups --name "$name" --groups "$SELECTED_IP_GROUPS"
         fi
         ;;
       4)
@@ -1379,6 +1474,7 @@ configure_ssh_login() {
           ssh_login_command delete --name "$name"
         fi
         ;;
+      6) configure_ssh_ip_groups ;;
       *) printf '无效选择。\n' ;;
     esac
   done

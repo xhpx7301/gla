@@ -37,7 +37,7 @@ class ExporterTest(unittest.TestCase):
             output = io.StringIO()
             with mock.patch("sys.stdout", output):
                 EXPORTER.ssh_login_cli(["list", "--format", "tsv"])
-            self.assertEqual(output.getvalue().splitlines(), ["node-a\t192.0.2.4/32, 2001:db8::/64"])
+            self.assertEqual(output.getvalue().splitlines(), ["node-a\tCIDR=192.0.2.4/32,2001:db8::/64"])
             output = io.StringIO()
             with mock.patch("sys.stdout", output):
                 EXPORTER.ssh_login_cli(["status", "--format", "tsv"])
@@ -45,11 +45,24 @@ class ExporterTest(unittest.TestCase):
             EXPORTER.ssh_login_cli(["set-cidrs", "--name", "node-a", "--cidrs", ""])
             config = json.loads(pathlib.Path(EXPORTER.SSH_LOGIN_CONFIG_FILE).read_text(encoding="utf-8"))
             self.assertEqual(config["servers"]["node-a"]["allowed_cidrs"], [])
+            EXPORTER.ssh_login_cli(["add-group", "--name", "office", "--cidrs", "192.0.2.0/24,2001:db8::/64"])
+            EXPORTER.ssh_login_cli(["set-groups", "--name", "node-a", "--groups", "office"])
+            config = json.loads(pathlib.Path(EXPORTER.SSH_LOGIN_CONFIG_FILE).read_text(encoding="utf-8"))
+            self.assertEqual(config["servers"]["node-a"]["allowed_ip_groups"], ["office"])
+            self.assertEqual(config["servers"]["node-a"]["allowed_cidrs"], [])
+            EXPORTER.ssh_login_cli(["set-group", "--name", "office", "--cidrs", "198.51.100.0/24"])
+            config = json.loads(pathlib.Path(EXPORTER.SSH_LOGIN_CONFIG_FILE).read_text(encoding="utf-8"))
+            self.assertEqual(config["ip_groups"]["office"], ["198.51.100.0/24"])
+            EXPORTER.ssh_login_cli(["delete-group", "--name", "office"])
+            config = json.loads(pathlib.Path(EXPORTER.SSH_LOGIN_CONFIG_FILE).read_text(encoding="utf-8"))
+            self.assertEqual(config["servers"]["node-a"]["allowed_ip_groups"], [])
         manager = (pathlib.Path(__file__).parents[1] / "deploy-xray-grafana-loki-alloy.sh").read_text(encoding="utf-8")
         self.assertGreaterEqual(manager.count("if ! select_ssh_login_server; then"), 3)
         self.assertEqual(manager.count("read -rp '服务器名称（仅字母、数字、点、下划线、连字符）: ' name"), 1)
         self.assertNotIn("cut -d'台'", manager)
         self.assertIn("[已启用 %s 台]", manager)
+        self.assertIn("select_ssh_ip_groups", manager)
+        self.assertIn("configure_ssh_ip_groups", manager)
         agent = (pathlib.Path(__file__).parents[1] / "install-ssh-login-agent.sh").read_text(encoding="utf-8")
         self.assertIn("ExposeAuthInfo yes", agent)
         self.assertIn("SSH_USER_AUTH", agent)
@@ -89,8 +102,9 @@ class ExporterTest(unittest.TestCase):
             config_path = pathlib.Path(directory) / "ssh-login-config.json"
             config_path.write_text(json.dumps({"servers": {
                 "trusted-node": {"key": "a" * 64, "allowed_cidrs": ["192.0.2.0/24"]},
+                "office-node": {"key": "c" * 64, "allowed_cidrs": [], "allowed_ip_groups": ["office"]},
                 "unknown-node": {"key": "b" * 64, "allowed_cidrs": []},
-            }}), encoding="utf-8")
+            }, "ip_groups": {"office": ["203.0.113.0/24"]}}), encoding="utf-8")
             server = EXPORTER.ThreadingHTTPServer(("127.0.0.1", 0), EXPORTER.MetricsHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -100,6 +114,7 @@ class ExporterTest(unittest.TestCase):
                         mock.patch.object(EXPORTER, "notify_ssh_login") as notify:
                     timestamp = EXPORTER.datetime.now(EXPORTER.timezone.utc).isoformat()
                     for name, key, source in (("trusted-node", "a" * 64, "192.0.2.9"),
+                                              ("office-node", "c" * 64, "203.0.113.9"),
                                               ("unknown-node", "b" * 64, "198.51.100.9")):
                         body = urllib.parse.urlencode({"server": name, "user": "root",
                                                        "source_ip": source, "ssh_port": "28377",
@@ -109,7 +124,7 @@ class ExporterTest(unittest.TestCase):
                             headers={"X-GLA-Key": key}, method="POST")
                         with urllib.request.urlopen(request, timeout=3) as response:
                             self.assertEqual(response.status, 204)
-                    self.assertEqual(push.call_count, 2)
+                    self.assertEqual(push.call_count, 3)
                     self.assertEqual(notify.call_count, 1)
                     self.assertEqual(notify.call_args.args[0]["server"], "unknown-node")
                     self.assertEqual(notify.call_args.args[0]["ssh_port"], "28377")
@@ -123,7 +138,7 @@ class ExporterTest(unittest.TestCase):
                     with self.assertRaises(urllib.error.HTTPError) as error:
                         urllib.request.urlopen(request, timeout=3)
                     self.assertEqual(error.exception.code, 403)
-                    self.assertEqual(push.call_count, 2)
+                    self.assertEqual(push.call_count, 3)
             finally:
                 server.shutdown()
                 server.server_close()

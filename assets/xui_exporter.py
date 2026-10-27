@@ -1718,7 +1718,13 @@ class MetricsHandler(BaseHTTPRequestHandler):
         except ERRORS as error:
             loki_ok = False
             print(f"SSH 登录事件 Loki 写入失败 ({error_kind(error)})", file=sys.stderr, flush=True)
-        if not ssh_login_ip_allowed(address, server_config.get("allowed_cidrs", [])):
+        ip_groups = config.get("ip_groups", {}) if isinstance(config, dict) else {}
+        allowed_cidrs = list(server_config.get("allowed_cidrs", []))
+        for group_name in server_config.get("allowed_ip_groups", []):
+            group_cidrs = ip_groups.get(group_name, []) if isinstance(ip_groups, dict) else []
+            if isinstance(group_cidrs, list):
+                allowed_cidrs.extend(group_cidrs)
+        if not ssh_login_ip_allowed(address, allowed_cidrs):
             notify_ssh_login(record)
         self.send_response(204 if loki_ok else 503)
         self.send_header("Content-Length", "0")
@@ -1928,9 +1934,12 @@ def telegram_cli(argv):
 
 def ssh_login_cli(argv):
     parser = argparse.ArgumentParser(description="管理 SSH 登录告警服务器配置")
-    parser.add_argument("operation", choices=("list", "status", "set-url", "add", "set-cidrs", "delete", "install-command"))
+    parser.add_argument("operation", choices=("list", "status", "set-url", "add", "set-cidrs", "set-groups",
+                                               "list-groups", "add-group", "set-group", "delete-group",
+                                               "delete", "install-command"))
     parser.add_argument("--name")
     parser.add_argument("--cidrs", default="")
+    parser.add_argument("--groups", default="")
     parser.add_argument("--url")
     parser.add_argument("--format", choices=("display", "tsv"), default="display")
     args = parser.parse_args(argv)
@@ -1939,6 +1948,9 @@ def ssh_login_cli(argv):
     if not isinstance(config, dict) or not isinstance(config.get("servers", {}), dict):
         raise ValueError("SSH 告警配置格式无效")
     servers = config.setdefault("servers", {})
+    groups = config.setdefault("ip_groups", {})
+    if not isinstance(groups, dict):
+        raise ValueError("可信来源 IP 组配置格式无效")
     if args.operation == "status":
         if args.format == "tsv":
             print(f"{len(servers)}\t{1 if config.get('ingest_url') else 0}")
@@ -1950,13 +1962,55 @@ def ssh_login_cli(argv):
             print("尚未添加服务器")
         for name, item in sorted(servers.items()):
             cidrs = item.get("allowed_cidrs", [])
-            trusted = ", ".join(cidrs) if cidrs else "无（所有登录均告警）"
+            group_names = item.get("allowed_ip_groups", [])
+            trusted_parts = []
+            if group_names:
+                trusted_parts.append("组=" + ",".join(group_names))
+            if cidrs:
+                trusted_parts.append("CIDR=" + ",".join(cidrs))
+            trusted = "; ".join(trusted_parts) if trusted_parts else "无（所有登录均告警）"
             if args.format == "tsv":
                 print(f"{name}\t{trusted}")
             else:
                 print(f"{name}\t可信来源={trusted}")
         if args.format == "display" and config.get("ingest_url"):
             print(f"接收地址：{config['ingest_url']}")
+        return
+    if args.operation == "list-groups":
+        for name, cidrs in sorted(groups.items()):
+            if args.format == "tsv":
+                print(f"{name}\t{', '.join(cidrs)}")
+            else:
+                assigned = sum(name in item.get("allowed_ip_groups", []) for item in servers.values()
+                               if isinstance(item, dict))
+                print(f"{name}\t{', '.join(cidrs)}\t已分配服务器={assigned}")
+        if not groups and args.format == "display":
+            print("尚未添加可信来源 IP 组")
+        return
+    if args.operation in ("add-group", "set-group"):
+        if not args.name or not NAME_RE.fullmatch(args.name):
+            raise ValueError("IP 组名称只能使用字母、数字、点、下划线和连字符")
+        if args.operation == "add-group" and args.name in groups:
+            raise ValueError("IP 组名称已存在")
+        if args.operation == "set-group" and args.name not in groups:
+            raise ValueError("IP 组不存在")
+        cidrs = [value.strip() for value in args.cidrs.split(",") if value.strip()]
+        if not cidrs:
+            raise ValueError("IP 组至少需要一个可信来源 CIDR")
+        for cidr in cidrs:
+            ipaddress.ip_network(cidr, strict=False)
+        groups[args.name] = cidrs
+        atomic_write(path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+        return
+    if args.operation == "delete-group":
+        if not args.name or args.name not in groups:
+            raise ValueError("IP 组不存在")
+        del groups[args.name]
+        for item in servers.values():
+            if isinstance(item, dict):
+                item["allowed_ip_groups"] = [group for group in item.get("allowed_ip_groups", [])
+                                             if group != args.name]
+        atomic_write(path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
         return
     if args.operation == "delete":
         if not args.name or args.name not in servers:
@@ -1970,7 +2024,12 @@ def ssh_login_cli(argv):
         cidrs = [value.strip() for value in args.cidrs.split(",") if value.strip()]
         for cidr in cidrs:
             ipaddress.ip_network(cidr, strict=False)
-        servers[args.name] = {"key": secrets.token_hex(32), "allowed_cidrs": cidrs}
+        selected_groups = [value.strip() for value in args.groups.split(",") if value.strip()]
+        missing = sorted(set(selected_groups) - groups.keys())
+        if missing:
+            raise ValueError("未找到可信来源 IP 组：" + ", ".join(missing))
+        servers[args.name] = {"key": secrets.token_hex(32), "allowed_cidrs": cidrs,
+                              "allowed_ip_groups": sorted(set(selected_groups))}
     elif args.operation == "set-cidrs":
         if not args.name or args.name not in servers:
             raise ValueError("服务器不存在")
@@ -1978,6 +2037,15 @@ def ssh_login_cli(argv):
         for cidr in cidrs:
             ipaddress.ip_network(cidr, strict=False)
         servers[args.name]["allowed_cidrs"] = cidrs
+    elif args.operation == "set-groups":
+        if not args.name or args.name not in servers:
+            raise ValueError("服务器不存在")
+        selected_groups = [value.strip() for value in args.groups.split(",") if value.strip()]
+        missing = sorted(set(selected_groups) - groups.keys())
+        if missing:
+            raise ValueError("未找到可信来源 IP 组：" + ", ".join(missing))
+        servers[args.name]["allowed_ip_groups"] = sorted(set(selected_groups))
+        servers[args.name]["allowed_cidrs"] = []
     elif args.operation == "install-command":
         if not args.name or args.name not in servers:
             raise ValueError("服务器不存在")
