@@ -65,6 +65,7 @@ class ExporterTest(unittest.TestCase):
         self.assertIn("[已启用 %s 台]", manager)
         self.assertIn("select_ssh_ip_groups", manager)
         self.assertIn("configure_ssh_ip_groups", manager)
+        self.assertIn("1. 设置/修改 HTTPS 接收地址\\n2. 新增服务器（生成密钥）\\n3. 生成子服务器安装命令\\n4. 为服务器选择可信来源 IP 组\\n5. 管理可信来源 IP 组\\n6. 删除服务器\\n0. 返回", manager)
         self.assertIn("if ! configure_ssh_ip_groups; then", manager)
         self.assertIn("添加失败，已返回 SSH 登录告警菜单。", manager)
         self.assertEqual(manager.count("单个 IPv4 加 /32；IPv6 加 /128"), 2)

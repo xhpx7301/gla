@@ -1433,7 +1433,7 @@ configure_ssh_login() {
   while true; do
     printf '\nSSH 登录告警管理\n\n'
     ssh_login_command list || true
-    printf '\n1. 设置或修改 HTTPS 接收地址\n2. 添加服务器并生成密钥\n3. 设置服务器的可信来源 IP 组\n4. 生成子服务器安装命令\n5. 删除服务器\n6. 管理可信来源 IP 组\n0. 返回\n'
+    printf '\n1. 设置/修改 HTTPS 接收地址\n2. 新增服务器（生成密钥）\n3. 生成子服务器安装命令\n4. 为服务器选择可信来源 IP 组\n5. 管理可信来源 IP 组\n6. 删除服务器\n0. 返回\n'
     read -rp '请选择 [0-6]: ' action
     case "$action" in
       0) return 0 ;;
@@ -1460,7 +1460,7 @@ configure_ssh_login() {
           printf '服务器已添加，请用“生成子服务器安装命令”获取安装命令。\n'
         fi
         ;;
-      3)
+      4)
         if ! select_ssh_login_server; then
           printf '未选择服务器。\n'
           continue
@@ -1479,7 +1479,7 @@ configure_ssh_login() {
           fi
         fi
         ;;
-      4)
+      3)
         if ! select_ssh_login_server; then
           printf '未选择服务器。\n'
           continue
@@ -1491,7 +1491,7 @@ configure_ssh_login() {
           return 1
         fi
         ;;
-      5)
+      6)
         if ! select_ssh_login_server; then
           printf '未选择服务器。\n'
           continue
@@ -1504,7 +1504,7 @@ configure_ssh_login() {
           fi
         fi
         ;;
-      6)
+      5)
         if ! configure_ssh_ip_groups; then
           printf '已返回 SSH 登录告警菜单。\n'
         fi
