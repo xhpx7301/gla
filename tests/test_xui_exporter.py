@@ -115,8 +115,10 @@ class ExporterTest(unittest.TestCase):
             EXPORTER.notify_ssh_login(record)
             EXPORTER.notify_ssh_login(record)
             self.assertEqual(send.call_count, 1)
-            self.assertIn("203.0.113.9", send.call_args.args[2]["text"])
-            self.assertIn("SSH 端口：22", send.call_args.args[2]["text"])
+            notification = send.call_args.args[2]["text"]
+            self.assertIn("203.0.113.9", notification)
+            self.assertIn("SSH 端口：22", notification)
+            self.assertLess(notification.index("SSH 端口：22"), notification.index("来源 IP：203.0.113.9"))
 
     def test_ssh_login_http_endpoint_authenticates_writes_and_notifies_by_cidr(self):
         with tempfile.TemporaryDirectory() as directory:
