@@ -67,6 +67,7 @@ class ExporterTest(unittest.TestCase):
         self.assertIn("configure_ssh_ip_groups", manager)
         self.assertIn("if ! configure_ssh_ip_groups; then", manager)
         self.assertIn("添加失败，已返回 SSH 登录告警菜单。", manager)
+        self.assertEqual(manager.count("单个 IPv4 加 /32；IPv6 加 /128"), 2)
         agent = (pathlib.Path(__file__).parents[1] / "install-ssh-login-agent.sh").read_text(encoding="utf-8")
         self.assertIn("Include /etc/ssh/sshd_config.d/*.conf", agent)
         self.assertIn("sshd-include-managed", agent)

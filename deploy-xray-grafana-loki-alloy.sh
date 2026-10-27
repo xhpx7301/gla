@@ -1392,7 +1392,7 @@ configure_ssh_ip_groups() {
         ;;
       2)
         read -rp 'IP 组名称（仅字母、数字、点、下划线、连字符）: ' name
-        read -rp '可信来源 CIDR，多个用逗号分隔: ' cidrs
+        read -rp '可信来源 CIDR（单个 IPv4 加 /32；IPv6 加 /128；多个用逗号分隔，如 203.0.113.8/32,2001:db8::8/128）: ' cidrs
         if ! ssh_login_command add-group --name "$name" --cidrs "$cidrs"; then
           printf '添加失败，已返回 SSH 登录告警菜单。\n'
           return 1
@@ -1404,7 +1404,7 @@ configure_ssh_ip_groups() {
           continue
         fi
         name="$SELECTED_IP_GROUP"
-        read -rp '新的可信来源 CIDR，多个用逗号分隔: ' cidrs
+        read -rp '新的可信来源 CIDR（单个 IPv4 加 /32；IPv6 加 /128；多个用逗号分隔，如 203.0.113.8/32,2001:db8::8/128）: ' cidrs
         if ! ssh_login_command set-group --name "$name" --cidrs "$cidrs"; then
           printf '修改失败，已返回 SSH 登录告警菜单。\n'
           return 1
