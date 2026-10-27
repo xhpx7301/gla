@@ -18,6 +18,38 @@ if os.name == "nt":
 
 @unittest.skipUnless(BASH, "Bash is required for installer rendering")
 class ApiOnlyDeploymentTest(unittest.TestCase):
+    def test_center_connects_running_npm_to_shared_network_idempotently(self):
+        script = (ROOT / "deploy-xray-grafana-loki-alloy.sh").read_text(encoding="utf-8")
+        function = script[script.index("connect_npm_to_shared_network() {"):script.index("install_stack() {")]
+        harness = r'''set -Eeuo pipefail
+NPM_NETWORK=shared-proxy
+connected=0
+connect_calls=0
+docker() {
+  if [ "$1" = ps ]; then
+    printf 'nginx-proxy-manager\tjc21/nginx-proxy-manager:latest\n'
+  elif [ "$1" = network ] && [ "$2" = inspect ]; then
+    if [ "$connected" -eq 1 ] && [[ "$*" == *--format* ]]; then
+      printf 'nginx-proxy-manager\n'
+    fi
+  elif [ "$1" = network ] && [ "$2" = connect ]; then
+    connected=1
+    connect_calls=$((connect_calls + 1))
+  else
+    return 1
+  fi
+}
+''' + function + '''
+connect_npm_to_shared_network
+connect_npm_to_shared_network
+[ "$connect_calls" -eq 1 ]
+'''
+        result = subprocess.run([BASH, "-c", harness], text=True, encoding="utf-8",
+                                capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("已接入共享网络", result.stdout)
+        self.assertIn("已连接共享网络", result.stdout)
+
     def test_numbered_menu_update_with_enter_preserves_each_setting(self):
         script = (ROOT / "deploy-xray-grafana-loki-alloy.sh").read_text(encoding="utf-8")
         functions = script[script.index("select_api_panel() {"):script.index("update_stack() {")]

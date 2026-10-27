@@ -1708,6 +1708,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
             location, network = "归属地未知", "网络组织未知"
         record = {"event": "ssh_login", "server": server, "user": username,
                   "source_ip": str(address), "source_port": event.get("source_port", ""),
+                  "ssh_port": event.get("ssh_port", "22"),
                   "auth_method": event.get("auth_method", "unknown"),
                   "location": location, "network": network}
         loki_ok = True
@@ -1804,6 +1805,7 @@ def notify_ssh_login(record):
             f"🖥 服务器：{record['server']}\n"
             f"👤 用户：{record['user']}\n"
             f"🌐 来源 IP：{record['source_ip']}\n"
+            f"🔌 SSH 端口：{record.get('ssh_port', '未知')}\n"
             f"📍 归属地：{record['location']}\n"
             f"🏢 网络：{record['network']}\n"
             f"🔐 认证方式：{record['auth_method']}\n"

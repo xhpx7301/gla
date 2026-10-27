@@ -8,6 +8,11 @@ bash -n "$COLLECTOR"
 bash -n "$ROOT/deploy-xray-grafana-loki-alloy.sh"
 bash -n "$ROOT/deploy-xray-alloy-collector.sh"
 awk '
+  /cat >"\$AGENT_FILE" << '\''AGENT'\''/ { capture=1; next }
+  capture && $0 == "AGENT" { exit }
+  capture { print }
+' "$ROOT/install-ssh-login-agent.sh" | bash -n
+awk '
   /cat >.*MANAGER_PATH.*EOF/ { capture=1; next }
   capture && $0 == "EOF" { exit }
   capture { print }

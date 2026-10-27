@@ -50,6 +50,15 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(manager.count("read -rp '服务器名称（仅字母、数字、点、下划线、连字符）: ' name"), 1)
         self.assertNotIn("cut -d'台'", manager)
         self.assertIn("[已启用 %s 台]", manager)
+        agent = (pathlib.Path(__file__).parents[1] / "install-ssh-login-agent.sh").read_text(encoding="utf-8")
+        self.assertIn("ExposeAuthInfo yes", agent)
+        self.assertIn("SSH_USER_AUTH", agent)
+        self.assertIn("auth_method='密钥认证'", agent)
+        self.assertIn('Accepted $method for $username from $source_ip', agent)
+        self.assertIn('read -r _ source_port _ ssh_port <<<"${SSH_CONNECTION:-}"', agent)
+        self.assertIn('--data-urlencode "ssh_port=$ssh_port"', agent)
+        dashboard = json.loads((pathlib.Path(__file__).parents[1] / "dashboards/ssh-login.json").read_text(encoding="utf-8"))
+        self.assertIn("SSH端口={{.ssh_port}}", dashboard["panels"][2]["targets"][0]["expr"])
 
     def test_ssh_login_cidr_allowlist_supports_ipv4_and_ipv6(self):
         self.assertTrue(EXPORTER.ssh_login_ip_allowed(
@@ -61,7 +70,8 @@ class ExporterTest(unittest.TestCase):
 
     def test_ssh_login_notification_has_persistent_cooldown(self):
         record = {"server": "node-a", "user": "root", "source_ip": "203.0.113.9",
-                  "location": "中国广东深圳", "network": "中国电信", "auth_method": "unknown"}
+                  "location": "中国广东深圳", "network": "中国电信", "ssh_port": "22",
+                  "auth_method": "unknown"}
         with tempfile.TemporaryDirectory() as directory, \
                 mock.patch.object(EXPORTER, "STATE_DIR", directory), \
                 mock.patch.object(EXPORTER, "telegram_config", return_value={
@@ -72,6 +82,7 @@ class ExporterTest(unittest.TestCase):
             EXPORTER.notify_ssh_login(record)
             self.assertEqual(send.call_count, 1)
             self.assertIn("203.0.113.9", send.call_args.args[2]["text"])
+            self.assertIn("SSH 端口：22", send.call_args.args[2]["text"])
 
     def test_ssh_login_http_endpoint_authenticates_writes_and_notifies_by_cidr(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -91,7 +102,8 @@ class ExporterTest(unittest.TestCase):
                     for name, key, source in (("trusted-node", "a" * 64, "192.0.2.9"),
                                               ("unknown-node", "b" * 64, "198.51.100.9")):
                         body = urllib.parse.urlencode({"server": name, "user": "root",
-                                                       "source_ip": source, "event_time": timestamp}).encode()
+                                                       "source_ip": source, "ssh_port": "28377",
+                                                       "auth_method": "密钥认证", "event_time": timestamp}).encode()
                         request = urllib.request.Request(
                             f"http://127.0.0.1:{server.server_port}/api/ssh-login", data=body,
                             headers={"X-GLA-Key": key}, method="POST")
@@ -100,6 +112,8 @@ class ExporterTest(unittest.TestCase):
                     self.assertEqual(push.call_count, 2)
                     self.assertEqual(notify.call_count, 1)
                     self.assertEqual(notify.call_args.args[0]["server"], "unknown-node")
+                    self.assertEqual(notify.call_args.args[0]["ssh_port"], "28377")
+                    self.assertEqual(notify.call_args.args[0]["auth_method"], "密钥认证")
                     self.assertEqual(push.call_args.args[0][0]["stream"],
                                      {"job": "ssh-login", "server": "unknown-node"})
 

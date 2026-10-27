@@ -292,11 +292,36 @@ prepare_asn_database() {
   esac
 }
 
+connect_npm_to_shared_network() {
+  local container attached found=0
+  local -a npm_containers=()
+  mapfile -t npm_containers < <(
+    docker ps --format '{{.Names}}\t{{.Image}}' |
+      awk -F '\t' 'tolower($1) ~ /nginx-proxy-manager/ || tolower($2) ~ /nginx-proxy-manager/ { print $1 }'
+  )
+  if [ "${#npm_containers[@]}" -eq 0 ]; then
+    printf '未发现运行中的 Nginx Proxy Manager，跳过自动网络接入。\n' >&2
+    return 0
+  fi
+  attached="$(docker network inspect --format '{{range .Containers}}{{println .Name}}{{end}}' "$NPM_NETWORK")"
+  for container in "${npm_containers[@]}"; do
+    found=1
+    if ! printf '%s\n' "$attached" | grep -Fxq "$container"; then
+      docker network connect "$NPM_NETWORK" "$container"
+      printf 'Nginx Proxy Manager %s 已接入共享网络：%s\n' "$container" "$NPM_NETWORK"
+    else
+      printf 'Nginx Proxy Manager %s 已连接共享网络：%s\n' "$container" "$NPM_NETWORK"
+    fi
+  done
+  [ "$found" -eq 1 ]
+}
+
 install_stack() {
   prepare_geoip_database
   prepare_asn_database
   require_install_prerequisites
   docker network inspect "$NPM_NETWORK" >/dev/null 2>&1 || docker network create "$NPM_NETWORK" >/dev/null
+  connect_npm_to_shared_network
 
   if [ -d /var/log/journal ] && [ -n "$(find /var/log/journal -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
     JOURNAL_PATH_HOST=/var/log/journal
