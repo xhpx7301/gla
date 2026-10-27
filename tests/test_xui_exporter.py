@@ -1,7 +1,9 @@
 import importlib.util
 import io
 import json
+import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 import threading
@@ -63,7 +65,11 @@ class ExporterTest(unittest.TestCase):
         self.assertIn("[已启用 %s 台]", manager)
         self.assertIn("select_ssh_ip_groups", manager)
         self.assertIn("configure_ssh_ip_groups", manager)
+        self.assertIn("if ! configure_ssh_ip_groups; then", manager)
+        self.assertIn("添加失败，已返回 SSH 登录告警菜单。", manager)
         agent = (pathlib.Path(__file__).parents[1] / "install-ssh-login-agent.sh").read_text(encoding="utf-8")
+        self.assertIn("Include /etc/ssh/sshd_config.d/*.conf", agent)
+        self.assertIn("sshd-include-managed", agent)
         self.assertIn("ExposeAuthInfo yes", agent)
         self.assertIn("SSH_USER_AUTH", agent)
         self.assertIn("auth_method='密钥认证'", agent)
@@ -72,6 +78,18 @@ class ExporterTest(unittest.TestCase):
         self.assertIn('--data-urlencode "ssh_port=$ssh_port"', agent)
         dashboard = json.loads((pathlib.Path(__file__).parents[1] / "dashboards/ssh-login.json").read_text(encoding="utf-8"))
         self.assertIn("SSH端口={{.ssh_port}}", dashboard["panels"][2]["targets"][0]["expr"])
+
+    def test_ssh_login_cli_reports_the_cidr_validation_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = pathlib.Path(directory) / "ssh-login.json"
+            result = subprocess.run(
+                [sys.executable, str(MODULE_PATH), "ssh-login", "add-group", "--name", "office",
+                 "--cidrs", "not-an-ip"],
+                env={**os.environ, "XUI_SSH_LOGIN_CONFIG_FILE": str(config_path)},
+                capture_output=True, text=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not-an-ip", result.stderr)
+        self.assertNotIn("ValueError", result.stderr)
 
     def test_ssh_login_cidr_allowlist_supports_ipv4_and_ipv6(self):
         self.assertTrue(EXPORTER.ssh_login_ip_allowed(

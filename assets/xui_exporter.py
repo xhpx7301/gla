@@ -2098,5 +2098,8 @@ if __name__ == "__main__":
     try:
         main()
     except ERRORS as error:
-        print(f"启动/配置失败: {error_kind(error)}", file=sys.stderr)
+        if len(sys.argv) > 1 and sys.argv[1] == "ssh-login" and isinstance(error, ValueError):
+            print(f"启动/配置失败: {error}", file=sys.stderr)
+        else:
+            print(f"启动/配置失败: {error_kind(error)}", file=sys.stderr)
         raise SystemExit(1)

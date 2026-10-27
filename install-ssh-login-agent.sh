@@ -11,6 +11,8 @@ AGENT_FILE=/usr/local/sbin/gla-ssh-login
 PAM_FILE=/etc/pam.d/sshd
 SSH_AUTH_INFO_FILE=/etc/ssh/sshd_config.d/00-gla-ssh-auth-info.conf
 SSH_AUTH_INFO_MARKER=/etc/gla/ssh-auth-info-managed
+SSH_INCLUDE_MARKER=/etc/gla/sshd-include-managed
+SSHD_CONFIG_FILE=/etc/ssh/sshd_config
 PAM_LINE='session optional pam_exec.so quiet type=open_session /usr/local/sbin/gla-ssh-login'
 
 die() { printf '错误：%s\n' "$*" >&2; exit 1; }
@@ -32,6 +34,14 @@ case "$ACTION" in
     install -d -o root -g root -m 0700 "$CONFIG_DIR"
     if ! sshd -T 2>/dev/null | grep -Fqx 'exposeauthinfo yes'; then
       install -d -o root -g root -m 0755 "${SSH_AUTH_INFO_FILE%/*}"
+      if ! grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf([[:space:]]|$)' "$SSHD_CONFIG_FILE"; then
+        tmp_config="$(mktemp "${SSHD_CONFIG_FILE}.gla.XXXXXX")"
+        printf 'Include /etc/ssh/sshd_config.d/*.conf\n' >"$tmp_config"
+        cat "$SSHD_CONFIG_FILE" >>"$tmp_config"
+        cat "$tmp_config" >"$SSHD_CONFIG_FILE"
+        rm -f "$tmp_config"
+        : >"$SSH_INCLUDE_MARKER"
+      fi
       if [ -e "$SSH_AUTH_INFO_FILE" ]; then
         cp -a "$SSH_AUTH_INFO_FILE" "$SSH_AUTH_INFO_FILE.gla-backup"
       fi
@@ -43,6 +53,10 @@ case "$ACTION" in
         else
           rm -f "$SSH_AUTH_INFO_FILE"
         fi
+        if [ -e "$SSH_INCLUDE_MARKER" ]; then
+          sed -i '\|^Include /etc/ssh/sshd_config.d/\*\.conf$|d' "$SSHD_CONFIG_FILE"
+          rm -f "$SSH_INCLUDE_MARKER"
+        fi
         rm -f "$SSH_AUTH_INFO_MARKER"
         die "启用 SSH 认证信息后 sshd 配置检查失败，已恢复原配置。"
       fi
@@ -52,8 +66,12 @@ case "$ACTION" in
         else
           rm -f "$SSH_AUTH_INFO_FILE"
         fi
+        if [ -e "$SSH_INCLUDE_MARKER" ]; then
+          sed -i '\|^Include /etc/ssh/sshd_config.d/\*\.conf$|d' "$SSHD_CONFIG_FILE"
+          rm -f "$SSH_INCLUDE_MARKER"
+        fi
         rm -f "$SSH_AUTH_INFO_MARKER"
-        die "当前 sshd 配置未包含 sshd_config.d，无法启用认证方式识别。"
+        die "无法启用 SSH 认证方式识别，请检查 sshd 配置。"
       fi
       : >"$SSH_AUTH_INFO_MARKER"
       chmod 0600 "$SSH_AUTH_INFO_MARKER"
@@ -139,6 +157,10 @@ AGENT
         rm -f "$SSH_AUTH_INFO_FILE"
       fi
       rm -f "$SSH_AUTH_INFO_MARKER"
+    fi
+    if [ -e "$SSH_INCLUDE_MARKER" ]; then
+      sed -i '\|^Include /etc/ssh/sshd_config.d/\*\.conf$|d' "$SSHD_CONFIG_FILE"
+      rm -f "$SSH_INCLUDE_MARKER"
     fi
     if command -v sshd >/dev/null 2>&1 && sshd -t 2>/dev/null && command -v systemctl >/dev/null 2>&1; then
       systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true

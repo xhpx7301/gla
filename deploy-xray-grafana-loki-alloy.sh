@@ -1384,11 +1384,19 @@ configure_ssh_ip_groups() {
     read -rp '请选择 [0-4]: ' action
     case "$action" in
       0) return 0 ;;
-      1) ssh_login_command list-groups ;;
+      1)
+        if ! ssh_login_command list-groups; then
+          printf '查询失败，已返回 SSH 登录告警菜单。\n'
+          return 1
+        fi
+        ;;
       2)
         read -rp 'IP 组名称（仅字母、数字、点、下划线、连字符）: ' name
         read -rp '可信来源 CIDR，多个用逗号分隔: ' cidrs
-        ssh_login_command add-group --name "$name" --cidrs "$cidrs"
+        if ! ssh_login_command add-group --name "$name" --cidrs "$cidrs"; then
+          printf '添加失败，已返回 SSH 登录告警菜单。\n'
+          return 1
+        fi
         ;;
       3)
         if ! select_ssh_ip_group; then
@@ -1397,7 +1405,10 @@ configure_ssh_ip_groups() {
         fi
         name="$SELECTED_IP_GROUP"
         read -rp '新的可信来源 CIDR，多个用逗号分隔: ' cidrs
-        ssh_login_command set-group --name "$name" --cidrs "$cidrs"
+        if ! ssh_login_command set-group --name "$name" --cidrs "$cidrs"; then
+          printf '修改失败，已返回 SSH 登录告警菜单。\n'
+          return 1
+        fi
         ;;
       4)
         if ! select_ssh_ip_group; then
@@ -1406,7 +1417,10 @@ configure_ssh_ip_groups() {
         fi
         name="$SELECTED_IP_GROUP"
         if confirm "删除 IP 组 $name？关联服务器会解除该组并对这些来源触发告警"; then
-          ssh_login_command delete-group --name "$name"
+          if ! ssh_login_command delete-group --name "$name"; then
+            printf '删除失败，已返回 SSH 登录告警菜单。\n'
+            return 1
+          fi
         fi
         ;;
       *) printf '无效选择。\n' ;;
@@ -1425,7 +1439,10 @@ configure_ssh_login() {
       0) return 0 ;;
       1)
         read -rp 'HTTPS 接收地址（例 https://ssh.example.com/api/ssh-login）: ' url
-        ssh_login_command set-url --url "$url"
+        if ! ssh_login_command set-url --url "$url"; then
+          printf '操作失败，已返回上一级菜单。\n'
+          return 1
+        fi
         ;;
       2)
         read -rp '服务器名称（仅字母、数字、点、下划线、连字符）: ' name
@@ -1436,7 +1453,11 @@ configure_ssh_login() {
         if [ -z "$SELECTED_IP_GROUPS" ] && ! confirm '未选择可信来源组，所有成功登录都会触发告警。继续添加？'; then
           printf '已取消。\n'
         else
-          ssh_login_command add --name "$name" --groups "$SELECTED_IP_GROUPS" && printf '服务器已添加，请用“生成子服务器安装命令”获取安装命令。\n'
+          if ! ssh_login_command add --name "$name" --groups "$SELECTED_IP_GROUPS"; then
+            printf '添加失败，已返回上一级菜单。\n'
+            return 1
+          fi
+          printf '服务器已添加，请用“生成子服务器安装命令”获取安装命令。\n'
         fi
         ;;
       3)
@@ -1452,7 +1473,10 @@ configure_ssh_login() {
         if [ -z "$SELECTED_IP_GROUPS" ] && ! confirm '未选择可信来源组，该服务器的所有成功登录都会触发告警。继续修改？'; then
           printf '已取消。\n'
         else
-          ssh_login_command set-groups --name "$name" --groups "$SELECTED_IP_GROUPS"
+          if ! ssh_login_command set-groups --name "$name" --groups "$SELECTED_IP_GROUPS"; then
+            printf '操作失败，已返回上一级菜单。\n'
+            return 1
+          fi
         fi
         ;;
       4)
@@ -1462,7 +1486,10 @@ configure_ssh_login() {
         fi
         name="$SELECTED_SSH_NAME"
         printf '\n以下命令请在对应子服务器以 root 执行：\n'
-        ssh_login_command install-command --name "$name"
+        if ! ssh_login_command install-command --name "$name"; then
+          printf '生成失败，已返回上一级菜单。\n'
+          return 1
+        fi
         ;;
       5)
         if ! select_ssh_login_server; then
@@ -1471,10 +1498,17 @@ configure_ssh_login() {
         fi
         name="$SELECTED_SSH_NAME"
         if confirm "删除 $name 的告警配置？子服务器采集脚本不会自动卸载"; then
-          ssh_login_command delete --name "$name"
+          if ! ssh_login_command delete --name "$name"; then
+            printf '删除失败，已返回上一级菜单。\n'
+            return 1
+          fi
         fi
         ;;
-      6) configure_ssh_ip_groups ;;
+      6)
+        if ! configure_ssh_ip_groups; then
+          printf '已返回 SSH 登录告警菜单。\n'
+        fi
+        ;;
       *) printf '无效选择。\n' ;;
     esac
   done
@@ -1659,7 +1693,7 @@ MENU
     0) exit 0 ;;
     1) update_script_and_deploy; exit $? ;;
     2) configure_api_panels; pause ;;
-    3) configure_ssh_login; pause ;;
+    3) configure_ssh_login || true; pause ;;
     4) configure_telegram; pause ;;
     5) service_control_menu ;;
     6) show_status; pause ;;
