@@ -1429,12 +1429,12 @@ configure_ssh_ip_groups() {
 }
 
 configure_ssh_login() {
-  local action name cidrs url
+  local action name cidrs url new_name
   while true; do
     printf '\nSSH 登录告警管理\n\n'
     ssh_login_command list || true
-    printf '\n1. 设置/修改 HTTPS 接收地址\n2. 新增服务器（生成密钥）\n3. 生成子服务器安装命令\n4. 为服务器选择可信来源 IP 组\n5. 管理可信来源 IP 组\n6. 删除服务器\n0. 返回\n'
-    read -rp '请选择 [0-6]: ' action
+    printf '\n1. 设置/修改 HTTPS 接收地址\n2. 新增服务器（生成密钥）\n3. 生成子服务器安装命令\n4. 为服务器选择可信来源 IP 组\n5. 管理可信来源 IP 组\n6. 修改服务器名称\n7. 删除服务器\n0. 返回\n'
+    read -rp '请选择 [0-7]: ' action
     case "$action" in
       0) return 0 ;;
       1)
@@ -1492,6 +1492,21 @@ configure_ssh_login() {
         fi
         ;;
       6)
+        if ! select_ssh_login_server; then
+          printf '未选择服务器。\n'
+          continue
+        fi
+        name="$SELECTED_SSH_NAME"
+        read -rp '新的服务器名称（仅字母、数字、点、下划线、连字符）: ' new_name
+        if confirm "将 $name 改名为 $new_name？完成后需重新生成安装命令并在子服务器执行"; then
+          if ! ssh_login_command rename --name "$name" --new-name "$new_name"; then
+            printf '修改失败，已返回上一级菜单。\n'
+            return 1
+          fi
+          printf '服务器名称已修改；请重新生成安装命令并在子服务器执行，否则旧名称的事件将无法上报。\n'
+        fi
+        ;;
+      7)
         if ! select_ssh_login_server; then
           printf '未选择服务器。\n'
           continue

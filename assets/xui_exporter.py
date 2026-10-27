@@ -1936,8 +1936,9 @@ def ssh_login_cli(argv):
     parser = argparse.ArgumentParser(description="管理 SSH 登录告警服务器配置")
     parser.add_argument("operation", choices=("list", "status", "set-url", "add", "set-cidrs", "set-groups",
                                                "list-groups", "add-group", "set-group", "delete-group",
-                                               "delete", "install-command"))
+                                               "rename", "delete", "install-command"))
     parser.add_argument("--name")
+    parser.add_argument("--new-name")
     parser.add_argument("--cidrs", default="")
     parser.add_argument("--groups", default="")
     parser.add_argument("--url")
@@ -2010,6 +2011,16 @@ def ssh_login_cli(argv):
             if isinstance(item, dict):
                 item["allowed_ip_groups"] = [group for group in item.get("allowed_ip_groups", [])
                                              if group != args.name]
+        atomic_write(path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+        return
+    if args.operation == "rename":
+        if not args.name or args.name not in servers:
+            raise ValueError("服务器不存在")
+        if not args.new_name or not NAME_RE.fullmatch(args.new_name):
+            raise ValueError("新服务器名称只能使用字母、数字、点、下划线和连字符")
+        if args.new_name in servers:
+            raise ValueError("该服务器名称已存在")
+        servers[args.new_name] = servers.pop(args.name)
         atomic_write(path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
         return
     if args.operation == "delete":

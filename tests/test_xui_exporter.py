@@ -65,7 +65,8 @@ class ExporterTest(unittest.TestCase):
         self.assertIn("[已启用 %s 台]", manager)
         self.assertIn("select_ssh_ip_groups", manager)
         self.assertIn("configure_ssh_ip_groups", manager)
-        self.assertIn("1. 设置/修改 HTTPS 接收地址\\n2. 新增服务器（生成密钥）\\n3. 生成子服务器安装命令\\n4. 为服务器选择可信来源 IP 组\\n5. 管理可信来源 IP 组\\n6. 删除服务器\\n0. 返回", manager)
+        self.assertIn("1. 设置/修改 HTTPS 接收地址\\n2. 新增服务器（生成密钥）\\n3. 生成子服务器安装命令\\n4. 为服务器选择可信来源 IP 组\\n5. 管理可信来源 IP 组\\n6. 修改服务器名称\\n7. 删除服务器\\n0. 返回", manager)
+        self.assertIn('ssh_login_command rename --name "$name" --new-name "$new_name"', manager)
         self.assertIn("if ! configure_ssh_ip_groups; then", manager)
         self.assertIn("添加失败，已返回 SSH 登录告警菜单。", manager)
         self.assertEqual(manager.count("单个 IPv4 加 /32；IPv6 加 /128"), 2)
@@ -82,6 +83,19 @@ class ExporterTest(unittest.TestCase):
         self.assertIn('--data-urlencode "ssh_port=$ssh_port"', agent)
         dashboard = json.loads((pathlib.Path(__file__).parents[1] / "dashboards/ssh-login.json").read_text(encoding="utf-8"))
         self.assertIn("SSH端口={{.ssh_port}}", dashboard["panels"][2]["targets"][0]["expr"])
+
+    def test_ssh_login_cli_renames_server_without_changing_key_or_groups(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(EXPORTER, "SSH_LOGIN_CONFIG_FILE", str(pathlib.Path(directory) / "ssh-login.json")):
+            EXPORTER.ssh_login_cli(["add-group", "--name", "office", "--cidrs", "192.0.2.0/24"])
+            EXPORTER.ssh_login_cli(["add", "--name", "old-node", "--groups", "office"])
+            config_path = pathlib.Path(EXPORTER.SSH_LOGIN_CONFIG_FILE)
+            original = json.loads(config_path.read_text(encoding="utf-8"))["servers"]["old-node"]
+            EXPORTER.ssh_login_cli(["rename", "--name", "old-node", "--new-name", "new-node"])
+            renamed = json.loads(config_path.read_text(encoding="utf-8"))["servers"]
+            self.assertNotIn("old-node", renamed)
+            self.assertEqual(renamed["new-node"], original)
+            self.assertEqual(renamed["new-node"]["allowed_ip_groups"], ["office"])
 
     def test_ssh_login_cli_reports_the_cidr_validation_error(self):
         with tempfile.TemporaryDirectory() as directory:
