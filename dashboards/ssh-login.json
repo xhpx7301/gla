@@ -51,7 +51,7 @@
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{ "refId": "A", "expr": "{job=\"ssh-login\",server=~\"$server\"} | json | line_format `服务器={{.server}} | 用户={{.user}} | 来源IP={{.source_ip}} | SSH端口={{.ssh_port}} | 来源端口={{.source_port}} | 认证={{.auth_method}} | 归属={{.location}} | 网络={{.network}}`" }],
       "gridPos": { "x": 0, "y": 8, "w": 24, "h": 14 },
-      "options": { "dedupStrategy": "none", "enableLogDetails": true, "showCommonLabels": false, "wrapLogMessage": true, "sortOrder": "Descending" }
+      "options": { "dedupStrategy": "none", "enableLogDetails": true, "showCommonLabels": false, "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" }
     }
   ],
   "annotations": { "list": [] },

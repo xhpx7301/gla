@@ -77,6 +77,7 @@ class DashboardTableTest(unittest.TestCase):
         self.assertIn("| json", expression)
         self.assertIn("source_ip", expression)
         self.assertNotIn("source_ip=", expression)
+        self.assertTrue(dashboard["panels"][2]["options"]["showTime"])
 
     def test_gateway_tables_are_chinese_and_sorted(self):
         client = panel_by_id(self.gateway, 6)
