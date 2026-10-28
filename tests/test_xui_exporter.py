@@ -25,7 +25,7 @@ class ExporterTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, \
                 mock.patch.object(EXPORTER, "SSH_LOGIN_CONFIG_FILE", str(pathlib.Path(directory) / "ssh-login.json")):
             EXPORTER.ssh_login_cli(["set-url", "--url", "https://ssh.example.com/api/ssh-login"])
-            EXPORTER.ssh_login_cli(["add", "--name", "node-a", "--cidrs", "192.0.2.4/32,2001:db8::/64"])
+            EXPORTER.ssh_login_cli(["add", "--name", "  node-a  ", "--cidrs", "192.0.2.4/32,2001:db8::/64"])
             config = json.loads(pathlib.Path(EXPORTER.SSH_LOGIN_CONFIG_FILE).read_text(encoding="utf-8"))
             key = config["servers"]["node-a"]["key"]
             self.assertRegex(key, r"^[a-f0-9]{64}$")

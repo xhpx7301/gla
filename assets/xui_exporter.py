@@ -1944,6 +1944,13 @@ def ssh_login_cli(argv):
     parser.add_argument("--url")
     parser.add_argument("--format", choices=("display", "tsv"), default="display")
     args = parser.parse_args(argv)
+    # Interactive shell input can carry accidental leading/trailing spaces;
+    # trim those before validating identifiers while still rejecting spaces
+    # inside a server or group name.
+    for attribute in ("name", "new_name"):
+        value = getattr(args, attribute)
+        if value is not None:
+            setattr(args, attribute, value.strip())
     path = Path(SSH_LOGIN_CONFIG_FILE)
     config = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"servers": {}}
     if not isinstance(config, dict) or not isinstance(config.get("servers", {}), dict):
