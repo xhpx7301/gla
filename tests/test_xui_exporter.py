@@ -251,11 +251,11 @@ class ExporterTest(unittest.TestCase):
                     panel.metrics = EXPORTER.render_metrics("node-a", [inbound], ["alice"], clients)
                 bot.process_online()
                 send.assert_not_called()
-                for timestamp in range(1120, 1331, 30):
+                for timestamp in range(1120, 1631, 30):
                     with mock.patch.object(EXPORTER.time, "time", return_value=timestamp):
                         panel.metrics = EXPORTER.render_metrics("node-a", [inbound], ["alice"], clients)
                     bot.process_online()
-                    if timestamp < 1330:
+                    if timestamp < 1630:
                         send.assert_not_called()
                 message = send.call_args.args[2]["text"]
                 self.assertIn("👤 客户端：alice\n👥 分组：shared\n🔗 关联入站：VLESS-443\n🖥 面板：node-a", message)
@@ -631,11 +631,11 @@ class ExporterTest(unittest.TestCase):
                 worker.metrics[-1] = EXPORTER.metric("xui_metrics_last_success_timestamp_seconds", 1060, server="node-a")
                 bot.process_online()
                 self.assertEqual(request.call_count, 3)
-                for timestamp in range(1090, 1331, 30):
+                for timestamp in range(1090, 1631, 30):
                     worker.metrics[-1] = EXPORTER.metric("xui_metrics_last_success_timestamp_seconds", timestamp,
                                                          server="node-a")
                     bot.process_online()
-                    if timestamp < 1330:
+                    if timestamp < 1630:
                         self.assertEqual(request.call_count, 3)
                 self.assertEqual(request.call_args.args[1], "sendMessage")
                 self.assertEqual(request.call_args.args[2]["chat_id"], 420)
@@ -913,7 +913,7 @@ class ExporterTest(unittest.TestCase):
 
                 request.reset_mock()
                 sample(1000, False)
-                for timestamp in range(1030, 1301, 30):
+                for timestamp in range(1030, 1601, 30):
                     sample(timestamp, True)
                 self.assertEqual([call.args[2]["chat_id"] for call in request.call_args_list], [421])
                 self.assertIsNone(bot.db.execute(
@@ -923,7 +923,7 @@ class ExporterTest(unittest.TestCase):
                 sample(1150, True)  # Enabling does not replay an already confirmed client.
                 request.assert_not_called()
                 sample(1180, False)
-                for timestamp in range(1210, 1481, 30):
+                for timestamp in range(1210, 1781, 30):
                     sample(timestamp, True)
                 self.assertEqual({call.args[2]["chat_id"] for call in request.call_args_list}, {420, 421})
             finally:
@@ -1330,18 +1330,18 @@ class ExporterTest(unittest.TestCase):
                 bot = EXPORTER.TelegramBot(config, [panel], directory)
                 sample(1090, emails)
                 request.assert_not_called()
-                for timestamp in range(1120, 1361, 30):
+                for timestamp in range(1120, 1661, 30):
                     sample(timestamp, [emails[0]])
-                    if timestamp < 1360:
+                    if timestamp < 1660:
                         request.assert_not_called()
-                # The tenth distinct successful online sample confirms the client.
+                # The twentieth distinct successful online sample confirms the client.
                 request.assert_called_once()
                 self.assertIn(f"客户端：{emails[0]}", request.call_args.args[2]["text"])
-                sample(1210, [emails[0]])  # prolonged online does not repeat notifications
+                sample(1690, [emails[0]])  # prolonged online does not repeat notifications
                 request.assert_called_once()
                 self.assertEqual(bot.db.execute(
                     "SELECT consecutive_online FROM online_confirmations WHERE email=?",
-                    (emails[0],)).fetchone(), (10,))
+                    (emails[0],)).fetchone(), (20,))
             finally:
                 bot.db.close()
 
@@ -1368,9 +1368,9 @@ class ExporterTest(unittest.TestCase):
                     bot.process_online()
 
                 sample(1000, False, True)  # offline migration must reset node-a's old state
-                for timestamp in range(1030, 1301, 30):
+                for timestamp in range(1030, 1601, 30):
                     sample(timestamp, True, True)
-                    if timestamp < 1300:
+                    if timestamp < 1600:
                         request.assert_not_called()
                 request.assert_called_once()
                 self.assertIn("面板：node-a", request.call_args.args[2]["text"])
@@ -1408,16 +1408,16 @@ class ExporterTest(unittest.TestCase):
                              {"email": "bob", "group": "shared", "traffic": {}}])
                     bot.process_online()
 
-                for _ in range(10):
+                for _ in range(20):
                     set_online(True, False)
                 self.assertEqual(request.call_count, 2)
                 now[0] = 1200
                 set_online(False, False)
-                for _ in range(10):
+                for _ in range(20):
                     set_online(True, False)
                 # Alice is still cooling down.
                 self.assertEqual(request.call_count, 2)
-                for _ in range(10):
+                for _ in range(20):
                     set_online(True, True)
                 # Bob has an independent cooldown.
                 self.assertEqual(request.call_count, 4)
@@ -1427,14 +1427,14 @@ class ExporterTest(unittest.TestCase):
                 bot = EXPORTER.TelegramBot(config, [panel], directory)
                 now[0] = 1500
                 set_online(False, False)
-                for _ in range(10):
+                for _ in range(20):
                     set_online(True, True)
                 # Persisted cooldown suppresses both.
                 self.assertEqual(request.call_count, 4)
 
                 set_online(False, False)
                 now[0] = 5000
-                for _ in range(10):
+                for _ in range(20):
                     set_online(True, True)
                 # Cooldown expired; notify both chats.
                 self.assertEqual(request.call_count, 8)
