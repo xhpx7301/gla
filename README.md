@@ -82,9 +82,9 @@ Telegram 左下角的原生菜单按钮由 Telegram 客户端控制文字，Bot 
 
 ## 轻量 SSH 登录告警
 
-SSH 登录告警可不在子服务器运行 Alloy。PAM 在 SSH 会话成功打开时触发本地脚本，脚本用 `systemd-run` 异步发送一条 HTTPS 事件到中心端；发送失败不会阻止 SSH 登录。中心端将事件写入现有 Loki，并按服务器独立的 CIDR 白名单决定是否向 Telegram Bot 授权用户发送告警。Grafana 的“SSH 登录记录”仪表盘可按服务器筛选全部成功会话。
+SSH 登录告警可不在子服务器运行 Alloy。PAM 在 SSH 会话成功打开时触发本地脚本，脚本用 `systemd-run` 异步发送一条 HTTPS 事件到中心端；发送失败不会阻止 SSH 登录。中心端将事件写入现有 Loki，并按服务器独立的 CIDR 白名单决定是否向 SSH 告警 Bot 授权用户发送告警。SSH 告警 Bot 与分组上线通知、在线查询 Bot 使用独立的 Token 和接收用户配置，互不影响；它只发送告警，不提供查询命令。Grafana 的“SSH 登录记录”仪表盘可按服务器筛选全部成功会话。
 
-在中心服务器运行 `gla` 并选择“3. 管理 SSH 登录告警”，使用“管理可信来源 IP 组”查询、添加、修改或删除常用公网 IP/CIDR；添加服务器或修改服务器的可信来源时，通过编号多选已有 IP 组即可复用。服务器名称可通过编号选择服务器后修改；改名后需重新生成安装命令并在子服务器执行，后续事件才会使用新名称。部署时脚本会自动发现运行中的 Nginx Proxy Manager，并将其接入 GLA 使用的共享 Docker 网络，使其可访问 `gla-xui-exporter:9105`。每台服务器自动使用独立随机密钥，安全保存在中心端 `secrets/ssh-login-config.json` 中；不需要手动编辑配置文件或重启容器。菜单状态栏会显示已登记的服务器数量。
+在中心服务器运行 `gla` 并选择“3. 管理 SSH 登录告警”，通过“管理 SSH 告警 Telegram Bot”配置单独的 Bot Token 和接收用户 ID，并可发送测试消息；Bot 用户需先在 Telegram 中打开该 Bot 并点击 Start。随后使用“管理可信来源 IP 组”查询、添加、修改或删除常用公网 IP/CIDR；添加服务器或修改服务器的可信来源时，通过编号多选已有 IP 组即可复用。服务器名称可通过编号选择服务器后修改；改名后需重新生成安装命令并在子服务器执行，后续事件才会使用新名称。部署时脚本会自动发现运行中的 Nginx Proxy Manager，并将其接入 GLA 使用的共享 Docker 网络，使其可访问 `gla-xui-exporter:9105`。每台服务器自动使用独立随机密钥，安全保存在中心端 `secrets/ssh-login-config.json` 中；SSH 告警 Bot 凭据独立保存在 `secrets/ssh-telegram-config.json` 与 `secrets/ssh-telegram-bot.token`，原 Bot 配置不受影响。不需要手动编辑配置文件或重启容器。菜单状态栏会分别显示 SSH 告警服务器数量和 SSH 告警 Bot 状态。
 
 接收地址要求指向 Nginx Proxy Manager 的 HTTPS Proxy Host：转发主机 `gla-xui-exporter`、端口 `9105`，域名路径由该 Host 根路径转发。公网访问必须启用 TLS；不要配置会重写 `/api/ssh-login` 路径的规则。每个可信来源 IP 组可关联多个 CIDR；服务器未选择任何组时，该服务器的所有成功登录都会通知。删除 IP 组会自动解除所有服务器对它的引用。菜单生成的安装命令需在对应子服务器以 root 执行。
 

@@ -534,6 +534,7 @@ ${SECURITY_TRAFFIC_VOLUME_LINE}
       XUI_STATE_DIR: /var/lib/xui
       XUI_LOKI_URL: http://alloy:3500/loki/api/v1/push
       XUI_TELEGRAM_CONFIG_FILE: /run/secrets/telegram-config.json
+      XUI_SSH_TELEGRAM_CONFIG_FILE: /run/secrets/ssh-telegram-config.json
       XUI_SSH_LOGIN_CONFIG_FILE: /run/secrets/ssh-login-config.json
       GEOIP_CITY_DB: /var/lib/gla/geoip/GeoLite2-City.mmdb
       GEOIP_ASN_DB: /var/lib/gla/geoip/GeoLite2-ASN.mmdb
@@ -1067,6 +1068,7 @@ show_header() {
   printf 'Alloy 安全与资源采集      %s\n' "$(container_state xray-alloy)"
   printf '3x-ui API 流量与日志采集  %s\n' "$(xui_state)"
   printf 'SSH 登录告警             %s\n' "$(ssh_login_state)"
+  printf 'SSH 告警 Telegram Bot    %s\n' "$(ssh_telegram_state)"
   if grep -Eq '^ENABLE_GEOIP=true$' "$STACK_DIR/.install.env" 2>/dev/null; then
     printf 'GeoIP 归属解析            [已启用]\n'
   else
@@ -1285,6 +1287,28 @@ ssh_login_command() {
     python:3.12-alpine python3 /app/xui_exporter.py ssh-login "$@"
 }
 
+ssh_telegram_command() {
+  docker run --rm -i --network none \
+    -e XUI_SSH_TELEGRAM_CONFIG_FILE=/run/secrets/ssh-telegram-config.json \
+    -v "$STACK_DIR/secrets:/run/secrets" \
+    -v "$STACK_DIR/assets/xui_exporter.py:/app/xui_exporter.py:ro" \
+    python:3.12-alpine python3 /app/xui_exporter.py ssh-telegram "$@"
+}
+
+ssh_telegram_test() {
+  docker exec gla-xui-exporter python3 /app/xui_exporter.py ssh-telegram test
+}
+
+ssh_telegram_state() {
+  if [ ! -f "$STACK_DIR/secrets/ssh-telegram-config.json" ]; then
+    printf '[未配置]'
+  elif ssh_telegram_command show 2>/dev/null | grep -q '^已配置 Telegram Bot'; then
+    printf '[已配置]'
+  else
+    printf '[配置无效]'
+  fi
+}
+
 ssh_login_state() {
   if [ ! -f "$STACK_DIR/secrets/ssh-login-config.json" ]; then
     printf '[未配置]'
@@ -1433,8 +1457,8 @@ configure_ssh_login() {
   while true; do
     printf '\nSSH 登录告警管理\n\n'
     ssh_login_command list || true
-    printf '\n1. 设置/修改 HTTPS 接收地址\n2. 新增服务器（生成密钥）\n3. 生成子服务器安装命令\n4. 为服务器选择可信来源 IP 组\n5. 管理可信来源 IP 组\n6. 修改服务器名称\n7. 删除服务器\n0. 返回\n'
-    read -rp '请选择 [0-7]: ' action
+    printf '\n1. 设置/修改 HTTPS 接收地址\n2. 新增服务器（生成密钥）\n3. 生成子服务器安装命令\n4. 为服务器选择可信来源 IP 组\n5. 管理可信来源 IP 组\n6. 修改服务器名称\n7. 删除服务器\n8. 管理 SSH 告警 Telegram Bot\n0. 返回\n'
+    read -rp '请选择 [0-8]: ' action
     case "$action" in
       0) return 0 ;;
       1)
@@ -1522,6 +1546,45 @@ configure_ssh_login() {
       5)
         if ! configure_ssh_ip_groups; then
           printf '已返回 SSH 登录告警菜单。\n'
+        fi
+        ;;
+      8) configure_ssh_telegram ;;
+      *) printf '无效选择。\n' ;;
+    esac
+  done
+}
+
+configure_ssh_telegram() {
+  local action token ids
+  while true; do
+    printf '\nSSH 登录告警 Telegram Bot（独立于分组通知与在线查询 Bot）\n'
+    ssh_telegram_command show || true
+    printf '\n1. 配置或更新 SSH 告警 Bot\n2. 发送测试消息\n3. 删除 SSH 告警 Bot\n0. 返回\n'
+    read -rp '请选择 [0-3]: ' action
+    case "$action" in
+      0) return 0 ;;
+      1)
+        read -rp 'SSH 告警 Bot Token（输入可见）: ' token
+        read -rp '接收告警的 Telegram 用户 ID（逗号分隔）: ' ids
+        if [ -z "$token" ] || [ -z "$ids" ]; then
+          unset token
+          printf 'Token 和用户 ID 都不能为空。\n'
+        elif printf '%s' "$token" | ssh_telegram_command set --user-ids "$ids"; then
+          unset token
+          printf 'SSH 告警 Bot 已配置；使用“发送测试消息”确认接收。\n'
+        else
+          unset token
+          printf '配置失败，请检查 Bot Token 和用户 ID。\n'
+        fi
+        ;;
+      2)
+        if ! ssh_telegram_test; then
+          printf '测试失败：请确认已配置 Bot，并先在该 Bot 中点击 Start。\n'
+        fi
+        ;;
+      3)
+        if ssh_telegram_command delete; then
+          printf 'SSH 告警 Bot 配置已删除；分组通知与在线查询 Bot 不受影响。\n'
         fi
         ;;
       *) printf '无效选择。\n' ;;

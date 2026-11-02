@@ -65,7 +65,9 @@ class ExporterTest(unittest.TestCase):
         self.assertIn("[已启用 %s 台]", manager)
         self.assertIn("select_ssh_ip_groups", manager)
         self.assertIn("configure_ssh_ip_groups", manager)
-        self.assertIn("1. 设置/修改 HTTPS 接收地址\\n2. 新增服务器（生成密钥）\\n3. 生成子服务器安装命令\\n4. 为服务器选择可信来源 IP 组\\n5. 管理可信来源 IP 组\\n6. 修改服务器名称\\n7. 删除服务器\\n0. 返回", manager)
+        self.assertIn("1. 设置/修改 HTTPS 接收地址\\n2. 新增服务器（生成密钥）\\n3. 生成子服务器安装命令\\n4. 为服务器选择可信来源 IP 组\\n5. 管理可信来源 IP 组\\n6. 修改服务器名称\\n7. 删除服务器\\n8. 管理 SSH 告警 Telegram Bot\\n0. 返回", manager)
+        self.assertIn("XUI_SSH_TELEGRAM_CONFIG_FILE: /run/secrets/ssh-telegram-config.json", manager)
+        self.assertIn("configure_ssh_telegram()", manager)
         self.assertIn('ssh_login_command rename --name "$name" --new-name "$new_name"', manager)
         self.assertIn("if ! configure_ssh_ip_groups; then", manager)
         self.assertIn("添加失败，已返回 SSH 登录告警菜单。", manager)
@@ -125,11 +127,12 @@ class ExporterTest(unittest.TestCase):
                 mock.patch.object(EXPORTER, "STATE_DIR", directory), \
                 mock.patch.object(EXPORTER, "telegram_config", return_value={
                     "token": "bot-token", "allowed_user_ids": [42], "allowed_chat_ids": [],
-                    "notification_cooldown_seconds": 600}), \
+                    "notification_cooldown_seconds": 600}) as load_config, \
                 mock.patch.object(EXPORTER, "telegram_request") as send:
             EXPORTER.notify_ssh_login(record)
             EXPORTER.notify_ssh_login(record)
             self.assertEqual(send.call_count, 1)
+            self.assertEqual(load_config.call_args.args[0], EXPORTER.SSH_TELEGRAM_CONFIG_FILE)
             notification = send.call_args.args[2]["text"]
             self.assertIn("203.0.113.9", notification)
             self.assertIn("SSH 端口：22", notification)
@@ -689,6 +692,24 @@ class ExporterTest(unittest.TestCase):
             self.assertEqual(saved["allowed_user_ids"], [42, 77])
             self.assertEqual(saved["notification_cooldown_seconds"], 1200)
             self.assertEqual((path.parent / "telegram-bot.token").read_text().strip(), "987:bot-token")
+
+    def test_ssh_telegram_bot_has_separate_config_token_and_test_delivery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "ssh-telegram-config.json"
+            with mock.patch.object(sys, "stdin", io.StringIO("987:ssh-token")):
+                EXPORTER.telegram_cli(["set", "--user-ids", "42,77,42"], path,
+                                      "ssh-telegram-bot.token")
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["allowed_user_ids"], [42, 77])
+            self.assertEqual(saved["token_file"], "/run/secrets/ssh-telegram-bot.token")
+            self.assertEqual((path.parent / "ssh-telegram-bot.token").read_text().strip(), "987:ssh-token")
+            with mock.patch.object(EXPORTER, "read_token", return_value="987:ssh-token"), \
+                    mock.patch.object(EXPORTER, "telegram_request") as send:
+                EXPORTER.telegram_cli(["test"], path, "ssh-telegram-bot.token")
+            self.assertEqual([call.args[2]["chat_id"] for call in send.call_args_list], [42, 77])
+            EXPORTER.telegram_cli(["delete"], path, "ssh-telegram-bot.token")
+            self.assertFalse(path.exists())
+            self.assertFalse((path.parent / "ssh-telegram-bot.token").exists())
 
     def test_telegram_registers_native_command_menu_and_exposes_id_safely(self):
         worker = EXPORTER.PanelWorker({"name": "node-a", "url": "https://panel.example.com/panel/api/inbounds/list"})

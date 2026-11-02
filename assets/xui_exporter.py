@@ -40,6 +40,7 @@ PANELS_FILE = os.environ.get("XUI_PANELS_FILE", "")
 STATE_DIR = os.environ.get("XUI_STATE_DIR", "/var/lib/xui")
 LOKI_URL = os.environ.get("XUI_LOKI_URL", "http://alloy:3500/loki/api/v1/push")
 TELEGRAM_CONFIG_FILE = os.environ.get("XUI_TELEGRAM_CONFIG_FILE", "/run/secrets/telegram-config.json")
+SSH_TELEGRAM_CONFIG_FILE = os.environ.get("XUI_SSH_TELEGRAM_CONFIG_FILE", "/run/secrets/ssh-telegram-config.json")
 SSH_LOGIN_CONFIG_FILE = os.environ.get("XUI_SSH_LOGIN_CONFIG_FILE", "/run/secrets/ssh-login-config.json")
 DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 3600
 PREVIOUS_DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = (600, 1800)
@@ -1803,7 +1804,7 @@ def record_ssh_login_notification(record):
 
 
 def notify_ssh_login(record):
-    config = telegram_config()
+    config = telegram_config(SSH_TELEGRAM_CONFIG_FILE)
     if not config or not ssh_login_notify_allowed(record, config):
         return
     chats = sorted(set(config.get("allowed_chat_ids", []) + config.get("allowed_user_ids", [])))
@@ -1895,22 +1896,32 @@ def panels_cli(argv):
         (Path(PANELS_FILE).parent / f"xui-{args.name}.token").unlink(missing_ok=True)
 
 
-def telegram_cli(argv):
+def telegram_cli(argv, config_file=None, token_filename="telegram-bot.token",
+                 test_message="✅ Telegram Bot 测试消息；接收配置正常。"):
     parser = argparse.ArgumentParser(description="管理 Telegram Bot 配置")
-    parser.add_argument("operation", choices=("set", "delete", "show"))
+    parser.add_argument("operation", choices=("set", "delete", "show", "test"))
     parser.add_argument("--user-ids", default="")
     args = parser.parse_args(argv)
-    path = Path(TELEGRAM_CONFIG_FILE)
+    path = Path(config_file or TELEGRAM_CONFIG_FILE)
     if args.operation == "show":
-        config = telegram_config()
+        config = telegram_config(path)
         if config:
             print("已配置 Telegram Bot；允许用户数：%d" % len(config["allowed_user_ids"]))
         else:
             print("未配置 Telegram Bot")
         return
+    if args.operation == "test":
+        config = telegram_config(path)
+        if not config:
+            raise ValueError("尚未配置 Telegram Bot")
+        for user_id in config["allowed_user_ids"]:
+            telegram_request(config["token"], "sendMessage", {
+                "chat_id": user_id, "text": test_message})
+        print("测试消息已发送")
+        return
     if args.operation == "delete":
         path.unlink(missing_ok=True)
-        path.parent.joinpath("telegram-bot.token").unlink(missing_ok=True)
+        path.parent.joinpath(token_filename).unlink(missing_ok=True)
         return
     try:
         user_ids = [int(value.strip()) for value in args.user_ids.split(",") if value.strip()]
@@ -1921,13 +1932,13 @@ def telegram_cli(argv):
     token = sys.stdin.read().strip()
     if not token or any(char.isspace() for char in token):
         raise ValueError("Telegram Bot Token 不能为空或包含空白字符")
-    token_path = path.parent / "telegram-bot.token"
+    token_path = path.parent / token_filename
     atomic_write(token_path, token + "\n")
     previous = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     cooldown = configured_notification_cooldown(
         previous.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS)
         if isinstance(previous, dict) else DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS)
-    atomic_write(path, json.dumps({"token_file": "/run/secrets/telegram-bot.token",
+    atomic_write(path, json.dumps({"token_file": f"/run/secrets/{token_filename}",
                                    "allowed_user_ids": sorted(set(user_ids)),
                                    "notification_cooldown_seconds": cooldown}, ensure_ascii=False, indent=2) + "\n")
 
@@ -2088,6 +2099,10 @@ def main():
         return
     if len(sys.argv) > 1 and sys.argv[1] == "telegram":
         telegram_cli(sys.argv[2:])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "ssh-telegram":
+        telegram_cli(sys.argv[2:], SSH_TELEGRAM_CONFIG_FILE, "ssh-telegram-bot.token",
+                     "✅ SSH 登录告警 Bot 测试消息；接收配置正常。")
         return
     if len(sys.argv) > 1 and sys.argv[1] == "ssh-login":
         ssh_login_cli(sys.argv[2:])
