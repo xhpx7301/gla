@@ -1017,6 +1017,8 @@ STACK_DIR="${STACK_DIR:-/opt/xray-log-dashboard}"
 COMPOSE_FILE="$STACK_DIR/compose.yaml"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
 INSTALLER_URL="https://raw.githubusercontent.com/xhpx7301/gla/main/deploy-xray-grafana-loki-alloy.sh"
+BACKUP_DIR="${GLA_BACKUP_DIR:-/var/backups/gla}"
+BACKUP_STATE_DIR="${GLA_BACKUP_STATE_DIR:-/var/lib/gla-backup}"
 
 die() { printf '错误: %s\n' "$*" >&2; exit 1; }
 pause() { read -rp "按 Enter 键继续..." _; }
@@ -1074,6 +1076,7 @@ show_header() {
   else
     printf 'GeoIP 归属解析            [未启用]\n'
   fi
+  show_backup_status
 }
 
 compose() {
@@ -1129,6 +1132,123 @@ show_logs() {
   esac
 }
 
+show_backup_status() {
+  local schedule=01:00 next result timestamp file
+  if systemctl is-enabled --quiet gla-backup.timer 2>/dev/null; then
+    [ ! -f "$BACKUP_STATE_DIR/time" ] || read -r schedule < "$BACKUP_STATE_DIR/time"
+    if systemctl is-active --quiet gla-backup.timer 2>/dev/null; then
+      printf '自动数据备份             [已启用：每天 %s UTC+8]\n' "$schedule"
+      next="$(systemctl show gla-backup.timer -p NextElapseUSecRealtime --value 2>/dev/null || true)"
+      if [ -n "$next" ] && [ "$next" != n/a ]; then
+        next="$(TZ=UTC-8 date -d "$next" '+%Y-%m-%d %H:%M:%S UTC+8' 2>/dev/null || true)"
+        [ -z "$next" ] || printf '下次自动备份             %s\n' "$next"
+      fi
+    else
+      printf '自动数据备份             [异常：定时器未运行]\n'
+    fi
+  else
+    printf '自动数据备份             [未启用]\n'
+  fi
+  if [ -f "$BACKUP_STATE_DIR/result" ]; then
+    IFS=$'\t' read -r result timestamp file < "$BACKUP_STATE_DIR/result"
+    timestamp="$(TZ=UTC-8 date -d "@$timestamp" '+%Y-%m-%d %H:%M:%S UTC+8' 2>/dev/null || true)"
+    case "$result" in
+      running)
+        if (exec 8>"$BACKUP_STATE_DIR/lock"; flock -n 8) 2>/dev/null; then
+          result='异常中断（请查看日志）'
+        else
+          result='进行中'
+        fi ;;
+      success) result='成功' ;;
+      *) result='失败（请查看日志）' ;;
+    esac
+    printf '最近数据备份             [%s] %s\n' "$result" "$timestamp"
+  else
+    printf '最近数据备份             [尚无记录]\n'
+  fi
+}
+
+configure_backup_timer() {
+  local schedule
+  read -rp '每天备份时间（北京时间 HH:MM，留空 01:00）: ' schedule
+  schedule="${schedule:-01:00}"
+  [[ "$schedule" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { printf '时间格式无效。\n'; return 1; }
+  command -v systemctl >/dev/null || { printf '自动备份需要 systemd。\n'; return 1; }
+  command -v flock >/dev/null || { printf '自动备份需要 flock（util-linux）。\n'; return 1; }
+  # systemd quoted arguments still interpret percent specifiers and backslashes.
+  case "$STACK_DIR$BACKUP_DIR$BACKUP_STATE_DIR$0" in *[\%\"\\\$\`]*|*$'\n'*) printf '安装路径含有不支持的 systemd 字符。\n'; return 1 ;; esac
+  install -d -m 0700 "$BACKUP_DIR" "$BACKUP_STATE_DIR" || return 1
+  cat > /etc/systemd/system/gla-backup.service <<UNIT || return 1
+[Unit]
+Description=GLA daily data backup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+UMask=0077
+Environment="STACK_DIR=$STACK_DIR"
+Environment="GLA_BACKUP_DIR=$BACKUP_DIR"
+Environment="GLA_BACKUP_STATE_DIR=$BACKUP_STATE_DIR"
+ExecStart=/bin/bash "$(readlink -f "$0")" backup-run
+TimeoutStartSec=infinity
+TimeoutStopSec=300
+KillMode=mixed
+UNIT
+  cat > /etc/systemd/system/gla-backup.timer <<UNIT || return 1
+[Unit]
+Description=GLA daily backup timer (UTC+8)
+
+[Timer]
+OnCalendar=*-*-* $schedule:00 Asia/Shanghai
+AccuracySec=1min
+Persistent=true
+Unit=gla-backup.service
+
+[Install]
+WantedBy=timers.target
+UNIT
+  printf '%s\n' "$schedule" > "$BACKUP_STATE_DIR/time" || return 1
+  systemctl daemon-reload || return 1
+  systemctl enable gla-backup.timer || return 1
+  systemctl restart gla-backup.timer || return 1
+  printf '已启用每天 %s（北京时间）备份，保存到 %s，保留最近 7 份自动备份。\n' "$schedule" "$BACKUP_DIR"
+}
+
+run_scheduled_backup() {
+  install -d -m 0700 "$BACKUP_DIR"
+  backup_data export "$BACKUP_DIR/gla-auto-$(TZ=UTC-8 date '+%Y%m%d-%H%M%S').tar.gz"
+  # Only remove our completed automatic backups after a successful new backup.
+  local files=() count index
+  shopt -s nullglob
+  files=("$BACKUP_DIR"/gla-auto-????????-??????.tar.gz)
+  count=${#files[@]}
+  for ((index=0; index<count-7; index++)); do
+    rm -f -- "${files[index]}"
+  done
+}
+
+backup_menu() {
+  local action
+  while true; do
+    printf '\nGLA 数据备份\n'
+    show_backup_status
+    printf '\n自动备份目录：%s（保留最近 7 份）\n' "$BACKUP_DIR"
+    printf '\n1. 导出备份\n2. 导入并恢复备份\n3. 启用或修改每日自动备份（默认 01:00）\n4. 关闭自动备份\n5. 立即执行一次自动备份\n6. 查看自动备份日志\n0. 返回\n'
+    read -rp '请选择 [0-6]: ' action
+    case "$action" in
+      0) return ;;
+      1) bash "$0" backup-export || printf '导出失败，请检查输出。\n' ;;
+      2) bash "$0" backup-import || printf '恢复失败；请排查后再启动服务。\n' ;;
+      3) configure_backup_timer || printf '设置失败。\n' ;;
+      4) if systemctl disable --now gla-backup.timer; then printf '已关闭自动备份，已有备份保留。\n'; fi ;;
+      5) if systemctl start --no-block gla-backup.service; then printf '已请求备份，稍后查看状态或日志。\n'; fi ;;
+      6) TZ=UTC-8 journalctl -u gla-backup.service -n 80 --no-pager 2>&1 | format_service_log_utc8 ;;
+      *) printf '无效选择。\n' ;;
+    esac
+  done
+}
+
 backup_data() (
   set -Eeuo pipefail
   umask 077
@@ -1136,21 +1256,53 @@ backup_data() (
   workdir=""
   running=""
   resume=false
-  trap 'result=$?; if [ "$resume" = true ] && [ -n "$running" ]; then compose start $running || result=1; fi; [ -z "$workdir" ] || rm -rf -- "$workdir"; exit "$result"' EXIT
+  recording=false
+  partial=""
+  finish_backup() {
+    result=$?
+    trap - EXIT
+    if [ "$resume" = true ] && [ -n "$running" ]; then compose start $running || result=1; fi
+    if [ "$recording" = true ]; then
+      if [ "$result" -eq 0 ]; then
+        mv -- "$partial" "$archive" || result=1
+      fi
+      if [ "$result" -eq 0 ]; then
+        printf 'success\t%s\t%s\n' "$(date +%s)" "$archive" > "$BACKUP_STATE_DIR/result.tmp"
+        printf '备份已导出：%s\n' "$archive"
+      else
+        printf 'failed\t%s\t%s\n' "$(date +%s)" "$archive" > "$BACKUP_STATE_DIR/result.tmp"
+        printf '备份失败，请检查日志与服务状态。\n' >&2
+      fi
+      mv -f -- "$BACKUP_STATE_DIR/result.tmp" "$BACKUP_STATE_DIR/result"
+    fi
+    [ -z "$partial" ] || rm -f -- "$partial"
+    [ -z "$workdir" ] || rm -rf -- "$workdir"
+    exit "$result"
+  }
+  trap finish_backup EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  printf '\nGLA 数据备份\n\n1. 导出备份\n2. 导入并恢复备份\n0. 返回\n'
-  read -rp '请选择 [0-2]: ' action
+  action="${1:-}"
+  if [ -z "$action" ]; then
+    printf '\nGLA 数据备份\n\n1. 导出备份\n2. 导入并恢复备份\n0. 返回\n'
+    read -rp '请选择 [0-2]: ' action
+  fi
+  install -d -m 0700 "$BACKUP_STATE_DIR"
+  exec 9>"$BACKUP_STATE_DIR/lock"
+  flock -n 9 || { printf '已有备份或恢复任务正在运行。\n'; return 1; }
   case "$action" in
     0) return ;;
-    1)
-      archive=""
-      read -rp '备份文件路径（留空使用当前目录及时间戳）: ' archive
+    1|export)
+      archive="${2:-}"
+      if [ -z "$archive" ]; then read -rp '备份文件路径（留空使用当前目录及时间戳）: ' archive; fi
       if [ -z "$archive" ]; then
         archive="$PWD/gla-backup-$(date '+%Y%m%d-%H%M%S').tar.gz"
       fi
       case "$archive" in /*) ;; *) archive="$PWD/$archive" ;; esac
       [ ! -e "$archive" ] || { printf '文件已存在：%s\n' "$archive"; return 1; }
+      recording=true
+      printf 'running\t%s\t%s\n' "$(date +%s)" "$archive" > "$BACKUP_STATE_DIR/result.tmp"
+      mv -f -- "$BACKUP_STATE_DIR/result.tmp" "$BACKUP_STATE_DIR/result"
       volumes="$(docker volume ls -q --filter label=com.docker.compose.project=xray-log-dashboard)"
       [ -n "$volumes" ] || { printf '未找到 GLA 数据卷，无法导出完整备份。\n'; return 1; }
       running="$(compose ps --services --filter status=running)"
@@ -1166,17 +1318,16 @@ backup_data() (
         mkdir -p "$workdir/backup/volumes/$volume"
         cp -a "$mountpoint"/. "$workdir/backup/volumes/$volume/"
       done <<< "$volumes"
-      if tar -czf "$archive" -C "$workdir" backup; then
-        chmod 0600 "$archive"
-        printf '备份已导出：%s\n' "$archive"
+      partial="$(mktemp "${archive}.partial.XXXXXX")"
+      if tar -czf "$partial" -C "$workdir" backup; then
+        chmod 0600 "$partial"
       else
         printf '备份导出失败。\n' >&2
-        rm -f -- "$archive"
         return 1
       fi
       rm -rf "$workdir"
       ;;
-    2)
+    2|import)
       read -rp '备份文件路径: ' archive
       [ -f "$archive" ] || { printf '找不到备份文件。\n'; return 1; }
       workdir="$(mktemp -d)"
@@ -1841,6 +1992,10 @@ uninstall_everything() {
     printf '已取消。\n'
     return
   fi
+  systemctl disable --now gla-backup.timer 2>/dev/null || true
+  systemctl stop gla-backup.service 2>/dev/null || true
+  rm -f /etc/systemd/system/gla-backup.timer /etc/systemd/system/gla-backup.service
+  systemctl daemon-reload || true
   [ -f "$COMPOSE_FILE" ] && compose down -v || true
   docker volume ls -q --filter label=com.docker.compose.project=xray-log-dashboard | xargs -r docker volume rm
   docker image rm grafana/grafana:latest grafana/loki:latest grafana/alloy:latest victoriametrics/victoria-metrics:latest python:3.12-alpine 2>/dev/null || true
@@ -1849,6 +2004,12 @@ uninstall_everything() {
   printf 'GLA 已完整卸载。NPM 和外部 Docker 网络未被修改。\n'
   exit 0
 }
+
+case "${1:-}" in
+  backup-run) run_scheduled_backup; exit $? ;;
+  backup-export) backup_data export; exit $? ;;
+  backup-import) backup_data import; exit $? ;;
+esac
 
 while true; do
   clear
@@ -1881,7 +2042,7 @@ MENU
     8) show_access_info; pause ;;
     9) update_stack; pause ;;
     10) uninstall_everything ;;
-    11) backup_data; pause ;;
+    11) backup_menu ;;
     *) printf '无效选择。\n'; pause ;;
   esac
 done
