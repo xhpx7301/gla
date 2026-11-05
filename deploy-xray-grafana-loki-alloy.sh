@@ -1228,13 +1228,42 @@ run_scheduled_backup() {
   done
 }
 
+show_backup_history() {
+  local result timestamp file logs count=0
+  printf '\n备份文件\n'
+  if [ -d "$BACKUP_DIR" ]; then
+    while IFS= read -r -d '' file; do
+      printf '%s  %s  %s\n' "$(du -h "$file" | awk '{print $1}')" \
+        "$(stat -c '%y' "$file" | cut -d. -f1)" "$file"
+      count=$((count + 1))
+    done < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.tar.gz' -print0 | sort -z)
+  fi
+  if [ -f "$BACKUP_STATE_DIR/result" ]; then
+    IFS=$'\t' read -r result timestamp file < "$BACKUP_STATE_DIR/result"
+    if [ -f "$file" ] && [[ "$file" != "$BACKUP_DIR"/* ]]; then
+      printf '%s  %s  %s\n' "$(du -h "$file" | awk '{print $1}')" \
+        "$(stat -c '%y' "$file" | cut -d. -f1)" "$file"
+      count=$((count + 1))
+    fi
+  fi
+  [ "$count" -gt 0 ] || printf '尚未找到备份文件。\n'
+
+  printf '\n自动备份任务日志\n'
+  logs="$(journalctl -u gla-backup.service -n 80 --no-pager 2>&1 || true)"
+  if [ -z "$logs" ] || [[ "$logs" == *'-- No entries --'* ]]; then
+    printf '暂无自动备份任务日志。手动导出的备份不会写入 systemd 日志。\n'
+  else
+    printf '%s\n' "$logs" | format_service_log_utc8
+  fi
+}
+
 backup_menu() {
   local action
   while true; do
     printf '\nGLA 数据备份\n'
     show_backup_status
     printf '\n自动备份目录：%s（保留最近 7 份）\n' "$BACKUP_DIR"
-    printf '\n1. 导出备份\n2. 导入并恢复备份\n3. 启用或修改每日自动备份（默认 01:00）\n4. 关闭自动备份\n5. 立即执行一次自动备份\n6. 查看自动备份日志\n0. 返回\n'
+    printf '\n1. 导出备份\n2. 导入并恢复备份\n3. 启用或修改每日自动备份（默认 01:00）\n4. 关闭自动备份\n5. 立即执行一次自动备份\n6. 查看备份文件和自动备份日志\n0. 返回\n'
     read -rp '请选择 [0-6]: ' action
     case "$action" in
       0) return ;;
@@ -1243,7 +1272,7 @@ backup_menu() {
       3) configure_backup_timer || printf '设置失败。\n' ;;
       4) if systemctl disable --now gla-backup.timer; then printf '已关闭自动备份，已有备份保留。\n'; fi ;;
       5) if systemctl start --no-block gla-backup.service; then printf '已请求备份，稍后查看状态或日志。\n'; fi ;;
-      6) TZ=UTC-8 journalctl -u gla-backup.service -n 80 --no-pager 2>&1 | format_service_log_utc8 ;;
+      6) show_backup_history ;;
       *) printf '无效选择。\n' ;;
     esac
   done

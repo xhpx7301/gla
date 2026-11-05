@@ -48,7 +48,9 @@ confirm() { return 0; }
 ''' + function + body
             result = subprocess.run([BASH], input=harness, text=True, encoding="utf-8",
                                     capture_output=True, env=env, timeout=30)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            history = pathlib.Path(directory) / "history"
+            details = history.read_text(encoding="utf-8", errors="replace") if history.exists() else ""
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr + details)
 
     def test_round_trip_restores_secrets_and_hidden_volume_files(self):
         self.run_backup(r'''
@@ -193,6 +195,28 @@ grep -q '异常中断' "$TEST_DIR/status"
 flock() { return 1; }
 show_backup_status > "$TEST_DIR/status"
 grep -q '进行中' "$TEST_DIR/status"
+''')
+
+    def test_backup_history_lists_manual_export_and_explains_empty_journal(self):
+        self.run_backup(r'''
+mkdir -p "$BACKUP_DIR"
+printf archive > "$BACKUP_DIR/gla-auto-20261105-010000.tar.gz"
+printf manual > "$TEST_DIR/manual-backup.tar.gz"
+mkdir -p "$BACKUP_STATE_DIR"
+printf 'success\t1793808000\t%s\n' "$TEST_DIR/manual-backup.tar.gz" > "$BACKUP_STATE_DIR/result"
+journalctl() { printf '%s\n' '-- No entries --'; }
+show_backup_history > "$TEST_DIR/history"
+grep -q 'gla-auto-20261105-010000.tar.gz' "$TEST_DIR/history"
+grep -q 'manual-backup.tar.gz' "$TEST_DIR/history"
+grep -q '手动导出的备份不会写入 systemd 日志' "$TEST_DIR/history"
+''')
+
+    def test_backup_history_reports_no_archives_explicitly(self):
+        self.run_backup(r'''
+journalctl() { printf '%s\n' '-- No entries --'; }
+show_backup_history > "$TEST_DIR/history"
+grep -q '尚未找到备份文件' "$TEST_DIR/history"
+grep -q '暂无自动备份任务日志' "$TEST_DIR/history"
 ''')
 
     def test_generated_manager_shell_syntax(self):
