@@ -1133,15 +1133,21 @@ show_logs() {
 }
 
 show_backup_status() {
-  local schedule=01:00 next result timestamp file
+  local schedule=01:00 next_epoch now_epoch result timestamp file
   if systemctl is-enabled --quiet gla-backup.timer 2>/dev/null; then
     [ ! -f "$BACKUP_STATE_DIR/time" ] || read -r schedule < "$BACKUP_STATE_DIR/time"
     if systemctl is-active --quiet gla-backup.timer 2>/dev/null; then
       printf '自动数据备份             [已启用：每天 %s UTC+8]\n' "$schedule"
-      next="$(systemctl show gla-backup.timer -p NextElapseUSecRealtime --value 2>/dev/null || true)"
-      if [ -n "$next" ] && [ "$next" != n/a ]; then
-        next="$(TZ=UTC-8 date -d "$next" '+%Y-%m-%d %H:%M:%S UTC+8' 2>/dev/null || true)"
-        [ -z "$next" ] || printf '下次自动备份             %s\n' "$next"
+      next_epoch="$(TZ=Asia/Shanghai date -d "today $schedule" '+%s' 2>/dev/null || true)"
+      now_epoch="$(date '+%s')"
+      if [[ "$next_epoch" =~ ^[0-9]+$ ]] && [[ "$now_epoch" =~ ^[0-9]+$ ]]; then
+        if (( next_epoch <= now_epoch )); then
+          next_epoch="$(TZ=Asia/Shanghai date -d "tomorrow $schedule" '+%s' 2>/dev/null || true)"
+        fi
+        if [[ "$next_epoch" =~ ^[0-9]+$ ]]; then
+          next="$(TZ=UTC-8 date -d "@$next_epoch" '+%Y-%m-%d %H:%M:%S UTC+8' 2>/dev/null || true)"
+          [ -z "$next" ] || printf '下次自动备份             %s\n' "$next"
+        fi
       fi
     else
       printf '自动数据备份             [异常：定时器未运行]\n'

@@ -178,15 +178,24 @@ set -e
 
     def test_status_reports_timer_next_run_and_interrupted_backup(self):
         self.run_backup(r'''
-systemctl() {
-  if [ "$1" = show ]; then printf 'Fri 2026-11-06 01:00:00 +0800\n'; fi
+date() {
+  case "$*" in
+    '+%s') printf '200\n' ;;
+    '-d today 01:00 +%s') printf '100\n' ;;
+    '-d tomorrow 01:00 +%s') printf '300\n' ;;
+    '-d @300 +%Y-%m-%d %H:%M:%S UTC+8') printf '2026-11-06 01:00:00 UTC+8\n' ;;
+    '-d @1793808000 +%Y-%m-%d %H:%M:%S UTC+8') printf '2026-11-05 17:20:00 UTC+8\n' ;;
+    *) command date "$@" ;;
+  esac
 }
+systemctl() { return 0; }
 mkdir -p "$BACKUP_STATE_DIR"
 printf '01:00\n' > "$BACKUP_STATE_DIR/time"
 printf 'success\t1793808000\tarchive\n' > "$BACKUP_STATE_DIR/result"
 show_backup_status > "$TEST_DIR/status"
 grep -q '已启用：每天 01:00 UTC+8' "$TEST_DIR/status"
 grep -q '2026-11-06 01:00:00 UTC+8' "$TEST_DIR/status"
+! grep -q '15:00:00 UTC+8' "$TEST_DIR/status"
 grep -q '成功' "$TEST_DIR/status"
 printf 'running\t1793808000\tarchive\n' > "$BACKUP_STATE_DIR/result"
 flock() { return 0; }
