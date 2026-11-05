@@ -1129,6 +1129,107 @@ show_logs() {
   esac
 }
 
+backup_data() (
+  set -Eeuo pipefail
+  umask 077
+  # Subshell variables remain available to EXIT even when errexit unwinds the function.
+  workdir=""
+  running=""
+  resume=false
+  trap 'result=$?; if [ "$resume" = true ] && [ -n "$running" ]; then compose start $running || result=1; fi; [ -z "$workdir" ] || rm -rf -- "$workdir"; exit "$result"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  printf '\nGLA 数据备份\n\n1. 导出备份\n2. 导入并恢复备份\n0. 返回\n'
+  read -rp '请选择 [0-2]: ' action
+  case "$action" in
+    0) return ;;
+    1)
+      archive=""
+      read -rp '备份文件路径（留空使用当前目录及时间戳）: ' archive
+      if [ -z "$archive" ]; then
+        archive="$PWD/gla-backup-$(date '+%Y%m%d-%H%M%S').tar.gz"
+      fi
+      case "$archive" in /*) ;; *) archive="$PWD/$archive" ;; esac
+      [ ! -e "$archive" ] || { printf '文件已存在：%s\n' "$archive"; return 1; }
+      volumes="$(docker volume ls -q --filter label=com.docker.compose.project=xray-log-dashboard)"
+      [ -n "$volumes" ] || { printf '未找到 GLA 数据卷，无法导出完整备份。\n'; return 1; }
+      running="$(compose ps --services --filter status=running)"
+      workdir="$(mktemp -d)"
+      mkdir -p "$workdir/backup/volumes"
+      printf '正在停止服务以确保备份一致...\n'
+      resume=true
+      compose stop
+      cp -a "$STACK_DIR" "$workdir/backup/stack"
+      while IFS= read -r volume; do
+        [ -n "$volume" ] || continue
+        mountpoint="$(docker volume inspect -f '{{.Mountpoint}}' "$volume")"
+        mkdir -p "$workdir/backup/volumes/$volume"
+        cp -a "$mountpoint"/. "$workdir/backup/volumes/$volume/"
+      done <<< "$volumes"
+      if tar -czf "$archive" -C "$workdir" backup; then
+        chmod 0600 "$archive"
+        printf '备份已导出：%s\n' "$archive"
+      else
+        printf '备份导出失败。\n' >&2
+        rm -f -- "$archive"
+        return 1
+      fi
+      rm -rf "$workdir"
+      ;;
+    2)
+      read -rp '备份文件路径: ' archive
+      [ -f "$archive" ] || { printf '找不到备份文件。\n'; return 1; }
+      workdir="$(mktemp -d)"
+      tar -tzf "$archive" > "$workdir/entries"
+      # Backups contain files and directories only. Reject links/devices before extraction.
+      LC_ALL=C tar -tvzf "$archive" > "$workdir/types"
+      if LC_ALL=C grep -q '^[^-d]' "$workdir/types"; then
+        printf '备份包含链接或特殊文件，拒绝恢复。\n' >&2
+        return 1
+      fi
+      # Reject absolute paths and parent traversal before extracting an archive.
+      while IFS= read -r entry; do
+        case "$entry" in /*|../*|*/../*|*/..) printf '备份包含不安全路径：%s\n' "$entry"; return 1 ;; esac
+        case "$entry" in backup/|backup/stack|backup/stack/*|backup/volumes|backup/volumes/*) ;; *) printf '备份结构无效：%s\n' "$entry"; return 1 ;; esac
+      done < "$workdir/entries"
+      if ! tar -xzf "$archive" -C "$workdir" || [ ! -f "$workdir/backup/stack/compose.yaml" ]; then
+        printf '备份文件无效或不完整。\n' >&2
+        rm -rf "$workdir"
+        return 1
+      fi
+      if ! confirm '恢复会覆盖当前配置、密钥及所有 GLA 数据卷，继续？'; then
+        rm -rf "$workdir"
+        printf '已取消。\n'
+        return
+      fi
+      volumes="$(docker volume ls -q --filter label=com.docker.compose.project=xray-log-dashboard)"
+      [ -n "$volumes" ] || { printf '请先安装 GLA 并创建数据卷，再恢复备份。\n'; return 1; }
+      while IFS= read -r volume; do
+        [ -n "$volume" ] || continue
+        [ -d "$workdir/backup/volumes/$volume" ] || {
+          printf '备份缺少数据卷：%s\n' "$volume" >&2
+          rm -rf "$workdir"
+          return 1
+        }
+      done <<< "$volumes"
+      printf '正在停止服务并恢复数据...\n'
+      compose stop
+      rm -rf "$STACK_DIR"
+      cp -a "$workdir/backup/stack" "$STACK_DIR"
+      while IFS= read -r volume; do
+        [ -n "$volume" ] || continue
+        mountpoint="$(docker volume inspect -f '{{.Mountpoint}}' "$volume")"
+        find "$mountpoint" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+        cp -a "$workdir/backup/volumes/$volume/." "$mountpoint/"
+      done <<< "$volumes"
+      rm -rf "$workdir"
+      compose up -d --force-recreate
+      printf '数据已恢复。\n'
+      ;;
+    *) printf '无效选择。\n' ;;
+  esac
+)
+
 service_control_menu() {
   while true; do
     clear
@@ -1765,8 +1866,9 @@ while true; do
 8. 查看访问地址、凭据与模块
 9. 更新容器镜像
 10. 卸载并删除全部数据
+11. 数据备份与导入导出
 MENU
-  read -rp "请输入操作编号 [0-10]: " choice
+  read -rp "请输入操作编号 [0-11]: " choice
   case "$choice" in
     0) exit 0 ;;
     1) update_script_and_deploy; exit $? ;;
@@ -1779,6 +1881,7 @@ MENU
     8) show_access_info; pause ;;
     9) update_stack; pause ;;
     10) uninstall_everything ;;
+    11) backup_data; pause ;;
     *) printf '无效选择。\n'; pause ;;
   esac
 done
