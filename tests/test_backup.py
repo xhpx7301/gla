@@ -68,6 +68,15 @@ grep -q '^success' "$BACKUP_STATE_DIR/result"
 [ -z "$(find "$TEST_DIR" -name '*.partial.*' -print -quit)" ]
 ''')
 
+    def test_manual_export_enter_saves_to_backup_directory(self):
+        self.run_backup(r'''
+backup_data export <<< ''
+files=("$BACKUP_DIR"/gla-manual-*.tar.gz)
+[ "${#files[@]}" -eq 1 ]
+tar -tzf "${files[0]}" | grep -q 'backup/stack/compose.yaml'
+grep -Fq "${files[0]}" "$BACKUP_STATE_DIR/result"
+''')
+
     def test_corrupt_archive_never_stops_services(self):
         self.run_backup(r'''
 printf 'broken archive' > "$TEST_DIR/archive.tar.gz"

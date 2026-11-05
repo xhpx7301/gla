@@ -1329,9 +1329,10 @@ backup_data() (
     0) return ;;
     1|export)
       archive="${2:-}"
-      if [ -z "$archive" ]; then read -rp '备份文件路径（留空使用当前目录及时间戳）: ' archive; fi
+      if [ -z "$archive" ]; then read -rp "备份文件路径（留空保存到 $BACKUP_DIR 并附加时间戳）: " archive; fi
       if [ -z "$archive" ]; then
-        archive="$PWD/gla-backup-$(date '+%Y%m%d-%H%M%S').tar.gz"
+        install -d -m 0700 "$BACKUP_DIR"
+        archive="$BACKUP_DIR/gla-manual-$(TZ=UTC-8 date '+%Y%m%d-%H%M%S').tar.gz"
       fi
       case "$archive" in /*) ;; *) archive="$PWD/$archive" ;; esac
       [ ! -e "$archive" ] || { printf '文件已存在：%s\n' "$archive"; return 1; }
