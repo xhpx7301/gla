@@ -118,13 +118,15 @@ bash <(wget -qO- https://raw.githubusercontent.com/xhpx7301/gla/main/deploy-xray
 
 中心服务器访问自己的面板域名若有公网回环问题，可在安装时设置 `XUI_LOCAL_HOST=panel.example.com`。采集服务将这个域名解析到 Docker 宿主机网关，同时保持原域名用于 HTTPS 证书校验。远程面板按正常 DNS 解析。
 
-如果远程面板域名只有 AAAA（IPv6）记录，除了中心宿主机能访问 IPv6，`gla-xui-exporter` 容器也需要 IPv6 出站网络。默认 Docker IPv4 桥接网络无法访问这种面板。中心服务器使用 Docker Engine **27 或更新版本**时，执行：
+如果远程面板域名只有 AAAA（IPv6）记录，除了中心宿主机能访问 IPv6，`gla-xui-exporter` 容器也需要 IPv6 出站网络。默认 Docker IPv4 桥接网络无法访问这种面板。中心服务器使用 Docker Engine **26 或更新版本**时，执行：
 
 ```bash
 XUI_ENABLE_IPV6=true gla
 ```
 
-然后选择 `1. 更新配置、脚本与仪表盘`。脚本会为 API 采集容器额外创建双栈桥接网络，由 Docker 自动分配私有 IPv6 子网并通过 IPv6 NAT 出站；设置会保存，后续菜单更新继续保留。首次安装可在安装命令前加 `XUI_ENABLE_IPV6=true`。需要关闭时使用 `XUI_ENABLE_IPV6=false gla` 并再次选择 `1`。
+然后选择 `1. 更新配置、脚本与仪表盘`。脚本会为 API 采集容器额外创建双栈桥接网络，首次启用时随机生成私有 IPv6 /64 子网，通过 Docker 的 IPv6 NAT 出站；开关和子网保存到 `.install.env`，后续菜单更新继续保留。可用 `XUI_IPV6_SUBNET=fd12:3456:789a:0::/64` 指定不与已有网络重叠的私有子网。首次安装可在安装命令前加 `XUI_ENABLE_IPV6=true`。需要关闭时使用 `XUI_ENABLE_IPV6=false gla` 并再次选择 `1`。
+
+**Docker 26** 的 IPv6 NAT 默认关闭，需要先备份 `/etc/docker/daemon.json`，在现有 JSON 配置中合并 `"experimental": true` 和 `"ip6tables": true`，用 `dockerd --validate --config-file=/etc/docker/daemon.json` 验证后重启 Docker。重启会短暂影响该宿主机的容器，需安排合适时间。Docker 27+ 默认开启 IPv6 防火墙规则；若曾手动设置 `"ip6tables": false`，也需启用后重启。GLA 不会自动修改 Docker 守护进程配置。
 
 此功能依赖宿主机已有可用 IPv6 路由、Docker 默认启用的 IPv6 防火墙/NAT 规则，以及防火墙允许容器 IPv6 转发。宿主机能访问而容器仍失败时，可在中心服务器运行以下命令，将示例域名和端口替换为实际面板值（无需 Token）：
 

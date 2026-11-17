@@ -131,7 +131,8 @@ chmod() { :; }
                    ENABLE_XRAY="true", XRAY_LOG="/obsolete-xray/access.log",
                    XUI_API_URL="https://panel.example.com/base/panel/api/inbounds/list",
                    XUI_API_TOKEN="test-token", XUI_LOCAL_HOST="panel.example.com",
-                   XUI_ENABLE_IPV6="true" if ipv6 else "false")
+                   XUI_ENABLE_IPV6="true" if ipv6 else "false",
+                   XUI_IPV6_SUBNET="fd12:3456:789a:0::/64" if ipv6 else "")
         result = subprocess.run([BASH], input=prelude + stubs + segment,
                                 text=True, encoding="utf-8", env=env,
                                 capture_output=True, cwd=ROOT, timeout=30)
@@ -199,6 +200,8 @@ chmod() { :; }
             self.assertIn("  xui_ipv6:\n    driver: bridge\n    enable_ipv6: true", compose)
             self.assertIn("    external: true", compose)
             self.assertIn("XUI_ENABLE_IPV6=true", settings)
+            self.assertIn("XUI_IPV6_SUBNET=fd12:3456:789a:0::/64", settings)
+            self.assertIn("        - subnet: fd12:3456:789a:0::/64", compose)
             self.assertNotIn("network_mode: host", compose)
 
     def test_ipv6_checks_docker_server_version_before_deployment(self):
@@ -216,19 +219,29 @@ XUI_API_URL=''
 XUI_LOCAL_HOST=''
 docker() {
   if [ "$1" = version ]; then printf '%s\n' "$TEST_DOCKER_VERSION"; fi
+  if [ "$1" = info ]; then printf '%s\n' "$TEST_EXPERIMENTAL"; fi
 }
-''' + function + "\nrequire_install_prerequisites\n"
-        for enabled, version, ok in (("true", "27.0.0", True), ("true", "29.0.1", True),
-                                     ("true", "26.1.5", False), ("false", "26.1.5", True),
-                                     ("invalid", "29.0.1", False)):
+''' + function + '\nrequire_install_prerequisites\nprintf "subnet=%s\\n" "$XUI_IPV6_SUBNET"\n'
+        for enabled, version, experimental, ok in (("true", "27.0.0", "false", True),
+                                     ("true", "29.0.1", "false", True),
+                                     ("true", "26.1.5+dfsg1", "true", True),
+                                     ("true", "26.1.5+dfsg1", "false", False),
+                                     ("true", "25.0.5", "true", False),
+                                     ("false", "26.1.5", "false", True),
+                                     ("invalid", "29.0.1", "false", False)):
             with self.subTest(enabled=enabled, version=version):
                 result = subprocess.run([BASH, "-c", harness], text=True, encoding="utf-8",
                                         capture_output=True, timeout=10,
                                         env=dict(os.environ, XUI_ENABLE_IPV6=enabled,
-                                                 TEST_DOCKER_VERSION=version))
+                                                 XUI_IPV6_SUBNET="", TEST_DOCKER_VERSION=version,
+                                                 TEST_EXPERIMENTAL=experimental))
                 self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
-                if enabled == "true" and not ok:
-                    self.assertIn("Docker Engine 27", result.stderr)
+                if enabled == "true" and ok:
+                    self.assertRegex(result.stdout, r"subnet=fd[0-9a-f]{2}:[0-9a-f]{4}:[0-9a-f]{4}:0::/64")
+                if enabled == "true" and version.startswith("25"):
+                    self.assertIn("Docker Engine 26", result.stderr)
+                if enabled == "true" and version.startswith("26") and not ok:
+                    self.assertIn("experimental 和 ip6tables", result.stderr)
 
     def test_updates_preserve_ipv6_setting_and_accept_explicit_override(self):
         script = (ROOT / "deploy-xray-grafana-loki-alloy.sh").read_text(encoding="utf-8")
@@ -239,18 +252,20 @@ docker() {
             for saved, override, expected in (("true", None, "true"), ("false", "true", "true"),
                                                ("true", "false", "false")):
                 with self.subTest(saved=saved, override=override):
-                    settings.write_text(f"XUI_ENABLE_IPV6={saved}\n", encoding="utf-8")
+                    settings.write_text(f"XUI_ENABLE_IPV6={saved}\nXUI_IPV6_SUBNET=fd12:3456:789a:0::/64\n", encoding="utf-8")
                     env = dict(os.environ, INSTALL_SETTINGS_FILE=settings.as_posix())
                     env.pop("XUI_ENABLE_IPV6", None)
+                    env.pop("XUI_IPV6_SUBNET", None)
                     if override is not None:
                         env["XUI_ENABLE_IPV6"] = override
                     harness = '''set -Eeuo pipefail
-download_installer() { printf 'printf "ipv6=%%s\\n" "$XUI_ENABLE_IPV6"\n'; }
+download_installer() { printf 'printf "ipv6=%%s subnet=%%s\\n" "$XUI_ENABLE_IPV6" "$XUI_IPV6_SUBNET"\n'; }
 ''' + function + "\nupdate_script_and_deploy\n"
                     result = subprocess.run([BASH, "-c", harness], text=True, encoding="utf-8",
                                             capture_output=True, timeout=10, env=env)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertIn(f"ipv6={expected}", result.stdout)
+                    self.assertIn("subnet=fd12:3456:789a:0::/64", result.stdout)
 
 
 if __name__ == "__main__":

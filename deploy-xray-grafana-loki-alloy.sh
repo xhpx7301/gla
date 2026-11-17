@@ -18,6 +18,7 @@ XUI_API_URL="${XUI_API_URL:-}"
 XUI_API_TOKEN="${XUI_API_TOKEN:-}"
 XUI_LOCAL_HOST="${XUI_LOCAL_HOST:-}"
 XUI_ENABLE_IPV6="${XUI_ENABLE_IPV6:-false}"
+XUI_IPV6_SUBNET="${XUI_IPV6_SUBNET:-}"
 MANAGER_PATH="/usr/local/bin/gla"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
 GEOIP_DB_PATH="${GEOIP_DB_PATH:-$STACK_DIR/geoip/GeoLite2-City.mmdb}"
@@ -47,6 +48,7 @@ write_install_settings() {
     printf 'NPM_NETWORK=%q\n' "$NPM_NETWORK"
     printf 'XUI_LOCAL_HOST=%q\n' "$XUI_LOCAL_HOST"
     printf 'XUI_ENABLE_IPV6=%q\n' "$XUI_ENABLE_IPV6"
+    printf 'XUI_IPV6_SUBNET=%q\n' "$XUI_IPV6_SUBNET"
   } >"$INSTALL_SETTINGS_FILE"
   chmod 0600 "$INSTALL_SETTINGS_FILE"
 }
@@ -104,12 +106,20 @@ require_install_prerequisites() {
   docker info >/dev/null 2>&1 || die "Docker 服务未运行或当前用户无权限访问。"
   case "$XUI_ENABLE_IPV6" in
     true)
-      # Docker 27+ allocates a private IPv6 subnet automatically and provides NAT66.
-      # Use a separate network so existing GLA/NPM networks need not be recreated.
-      local docker_version docker_major
+      # Explicit, persistent ULA IPAM also works on Docker 26. A separate network
+      # avoids recreating existing GLA/NPM networks when enabling IPv6.
+      local docker_version docker_major ipv6_prefix
       docker_version="$(docker version --format '{{.Server.Version}}')"
       docker_major="${docker_version%%.*}"
-      [[ "$docker_major" =~ ^[0-9]+$ ]] && [ "$docker_major" -ge 27 ] || die "面板 IPv6 出站网络需要 Docker Engine 27 或更新版本。"
+      [[ "$docker_major" =~ ^[0-9]+$ ]] && [ "$docker_major" -ge 26 ] || die "面板 IPv6 出站网络需要 Docker Engine 26 或更新版本。"
+      if [ "$docker_major" -eq 26 ]; then
+        [ "$(docker info --format '{{.ExperimentalBuild}}')" = true ] || die 'Docker 26 的 IPv6 NAT 需要在 daemon.json 启用 experimental 和 ip6tables，并重启 Docker；详见 README。'
+      fi
+      if [ -z "$XUI_IPV6_SUBNET" ]; then
+        ipv6_prefix="$(od -An -N5 -tx1 /dev/urandom | tr -d ' \n')"
+        XUI_IPV6_SUBNET="fd${ipv6_prefix:0:2}:${ipv6_prefix:2:4}:${ipv6_prefix:6:4}:0::/64"
+      fi
+      [[ "$XUI_IPV6_SUBNET" =~ ^fd[[:xdigit:]]{2}:[[:xdigit:]]{1,4}:[[:xdigit:]]{1,4}:[[:xdigit:]]{1,4}::/64$ ]] || die "XUI_IPV6_SUBNET 必须是 fd 开头的私有 IPv6 /64 子网，如 fd12:3456:789a:0::/64。"
       ;;
     false) ;;
     *) die "XUI_ENABLE_IPV6 只能是 true 或 false。" ;;
@@ -415,7 +425,10 @@ if [ "$XUI_ENABLE_IPV6" = true ]; then
   XUI_IPV6_SERVICE_NETWORK="      - xui_ipv6"
   XUI_IPV6_NETWORK_CONFIG="  xui_ipv6:
     driver: bridge
-    enable_ipv6: true"
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: ${XUI_IPV6_SUBNET}"
 fi
 
 GEOIP_VOLUME_LINE=""
@@ -1539,6 +1552,7 @@ download_installer() {
 update_script_and_deploy() {
   local xui_local_host_is_set="${XUI_LOCAL_HOST+x}" xui_local_host_override="${XUI_LOCAL_HOST-}"
   local xui_enable_ipv6_is_set="${XUI_ENABLE_IPV6+x}" xui_enable_ipv6_override="${XUI_ENABLE_IPV6-}"
+  local xui_ipv6_subnet_is_set="${XUI_IPV6_SUBNET+x}" xui_ipv6_subnet_override="${XUI_IPV6_SUBNET-}"
   local enable_geoip_is_set="${ENABLE_GEOIP+x}" enable_geoip_override="${ENABLE_GEOIP-}"
   local geoip_db_path_is_set="${GEOIP_DB_PATH+x}" geoip_db_path_override="${GEOIP_DB_PATH-}"
   local enable_asn_is_set="${ENABLE_ASN+x}" enable_asn_override="${ENABLE_ASN-}"
@@ -1556,6 +1570,10 @@ update_script_and_deploy() {
   if [ "$xui_enable_ipv6_is_set" = x ]; then
     XUI_ENABLE_IPV6="$xui_enable_ipv6_override"
     export XUI_ENABLE_IPV6
+  fi
+  if [ "$xui_ipv6_subnet_is_set" = x ]; then
+    XUI_IPV6_SUBNET="$xui_ipv6_subnet_override"
+    export XUI_IPV6_SUBNET
   fi
   if [ "$enable_geoip_is_set" = x ]; then
     ENABLE_GEOIP="$enable_geoip_override"
