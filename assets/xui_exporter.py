@@ -6,6 +6,7 @@ enables background polling so slow remote panels cannot block Prometheus.
 """
 
 import argparse
+import errno
 import hmac
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -17,7 +18,9 @@ from pathlib import Path
 import re
 import secrets
 import shlex
+import socket
 import sqlite3
+import ssl
 import sys
 import tempfile
 import threading
@@ -1560,6 +1563,18 @@ class LogForwarder:
 def error_kind(error):
     if isinstance(error, urllib.error.HTTPError):
         return f"HTTP {error.code}"
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    if isinstance(reason, socket.gaierror):
+        return "DNS 解析失败"
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return "TLS 证书校验失败"
+    if isinstance(reason, TimeoutError):
+        return "连接或读取超时"
+    if isinstance(reason, OSError):
+        if reason.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EAFNOSUPPORT):
+            return "网络不可达（IPv6 面板请检查容器 IPv6 出站网络）"
+        if reason.errno == errno.ECONNREFUSED:
+            return "连接被拒绝"
     return type(error).__name__  # never print Token, panel URLs or response bodies
 
 

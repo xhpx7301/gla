@@ -1,8 +1,11 @@
 import importlib.util
+import errno
 import io
 import json
 import os
 import pathlib
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -21,6 +24,26 @@ SPEC.loader.exec_module(EXPORTER)
 
 
 class ExporterTest(unittest.TestCase):
+    def test_connection_diagnostics_classify_errors_without_exposing_secrets(self):
+        private = "https://private.example/secret-path?token=secret-token"
+        cases = [(socket.gaierror(socket.EAI_NONAME, private), "DNS 解析失败"),
+                 (ssl.SSLCertVerificationError(1, private), "TLS 证书校验失败"),
+                 (TimeoutError(private), "连接或读取超时"),
+                 (OSError(errno.ENETUNREACH, private), "网络不可达"),
+                 (OSError(errno.EHOSTUNREACH, private), "网络不可达"),
+                 (OSError(errno.EAFNOSUPPORT, private), "网络不可达"),
+                 (ConnectionRefusedError(errno.ECONNREFUSED, private), "连接被拒绝")]
+        for reason, expected in cases:
+            for error in (reason, urllib.error.URLError(reason)):
+                with self.subTest(error=type(error).__name__, reason=type(reason).__name__):
+                    actual = EXPORTER.error_kind(error)
+                    self.assertIn(expected, actual)
+                    self.assertNotIn("private.example", actual)
+                    self.assertNotIn("secret-token", actual)
+        http_error = urllib.error.HTTPError(private, 403, private, {}, None)
+        self.assertEqual(EXPORTER.error_kind(http_error), "HTTP 403")
+        self.assertEqual(EXPORTER.error_kind(urllib.error.URLError(private)), "URLError")
+
     def test_ssh_login_management_cli_adds_updates_and_generates_child_command(self):
         with tempfile.TemporaryDirectory() as directory, \
                 mock.patch.object(EXPORTER, "SSH_LOGIN_CONFIG_FILE", str(pathlib.Path(directory) / "ssh-login.json")):

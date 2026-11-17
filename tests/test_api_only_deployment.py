@@ -80,7 +80,7 @@ compose() { :; }
             self.assertEqual((path.parent / "xui-second.token").read_text(), "second-token\n")
             self.assertNotIn("second-token", result.stdout + result.stderr)
 
-    def render(self, filename, function, start, stop, directory, center=False):
+    def render(self, filename, function, start, stop, directory, center=False, ipv6=False):
         script = (ROOT / filename).read_text(encoding="utf-8")
         prelude = script[:script.index(function + "() {")]
         segment = script[script.index(start):script.index(stop)]
@@ -130,7 +130,8 @@ chmod() { :; }
                    GRAFANA_ADMIN_PASSWORD="test-password",
                    ENABLE_XRAY="true", XRAY_LOG="/obsolete-xray/access.log",
                    XUI_API_URL="https://panel.example.com/base/panel/api/inbounds/list",
-                   XUI_API_TOKEN="test-token", XUI_LOCAL_HOST="panel.example.com")
+                   XUI_API_TOKEN="test-token", XUI_LOCAL_HOST="panel.example.com",
+                   XUI_ENABLE_IPV6="true" if ipv6 else "false")
         result = subprocess.run([BASH], input=prelude + stubs + segment,
                                 text=True, encoding="utf-8", env=env,
                                 capture_output=True, cwd=ROOT, timeout=30)
@@ -169,6 +170,8 @@ chmod() { :; }
             self.assertIn("XUI_TELEGRAM_CONFIG_FILE: /run/secrets/telegram-config.json", compose)
             self.assertIn("./secrets:/run/secrets:ro", compose)
             self.assertIn("panel.example.com:host-gateway", compose)
+            self.assertNotIn("enable_ipv6:", compose)
+            self.assertIn("XUI_ENABLE_IPV6=false", settings)
             for obsolete in ("obsolete-xray", 'loki.source.file "xray',
                              'local.file_match "xray', "ENABLE_XRAY", "XRAY_LOG"):
                 self.assertNotIn(obsolete, compose + alloy + settings)
@@ -182,6 +185,72 @@ chmod() { :; }
             dashboards = pathlib.Path(directory) / "grafana/dashboards"
             for path in dashboards.glob("*.json"):
                 json.loads(path.read_text(encoding="utf-8"))
+
+    def test_ipv6_egress_is_attached_only_to_exporter_without_replacing_existing_networks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            compose, alloy, settings = self.render(
+                "deploy-xray-grafana-loki-alloy.sh", "install_stack",
+                'note "正在创建部署文件：$STACK_DIR"',
+                'note "正在启动 Grafana、Loki、VictoriaMetrics 和 Alloy"',
+                directory, center=True, ipv6=True)
+            exporter = compose.split("  xui-exporter:\n", 1)[1].split("\nvolumes:", 1)[0]
+            self.assertIn("      - default\n      - npm\n      - xui_ipv6", exporter)
+            self.assertEqual(compose.count("      - xui_ipv6"), 1)
+            self.assertIn("  xui_ipv6:\n    driver: bridge\n    enable_ipv6: true", compose)
+            self.assertIn("    external: true", compose)
+            self.assertIn("XUI_ENABLE_IPV6=true", settings)
+            self.assertNotIn("network_mode: host", compose)
+
+    def test_ipv6_checks_docker_server_version_before_deployment(self):
+        script = (ROOT / "deploy-xray-grafana-loki-alloy.sh").read_text(encoding="utf-8")
+        function = script[script.index("require_install_prerequisites() {"):
+                          script.index("setup_security_traffic_collector() {")]
+        harness = r'''set -Eeuo pipefail
+die() { printf '%s\n' "$*" >&2; exit 1; }
+id() { printf '0\n'; }
+ENABLE_GEOIP=false
+ENABLE_SECURITY_TRAFFIC=false
+SSH_PORT=22
+SERVER_NAME=central
+XUI_API_URL=''
+XUI_LOCAL_HOST=''
+docker() {
+  if [ "$1" = version ]; then printf '%s\n' "$TEST_DOCKER_VERSION"; fi
+}
+''' + function + "\nrequire_install_prerequisites\n"
+        for enabled, version, ok in (("true", "27.0.0", True), ("true", "29.0.1", True),
+                                     ("true", "26.1.5", False), ("false", "26.1.5", True),
+                                     ("invalid", "29.0.1", False)):
+            with self.subTest(enabled=enabled, version=version):
+                result = subprocess.run([BASH, "-c", harness], text=True, encoding="utf-8",
+                                        capture_output=True, timeout=10,
+                                        env=dict(os.environ, XUI_ENABLE_IPV6=enabled,
+                                                 TEST_DOCKER_VERSION=version))
+                self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
+                if enabled == "true" and not ok:
+                    self.assertIn("Docker Engine 27", result.stderr)
+
+    def test_updates_preserve_ipv6_setting_and_accept_explicit_override(self):
+        script = (ROOT / "deploy-xray-grafana-loki-alloy.sh").read_text(encoding="utf-8")
+        function = script[script.index("update_script_and_deploy() {"):
+                          script.index("panels_command() {")]
+        with tempfile.TemporaryDirectory() as directory:
+            settings = pathlib.Path(directory) / "settings.env"
+            for saved, override, expected in (("true", None, "true"), ("false", "true", "true"),
+                                               ("true", "false", "false")):
+                with self.subTest(saved=saved, override=override):
+                    settings.write_text(f"XUI_ENABLE_IPV6={saved}\n", encoding="utf-8")
+                    env = dict(os.environ, INSTALL_SETTINGS_FILE=settings.as_posix())
+                    env.pop("XUI_ENABLE_IPV6", None)
+                    if override is not None:
+                        env["XUI_ENABLE_IPV6"] = override
+                    harness = '''set -Eeuo pipefail
+download_installer() { printf 'printf "ipv6=%%s\\n" "$XUI_ENABLE_IPV6"\n'; }
+''' + function + "\nupdate_script_and_deploy\n"
+                    result = subprocess.run([BASH, "-c", harness], text=True, encoding="utf-8",
+                                            capture_output=True, timeout=10, env=env)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn(f"ipv6={expected}", result.stdout)
 
 
 if __name__ == "__main__":

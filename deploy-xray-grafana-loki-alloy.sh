@@ -17,6 +17,7 @@ ASSET_BASE_URL="${ASSET_BASE_URL:-https://raw.githubusercontent.com/xhpx7301/gla
 XUI_API_URL="${XUI_API_URL:-}"
 XUI_API_TOKEN="${XUI_API_TOKEN:-}"
 XUI_LOCAL_HOST="${XUI_LOCAL_HOST:-}"
+XUI_ENABLE_IPV6="${XUI_ENABLE_IPV6:-false}"
 MANAGER_PATH="/usr/local/bin/gla"
 INSTALL_SETTINGS_FILE="$STACK_DIR/.install.env"
 GEOIP_DB_PATH="${GEOIP_DB_PATH:-$STACK_DIR/geoip/GeoLite2-City.mmdb}"
@@ -45,6 +46,7 @@ write_install_settings() {
     printf 'SERVER_NAME=%q\n' "$SERVER_NAME"
     printf 'NPM_NETWORK=%q\n' "$NPM_NETWORK"
     printf 'XUI_LOCAL_HOST=%q\n' "$XUI_LOCAL_HOST"
+    printf 'XUI_ENABLE_IPV6=%q\n' "$XUI_ENABLE_IPV6"
   } >"$INSTALL_SETTINGS_FILE"
   chmod 0600 "$INSTALL_SETTINGS_FILE"
 }
@@ -100,6 +102,18 @@ require_install_prerequisites() {
   fi
   command -v docker >/dev/null 2>&1 || die "未找到 Docker。通常 Nginx Proxy Manager 已经安装 Docker。"
   docker info >/dev/null 2>&1 || die "Docker 服务未运行或当前用户无权限访问。"
+  case "$XUI_ENABLE_IPV6" in
+    true)
+      # Docker 27+ allocates a private IPv6 subnet automatically and provides NAT66.
+      # Use a separate network so existing GLA/NPM networks need not be recreated.
+      local docker_version docker_major
+      docker_version="$(docker version --format '{{.Server.Version}}')"
+      docker_major="${docker_version%%.*}"
+      [[ "$docker_major" =~ ^[0-9]+$ ]] && [ "$docker_major" -ge 27 ] || die "面板 IPv6 出站网络需要 Docker Engine 27 或更新版本。"
+      ;;
+    false) ;;
+    *) die "XUI_ENABLE_IPV6 只能是 true 或 false。" ;;
+  esac
 
   if docker compose version >/dev/null 2>&1; then
     COMPOSE=(docker compose)
@@ -395,6 +409,15 @@ if [ -n "$XUI_LOCAL_HOST" ]; then
   XUI_EXTRA_HOST_LINE="    extra_hosts: [\"${XUI_LOCAL_HOST}:host-gateway\"]"
 fi
 
+XUI_IPV6_SERVICE_NETWORK=""
+XUI_IPV6_NETWORK_CONFIG=""
+if [ "$XUI_ENABLE_IPV6" = true ]; then
+  XUI_IPV6_SERVICE_NETWORK="      - xui_ipv6"
+  XUI_IPV6_NETWORK_CONFIG="  xui_ipv6:
+    driver: bridge
+    enable_ipv6: true"
+fi
+
 GEOIP_VOLUME_LINE=""
 XUI_CITY_VOLUME_LINE=""
 if [ "$ENABLE_GEOIP" = true ]; then
@@ -550,6 +573,7 @@ ${XUI_ASN_VOLUME_LINE}
     networks:
       - default
       - npm
+${XUI_IPV6_SERVICE_NETWORK}
 
 volumes:
   grafana-data:
@@ -559,6 +583,7 @@ volumes:
   xui-state:
 
 networks:
+${XUI_IPV6_NETWORK_CONFIG}
   npm:
     external: true
     name: ${NPM_NETWORK}
@@ -1513,6 +1538,7 @@ download_installer() {
 
 update_script_and_deploy() {
   local xui_local_host_is_set="${XUI_LOCAL_HOST+x}" xui_local_host_override="${XUI_LOCAL_HOST-}"
+  local xui_enable_ipv6_is_set="${XUI_ENABLE_IPV6+x}" xui_enable_ipv6_override="${XUI_ENABLE_IPV6-}"
   local enable_geoip_is_set="${ENABLE_GEOIP+x}" enable_geoip_override="${ENABLE_GEOIP-}"
   local geoip_db_path_is_set="${GEOIP_DB_PATH+x}" geoip_db_path_override="${GEOIP_DB_PATH-}"
   local enable_asn_is_set="${ENABLE_ASN+x}" enable_asn_override="${ENABLE_ASN-}"
@@ -1526,6 +1552,10 @@ update_script_and_deploy() {
   if [ "$xui_local_host_is_set" = x ]; then
     XUI_LOCAL_HOST="$xui_local_host_override"
     export XUI_LOCAL_HOST
+  fi
+  if [ "$xui_enable_ipv6_is_set" = x ]; then
+    XUI_ENABLE_IPV6="$xui_enable_ipv6_override"
+    export XUI_ENABLE_IPV6
   fi
   if [ "$enable_geoip_is_set" = x ]; then
     ENABLE_GEOIP="$enable_geoip_override"

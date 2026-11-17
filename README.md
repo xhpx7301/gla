@@ -118,6 +118,23 @@ bash <(wget -qO- https://raw.githubusercontent.com/xhpx7301/gla/main/deploy-xray
 
 中心服务器访问自己的面板域名若有公网回环问题，可在安装时设置 `XUI_LOCAL_HOST=panel.example.com`。采集服务将这个域名解析到 Docker 宿主机网关，同时保持原域名用于 HTTPS 证书校验。远程面板按正常 DNS 解析。
 
+如果远程面板域名只有 AAAA（IPv6）记录，除了中心宿主机能访问 IPv6，`gla-xui-exporter` 容器也需要 IPv6 出站网络。默认 Docker IPv4 桥接网络无法访问这种面板。中心服务器使用 Docker Engine **27 或更新版本**时，执行：
+
+```bash
+XUI_ENABLE_IPV6=true gla
+```
+
+然后选择 `1. 更新配置、脚本与仪表盘`。脚本会为 API 采集容器额外创建双栈桥接网络，由 Docker 自动分配私有 IPv6 子网并通过 IPv6 NAT 出站；设置会保存，后续菜单更新继续保留。首次安装可在安装命令前加 `XUI_ENABLE_IPV6=true`。需要关闭时使用 `XUI_ENABLE_IPV6=false gla` 并再次选择 `1`。
+
+此功能依赖宿主机已有可用 IPv6 路由、Docker 默认启用的 IPv6 防火墙/NAT 规则，以及防火墙允许容器 IPv6 转发。宿主机能访问而容器仍失败时，可在中心服务器运行以下命令，将示例域名和端口替换为实际面板值（无需 Token）：
+
+```bash
+docker exec gla-xui-exporter python3 -c "import socket; print(socket.getaddrinfo('panel.example.com', 443)); socket.create_connection(('panel.example.com', 443), 10).close(); print('TCP 连接成功')"
+docker logs --tail=100 gla-xui-exporter
+```
+
+采集日志会区分 DNS 解析失败、网络不可达、超时、连接被拒绝和 TLS 证书校验失败。IPv6 网络开启后仍需保留正确面板域名，以便正常校验证书。
+
 旧版中心服务器通过 `XUI_API_URL` 配置的本机面板，会在升级时自动迁移到统一列表并开启 API 日志采集。旧 Token 文件仍保留，统一列表已存在相同名称时保留现有配置。
 
 ## 配置远程写入入口
