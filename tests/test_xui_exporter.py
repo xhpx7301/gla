@@ -378,6 +378,17 @@ class ExporterTest(unittest.TestCase):
             finally:
                 bot.db.close()
 
+    def test_ip_attribution_correction_matches_only_the_confirmed_ipv6_address(self):
+        with mock.patch.object(EXPORTER, "mmdb_record", return_value={}) as lookup:
+            for address in ("2404:3881:10d:1000::6440:f22",
+                            "2404:3881:010D:1000:0000:0000:6440:0F22"):
+                with self.subTest(address=address):
+                    self.assertEqual(EXPORTER.ip_attribution(address), ("香港", "V6VPS"))
+            lookup.assert_not_called()
+            self.assertEqual(EXPORTER.ip_attribution("2404:3881:10d:1000::6440:f23"),
+                             ("归属地未知", "网络组织未知"))
+            self.assertEqual(lookup.call_count, 2)
+
     def test_ip_attribution_uses_local_city_and_asn_records(self):
         def lookup(path, address):
             if path == EXPORTER.GEOIP_CITY_DB:

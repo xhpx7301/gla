@@ -1290,6 +1290,10 @@ def mmdb_record(path, address):
     return reader.get(address) or {}
 
 
+# User-confirmed corrections apply only to these exact IP addresses.
+IP_ATTRIBUTION_OVERRIDES = {
+    "2404:3881:10d:1000::6440:f22": ("香港", "V6VPS"),
+}
 NETWORK_ORGANIZATION_NAMES_ZH = {
     "lucidacloud limited": "野草云",
     "alibaba (us) technology co., ltd.": "阿里云",
@@ -1322,6 +1326,12 @@ CHINA_SUBDIVISION_NAMES_ZH = {
 
 
 def ip_attribution(address):
+    try:
+        address = str(ipaddress.ip_address(address))
+    except ValueError:
+        pass
+    if address in IP_ATTRIBUTION_OVERRIDES:
+        return IP_ATTRIBUTION_OVERRIDES[address]
     try:
         city_data = mmdb_record(GEOIP_CITY_DB, address)
         asn_data = mmdb_record(GEOIP_ASN_DB, address)
