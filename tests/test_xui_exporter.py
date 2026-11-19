@@ -281,7 +281,7 @@ class ExporterTest(unittest.TestCase):
                     if timestamp < 1630:
                         send.assert_not_called()
                 message = send.call_args.args[2]["text"]
-                self.assertIn("👤 客户端：alice\n👥 分组：shared\n🔗 关联入站：VLESS-443\n🖥 面板：node-a", message)
+                self.assertIn("👥 分组：shared\n👤 客户端：alice\n🖥 面板：node-a\n🔗 关联入站：VLESS-443", message)
                 self.assertNotIn("端口 443", message)
                 self.assertNotIn("/ vless", message)
                 self.assertIn("🌐 最近记录 IP：203.0.113.1", message)
@@ -336,7 +336,8 @@ class ExporterTest(unittest.TestCase):
                     self.assertIn(f"🏢 {label}：{network}", text)
                 worker.client_inbounds = {item["email"]: ["main", "fallback"]}
                 text = bot.online_notification_text(item, test=True)
-                self.assertIn("🔗 关联入站：\n  • main\n  • fallback\n🖥 面板：", text)
+                self.assertIn(f"👥 分组：Aurora\n👤 客户端：{item['email']}\n🖥 面板：node-a\n"
+                              "🔗 关联入站：\n  • main\n  • fallback\n🌐 最近记录 IP：", text)
                 bot.send_online_notification(420, text)
                 payload = request.call_args.args[2]
                 entity, = json.loads(payload["entities"])
