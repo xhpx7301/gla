@@ -1290,6 +1290,12 @@ def mmdb_record(path, address):
     return reader.get(address) or {}
 
 
+NETWORK_ORGANIZATION_NAMES_ZH = {
+    "lucidacloud limited": "野草云",
+    "alibaba (us) technology co., ltd.": "阿里云",
+    "hkt limited": "HKT香港电讯",
+    "oracle corporation": "甲骨文云",
+}
 COUNTRY_NAMES_ZH = {
     "CN": "中国", "HK": "香港", "MO": "澳门", "TW": "台湾", "US": "美国",
     "JP": "日本", "SG": "新加坡", "GB": "英国", "DE": "德国", "KR": "韩国",
@@ -1365,7 +1371,10 @@ def ip_attribution(address):
     carrier_by_org = (("电信", "中国电信"), ("telecom", "中国电信"),
                       ("chinanet", "中国电信"), ("联通", "中国联通"), ("unicom", "中国联通"),
                       ("移动", "中国移动"), ("mobile", "中国移动"), ("cmnet", "中国移动"))
-    if iso_code == "CN" or asn in carrier_by_asn:
+    localized_organization = NETWORK_ORGANIZATION_NAMES_ZH.get(organization.strip().lower())
+    if localized_organization:
+        network = localized_organization
+    elif iso_code == "CN" or asn in carrier_by_asn:
         network = carrier_by_asn.get(asn)
         org_lower = organization.lower()
         if network is None:

@@ -404,13 +404,19 @@ class ExporterTest(unittest.TestCase):
                  "city": {"names": {"en": "Los Angeles"}}},
                 {"autonomous_system_organization": "Example Networks"}]):
             self.assertEqual(EXPORTER.ip_attribution("203.0.113.1"), ("美国·Los Angeles", "Example Networks"))
-        with mock.patch.object(EXPORTER, "mmdb_record", side_effect=[
-                {"country": {"iso_code": "US", "names": {"en": "United States"}}},
-                {"autonomous_system_organization": "Alibaba (US) Technology Co., Ltd."}]) as lookup:
-            location, network = EXPORTER.ip_attribution("203.0.113.1")
-            self.assertEqual(location, "美国")
-            self.assertEqual(network, "Alibaba (US) Technology Co., Ltd.")
-            self.assertEqual(lookup.call_count, 2)
+        for organization, expected in (
+                ("LUCIDACLOUD LIMITED", "野草云"),
+                ("Alibaba (US) Technology Co., Ltd.", "阿里云"),
+                ("HKT Limited", "HKT香港电讯"),
+                ("Oracle Corporation", "甲骨文云")):
+            for iso_code, location in (("US", "美国"), ("HK", "香港"), ("CN", "中国大陆")):
+                for value in (organization, f"  {organization.swapcase()}  "):
+                    with self.subTest(organization=value, country=iso_code), mock.patch.object(
+                            EXPORTER, "mmdb_record", side_effect=[
+                                {"country": {"iso_code": iso_code}},
+                                {"autonomous_system_organization": value}]) as lookup:
+                        self.assertEqual(EXPORTER.ip_attribution("203.0.113.1"), (location, expected))
+                        self.assertEqual(lookup.call_count, 2)
 
     def test_worker_fetches_latest_client_ip_from_panel_api(self):
         worker = EXPORTER.PanelWorker({"name": "node-a", "url": "https://panel.example.com/panel/api/inbounds/list",
