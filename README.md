@@ -253,7 +253,7 @@ Alloy 内部日志原本使用 UTC 的 `Z` 时间，管理菜单会在显示时�
 | `METRICS_URL` | 无 | VictoriaMetrics Remote Write HTTPS 地址 |
 | `METRICS_USERNAME` | `alloy-agent` | 指标反向代理认证用户名 |
 | `ENABLE_HOST_METRICS` | `auto` | `auto` 在配置 `METRICS_URL` 时兼容启用；`true` 或 `false` 控制采集端主机指标 |
-| `ENABLE_SECURITY_TRAFFIC` | `auto` | `auto` 仅在主机指标、安全日志、UFW 和指标写入均可用时启用；`true` 强制启用；`false` 停止并清理计数器 |
+| `ENABLE_SECURITY_TRAFFIC` | `false` | 默认关闭 SSH/UFW 聚合流量；`true` 强制启用（需要已启用的 UFW、iptables 和 systemd）；`false` 停止并清理计数器 |
 | `XUI_LOCAL_HOST` | 无 | 中心服务器本机面板域名；仅此域名映射到 Docker 宿主机网关 |
 | `ENABLE_GEOIP` | `auto` | `auto`、`true` 或 `false`；检测到本地数据库时自动启用 |
 | `ENABLE_ASN` | `auto` | 中心端为 `auto`、`true` 或 `false`；控制 Telegram IP 归属中的 ASN 网络信息 |

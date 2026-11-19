@@ -6,6 +6,14 @@ ROOT = pathlib.Path(__file__).parents[1]
 
 
 class GeoIpConfigurationTest(unittest.TestCase):
+    def test_security_traffic_defaults_to_disabled(self):
+        for name in (
+            "deploy-xray-alloy-collector.sh",
+            "deploy-xray-grafana-loki-alloy.sh",
+        ):
+            script = (ROOT / name).read_text(encoding="utf-8")
+            self.assertIn('ENABLE_SECURITY_TRAFFIC="${ENABLE_SECURITY_TRAFFIC:-false}"', script)
+
     def test_collectors_have_optional_offline_geoip_stage(self):
         for name in (
             "deploy-xray-alloy-collector.sh",
