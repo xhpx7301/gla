@@ -48,6 +48,7 @@ SSH_LOGIN_CONFIG_FILE = os.environ.get("XUI_SSH_LOGIN_CONFIG_FILE", "/run/secret
 DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 3600
 PREVIOUS_DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = (600, 1800)
 MAX_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 86400
+IP_RECORD_MAX_AGE_SECONDS = 86400
 TELEGRAM_ONLINE_CONFIRMATION_SAMPLES = 20
 TIMEOUT = float(os.environ.get("XUI_API_TIMEOUT", "10"))
 SERVER_NAME = os.environ.get("SERVER_NAME", "").strip() or "unknown"
@@ -624,7 +625,7 @@ class TelegramBot:
     def online_notification_text(self, item, test=False):
         worker = next((worker for worker in self.workers
                        if worker.panel["name"] == item["server"]), None)
-        ip_record = worker.last_ip_for_client(item["email"]) if worker else None
+        ip_record = recent_ip_record(worker.last_ip_for_client(item["email"])) if worker else None
         if ip_record:
             location, network = ip_attribution(ip_record["ip"])
             network_label = "运营商" if network in {"中国电信", "中国联通", "中国移动"} else "网络组织"
@@ -633,7 +634,7 @@ class TelegramBot:
             if ip_record.get("time"):
                 ip_text += f"\n🕒 IP 记录时间：{ip_record['time']}"
         else:
-            ip_text = "🌐 最近记录 IP：暂无记录"
+            ip_text = "🌐 最近记录 IP：暂无24小时内记录"
         inbounds = self.inbound_names_for_item(item)
         if len(inbounds) > 1:
             inbound_text = "\n" + "\n".join(f"  • {inbound}" for inbound in inbounds)
@@ -1262,7 +1263,17 @@ def latest_ip_record(records):
 def format_ip_record_time(value):
     if not value:
         return ""
-    raw = str(value).strip()
+    parsed = parse_ip_record_time(value)
+    if parsed is None:
+        return str(value).strip()
+    beijing = parsed.astimezone(timezone(timedelta(hours=8)))
+    return beijing.strftime("%Y-%m-%d %H:%M:%S") + "（UTC+8）"
+
+
+def parse_ip_record_time(value):
+    if not value:
+        return None
+    raw = str(value).strip().replace("（UTC+8）", "").strip()
     try:
         if re.fullmatch(r"\d{10}(?:\d{3})?(?:\.\d+)?", raw):
             seconds = float(raw)
@@ -1270,13 +1281,23 @@ def format_ip_record_time(value):
         else:
             parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except (ValueError, OverflowError, OSError):
-        return raw
+        return None
     # The panel's unzoned IP-log text is already Beijing local time. Treating
     # it as UTC adds eight hours again and can put a record after detection.
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone(timedelta(hours=8)))
-    beijing = parsed.astimezone(timezone(timedelta(hours=8)))
-    return beijing.strftime("%Y-%m-%d %H:%M:%S") + "（UTC+8）"
+    return parsed
+
+
+def recent_ip_record(record, now=None, max_age=IP_RECORD_MAX_AGE_SECONDS):
+    if not record or not record.get("time"):
+        return None
+    timestamp = parse_ip_record_time(record["time"])
+    if timestamp is None:
+        return None
+    current = datetime.fromtimestamp(time.time() if now is None else now, timezone.utc)
+    age = (current - timestamp).total_seconds()
+    return record if 0 <= age <= max_age else None
 
 
 def mmdb_record(path, address):
@@ -1675,7 +1696,7 @@ class PanelWorker:
             token = read_token(self.panel["token_file"])
             url = endpoint(self.panel["url"], f"/clients/ips/{quote(email, safe='')}")
             records = request_json(url, "POST", token=token)
-            return latest_ip_record(records)
+            return recent_ip_record(latest_ip_record(records))
         except ERRORS as error:
             print(f'{self.panel["name"]}: 客户端 IP 日志获取失败 ({error_kind(error)})',
                   file=sys.stderr, flush=True)

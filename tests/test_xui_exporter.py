@@ -253,10 +253,11 @@ class ExporterTest(unittest.TestCase):
                 mock.patch.object(EXPORTER, "request_json", side_effect=api):
             panel.poll()
         self.assertEqual(panel.inbounds_for_client("alice"), ["VLESS-443"])
+        recent_time = EXPORTER.datetime.now(EXPORTER.timezone.utc).isoformat()
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as send, \
                 mock.patch.object(EXPORTER.TelegramBot, "report_time", return_value="test-time"), \
                 mock.patch.object(panel, "last_ip_for_client", return_value={
-                    "ip": "203.0.113.1", "time": "2026-10-14 16:30:00（UTC+8）"}), \
+                    "ip": "203.0.113.1", "time": recent_time}), \
                 mock.patch.object(EXPORTER, "ip_attribution", return_value=("广东深圳", "中国电信")):
             bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42],
                                         "notification_cooldown_seconds": 3600}, [panel], directory)
@@ -286,7 +287,7 @@ class ExporterTest(unittest.TestCase):
                 self.assertNotIn("/ vless", message)
                 self.assertIn("🌐 最近记录 IP：203.0.113.1", message)
                 self.assertIn("📍 归属地：广东深圳\n🏢 运营商：中国电信", message)
-                self.assertIn("🕒 IP 记录时间：2026-10-14 16:30:00（UTC+8）", message)
+                self.assertIn("🕒 IP 记录时间：", message)
                 payload = send.call_args.args[2]
                 self.assertNotIn("reply_markup", payload)
                 entity, = json.loads(payload["entities"])
@@ -320,6 +321,15 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(EXPORTER.format_ip_record_time(""), "")
         self.assertEqual(EXPORTER.format_ip_record_time("unrecognized"), "unrecognized")
 
+    def test_recent_ip_record_requires_a_timestamp_within_24_hours(self):
+        current = EXPORTER.datetime(2026, 11, 19, 12, 0, tzinfo=EXPORTER.timezone.utc).timestamp()
+        recent = {"ip": "203.0.113.1", "time": "2026-11-19 19:00:00（UTC+8）"}
+        stale = {"ip": "203.0.113.2", "time": "2026-11-18 19:59:59（UTC+8）"}
+        missing = {"ip": "203.0.113.3", "time": ""}
+        self.assertEqual(EXPORTER.recent_ip_record(recent, now=current), recent)
+        self.assertIsNone(EXPORTER.recent_ip_record(stale, now=current))
+        self.assertIsNone(EXPORTER.recent_ip_record(missing, now=current))
+
     def test_notification_layout_and_copy_for_ipv6_and_missing_ip(self):
         worker = EXPORTER.PanelWorker({"name": "node-a"})
         item = {"server": "node-a", "email": "客户😀<&>", "group": "Aurora", "online": 1}
@@ -329,11 +339,15 @@ class ExporterTest(unittest.TestCase):
                 mock.patch.object(EXPORTER, "ip_attribution", return_value=("中国深圳", "中国移动")) as attribution:
             bot = EXPORTER.TelegramBot({"token": "bot-token"}, [worker], directory)
             try:
+                ip_log.return_value = {"ip": address, "time": EXPORTER.datetime.now(
+                    EXPORTER.timezone.utc).isoformat()}
                 for network in ("中国电信", "中国联通", "中国移动", "Example Networks"):
                     attribution.return_value = ("中国深圳", network)
                     text = bot.online_notification_text(item)
                     label = "网络组织" if network == "Example Networks" else "运营商"
                     self.assertIn(f"🏢 {label}：{network}", text)
+                ip_log.return_value = {"ip": address, "time": EXPORTER.datetime.now(
+                    EXPORTER.timezone.utc).isoformat()}
                 worker.client_inbounds = {item["email"]: ["main", "fallback"]}
                 text = bot.online_notification_text(item, test=True)
                 self.assertIn(f"👥 分组：Aurora\n👤 客户端：{item['email']}\n🖥 面板：node-a\n"
@@ -433,7 +447,9 @@ class ExporterTest(unittest.TestCase):
     def test_worker_fetches_latest_client_ip_from_panel_api(self):
         worker = EXPORTER.PanelWorker({"name": "node-a", "url": "https://panel.example.com/panel/api/inbounds/list",
                                        "token_file": "/run/secrets/xui-node-a.token"})
-        with mock.patch.object(EXPORTER, "read_token", return_value="secret"), \
+        current = EXPORTER.datetime(2026, 10, 14, 18, 30, tzinfo=EXPORTER.timezone.utc).timestamp()
+        with mock.patch.object(EXPORTER.time, "time", return_value=current), \
+                mock.patch.object(EXPORTER, "read_token", return_value="secret"), \
                 mock.patch.object(EXPORTER, "request_json", return_value=[
                     {"ip": "198.51.100.4", "time": "2026-10-14T10:00:00Z"}]) as request:
             self.assertEqual(worker.last_ip_for_client("alice@example.com"),
@@ -875,10 +891,11 @@ class ExporterTest(unittest.TestCase):
         worker = EXPORTER.PanelWorker({"name": "node-a"})
         worker.metrics = EXPORTER.render_metrics("node-a", [], [], [
             {"email": "alice", "group": "shared", "traffic": {"up": 1024}}])
+        recent_time = EXPORTER.datetime.now(EXPORTER.timezone.utc).isoformat()
         with tempfile.TemporaryDirectory() as directory, \
                 mock.patch.object(EXPORTER, "telegram_request") as request, \
                 mock.patch.object(worker, "last_ip_for_client", return_value={
-                    "ip": "203.0.113.5", "time": "2026-10-14 08:00:00"}):
+                    "ip": "203.0.113.5", "time": recent_time}):
             bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, [worker], directory)
             try:
                 message = {"chat": {"id": 420}, "from": {"id": 42}}
