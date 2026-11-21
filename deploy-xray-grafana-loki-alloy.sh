@@ -1692,13 +1692,16 @@ configure_web_admin() {
     case "$choice" in
       0) return ;;
       1)
-        local pwd1 pwd2
+        local username pwd1 pwd2
+        read -rp "管理账户 [回车保留或默认 gla]: " username
         read -rsp "请输入管理员密码（至少 8 位）: " pwd1; printf '\n'
         read -rsp "请再次输入密码: " pwd2; printf '\n'
         if [ "$pwd1" != "$pwd2" ]; then
           printf '两次输入的密码不一致。\n'; pause; continue
         fi
-        if printf '%s\n' "$pwd1" | web_admin_command set-password; then
+        local -a cmd=(set-password)
+        [ -z "$username" ] || cmd+=(--username "$username")
+        if printf '%s\n' "$pwd1" | web_admin_command "${cmd[@]}"; then
           printf '可在 Nginx Proxy Manager 中配置 HTTPS Proxy Host：转发主机 gla-xui-exporter、端口 9105，访问 /admin。\n'
         fi
         pause

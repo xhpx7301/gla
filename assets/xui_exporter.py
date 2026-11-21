@@ -2013,24 +2013,40 @@ class RuntimeManager:
 
 
 RUNTIME = None
+DEFAULT_WEB_ADMIN_USERNAME = "gla"
+DEFAULT_WEB_ADMIN_PASSWORD = "gla12345"
 ADMIN_SESSION_TTL_SECONDS = 12 * 3600
 ADMIN_LOGIN_MAX_ATTEMPTS = 5
 ADMIN_LOGIN_WINDOW_SECONDS = 300
 _ADMIN_LOGIN_LOCK = threading.Lock()
 _ADMIN_LOGIN_FAILURES = {}
+_WEB_ADMIN_INIT_LOCK = threading.Lock()
 
 
 def web_admin_config(path=None):
     config_path = Path(path or WEB_ADMIN_CONFIG_FILE)
-    if not config_path.is_file():
-        return None
+    with _WEB_ADMIN_INIT_LOCK:
+        if not config_path.is_file():
+            hashed = hash_admin_password(DEFAULT_WEB_ADMIN_PASSWORD)
+            default_cfg = {
+                "enabled": True,
+                "username": DEFAULT_WEB_ADMIN_USERNAME,
+                "default_password": True,
+                **hashed,
+                "session_secret": secrets.token_hex(32),
+            }
+            atomic_write(config_path, json.dumps(default_cfg, ensure_ascii=False, indent=2) + "\n")
+            return default_cfg
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    if (not isinstance(config, dict)
-            or not isinstance(config.get("password_salt"), str)
+    if not isinstance(config, dict):
+        raise ValueError("Web 管理配置无效")
+    if config.get("enabled") is False:
+        return None
+    if (not isinstance(config.get("password_salt"), str)
             or not isinstance(config.get("password_hash"), str)
             or not isinstance(config.get("session_secret"), str)):
         raise ValueError("Web 管理配置无效")
-    return config
+    return {"enabled": True, "username": config.get("username") or DEFAULT_WEB_ADMIN_USERNAME, **config}
 
 
 def hash_admin_password(password, salt_hex=None, iterations=200000):
@@ -2054,29 +2070,44 @@ def verify_admin_password(password, config):
     return hmac.compare_digest(actual, expected)
 
 
-def save_web_admin_password(password, path=None, session_secret=None):
+def save_web_admin_password(password, path=None, session_secret=None, username=None, default_password=False):
     target = Path(path or WEB_ADMIN_CONFIG_FILE)
-    existing = web_admin_config(target) if target.is_file() else None
+    existing = None
+    if target.is_file():
+        raw = json.loads(target.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            existing = raw
+    resolved_user = (username if username is not None else (existing.get("username") if existing else None)) or DEFAULT_WEB_ADMIN_USERNAME
+    if not NAME_RE.fullmatch(resolved_user):
+        raise ValueError("管理员用户名只能包含字母、数字、点、下划线和连字符")
     hashed = hash_admin_password(password)
-    secret = session_secret or (existing["session_secret"] if existing else secrets.token_hex(32))
-    atomic_write(target, json.dumps({**hashed, "session_secret": secret}, indent=2) + "\n")
+    secret = session_secret or (existing.get("session_secret") if existing else None) or secrets.token_hex(32)
+    atomic_write(target, json.dumps({
+        "enabled": True,
+        "username": resolved_user,
+        "default_password": bool(default_password),
+        **hashed,
+        "session_secret": secret,
+    }, ensure_ascii=False, indent=2) + "\n")
 
 
 def web_admin_cli(argv):
     parser = argparse.ArgumentParser(description="管理 GLA Web 配置台")
     parser.add_argument("operation", choices=("set-password", "disable", "status"))
+    parser.add_argument("--username")
     args = parser.parse_args(argv)
     target = Path(WEB_ADMIN_CONFIG_FILE)
     if args.operation == "status":
-        print("已启用 Web 配置台" if web_admin_config(target) else "未启用 Web 配置台")
+        cfg = web_admin_config(target)
+        print(f"已启用 Web 配置台（账户：{cfg['username']}）" if cfg else "已关闭 Web 配置台")
         return
     if args.operation == "disable":
-        target.unlink(missing_ok=True)
+        atomic_write(target, json.dumps({"enabled": False}, indent=2) + "\n")
         print("已关闭 Web 配置台")
         return
     password = sys.stdin.read().rstrip("\r\n")
-    save_web_admin_password(password, target)
-    print("Web 配置台密码已更新")
+    save_web_admin_password(password, target, username=args.username, default_password=False)
+    print("Web 配置台账户与密码已更新")
 
 
 def _b64u_encode(raw):
@@ -2328,7 +2359,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
             config, _ = self._require_admin(require_csrf=False)
             if not config:
                 return
-            self._send_json(200, admin_overview_payload())
+            self._send_json(200, admin_overview_payload(config))
             return
         if self.path not in ("/metrics", "/metrics?"):
             self.send_error(404)
@@ -2366,9 +2397,12 @@ class MetricsHandler(BaseHTTPRequestHandler):
             except (ValueError, json.JSONDecodeError) as error:
                 self._send_json(400, {"error": str(error)})
                 return
-            if not verify_admin_password(body.get("password", ""), config):
+            supplied_user = str(body.get("username", ""))
+            expected_user = config.get("username", DEFAULT_WEB_ADMIN_USERNAME)
+            if (not hmac.compare_digest(supplied_user, expected_user)
+                    or not verify_admin_password(body.get("password", ""), config)):
                 _record_admin_login_failure(client_ip)
-                self._send_json(401, {"error": "密码错误"})
+                self._send_json(401, {"error": "用户名或密码错误"})
                 return
             _clear_admin_login_failures(client_ip)
             cookie_val, csrf = issue_admin_session(config)
@@ -2770,7 +2804,7 @@ def ssh_login_cli(argv):
     atomic_write(path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
 
 
-def admin_overview_payload():
+def admin_overview_payload(admin_config=None):
     worker_map = {worker.panel["name"]: worker for worker in WORKERS}
     panels_list = []
     if PANELS_FILE and Path(PANELS_FILE).is_file():
@@ -2802,6 +2836,10 @@ def admin_overview_payload():
     ssh_tg_raw = json.loads(Path(SSH_TELEGRAM_CONFIG_FILE).read_text(encoding="utf-8")) if Path(SSH_TELEGRAM_CONFIG_FILE).is_file() else {}
     return {
         "server_name": SERVER_NAME,
+        "admin": {
+            "username": (admin_config or {}).get("username", DEFAULT_WEB_ADMIN_USERNAME),
+            "default_password": bool((admin_config or {}).get("default_password", False)),
+        },
         "panels": panels_list,
         "ssh_login": {
             "ingest_url": ssh_raw.get("ingest_url", ""),
@@ -2936,7 +2974,10 @@ def apply_admin_action(method, path, body, admin_config):
     if path == "/api/admin/password" and method == "POST":
         if not verify_admin_password(str(body.get("current_password", "")), admin_config):
             raise ValueError("当前密码错误")
-        save_web_admin_password(str(body.get("new_password", "")), session_secret=admin_config["session_secret"])
+        new_user = str(body.get("new_username", "")).strip() or None
+        save_web_admin_password(str(body.get("new_password", "")),
+                                session_secret=admin_config["session_secret"],
+                                username=new_user, default_password=False)
         return {"ok": True}
 
     raise ValueError("未知操作路径")

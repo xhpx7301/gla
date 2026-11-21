@@ -1736,10 +1736,29 @@ class ExporterTest(unittest.TestCase):
                         mock.patch.object(EXPORTER, "TELEGRAM_CONFIG_FILE", str(tg_cfg)), \
                         mock.patch.object(EXPORTER, "SSH_TELEGRAM_CONFIG_FILE", str(ssh_tg_cfg)), \
                         mock.patch.object(EXPORTER, "_ADMIN_LOGIN_FAILURES", {}):
-                    # Disabled by default
+                    # Enabled by default with gla / gla12345
+                    with urllib.request.urlopen(f"{base}/admin", timeout=3) as resp:
+                        self.assertEqual(resp.status, 200)
+                    self.assertTrue(web_cfg.exists())
+
+                    # Wrong username is rejected even with default password
+                    req_bad_user = urllib.request.Request(
+                        f"{base}/api/admin/login",
+                        data=json.dumps({"username": "admin", "password": "gla12345"}).encode(),
+                        headers={"Content-Type": "application/json", "X-Real-IP": "198.51.100.1"},
+                        method="POST")
                     with self.assertRaises(urllib.error.HTTPError) as err:
-                        urllib.request.urlopen(f"{base}/admin", timeout=3)
-                    self.assertEqual(err.exception.code, 404)
+                        urllib.request.urlopen(req_bad_user, timeout=3)
+                    self.assertEqual(err.exception.code, 401)
+
+                    # Default account gla / gla12345 succeeds
+                    req_default = urllib.request.Request(
+                        f"{base}/api/admin/login",
+                        data=json.dumps({"username": "gla", "password": "gla12345"}).encode(),
+                        headers={"Content-Type": "application/json", "X-Real-IP": "198.51.100.1"},
+                        method="POST")
+                    with urllib.request.urlopen(req_default, timeout=3) as resp:
+                        self.assertEqual(resp.status, 200)
 
                     with self.assertRaises(ValueError):
                         with mock.patch("sys.stdin", io.StringIO("short")):
@@ -1757,7 +1776,7 @@ class ExporterTest(unittest.TestCase):
                     for _ in range(5):
                         req = urllib.request.Request(
                             f"{base}/api/admin/login",
-                            data=json.dumps({"password": "wrong"}).encode(),
+                            data=json.dumps({"username": "gla", "password": "wrong"}).encode(),
                             headers={"Content-Type": "application/json", "X-Real-IP": "198.51.100.2"},
                             method="POST")
                         with self.assertRaises(urllib.error.HTTPError) as err:
@@ -1765,7 +1784,7 @@ class ExporterTest(unittest.TestCase):
                         self.assertEqual(err.exception.code, 401)
                     req_locked = urllib.request.Request(
                         f"{base}/api/admin/login",
-                        data=json.dumps({"password": "secret1234"}).encode(),
+                        data=json.dumps({"username": "gla", "password": "secret1234"}).encode(),
                         headers={"Content-Type": "application/json", "X-Real-IP": "198.51.100.2"},
                         method="POST")
                     with self.assertRaises(urllib.error.HTTPError) as err:
@@ -1775,7 +1794,7 @@ class ExporterTest(unittest.TestCase):
                     # Login from a clean IP succeeds
                     req_ok = urllib.request.Request(
                         f"{base}/api/admin/login",
-                        data=json.dumps({"password": "secret1234"}).encode(),
+                        data=json.dumps({"username": "gla", "password": "secret1234"}).encode(),
                         headers={"Content-Type": "application/json", "X-Real-IP": "198.51.100.3"},
                         method="POST")
                     with urllib.request.urlopen(req_ok, timeout=3) as resp:
@@ -1825,7 +1844,9 @@ class ExporterTest(unittest.TestCase):
                     self.assertEqual(len(overview["panels"]), 1)
 
                     EXPORTER.web_admin_cli(["disable"])
-                    self.assertFalse(web_cfg.exists())
+                    with self.assertRaises(urllib.error.HTTPError) as err:
+                        urllib.request.urlopen(f"{base}/admin", timeout=3)
+                    self.assertEqual(err.exception.code, 404)
             finally:
                 server.shutdown()
                 server.server_close()
