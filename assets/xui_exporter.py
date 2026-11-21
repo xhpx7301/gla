@@ -1845,13 +1845,21 @@ def error_kind(error):
         return "DNS 解析失败"
     if isinstance(reason, ssl.SSLCertVerificationError):
         return "TLS 证书校验失败"
+    if isinstance(reason, ssl.SSLError):
+        return "TLS 握手失败"
     if isinstance(reason, TimeoutError):
         return "连接或读取超时"
+    if isinstance(reason, ConnectionResetError):
+        return "连接被重置"
     if isinstance(reason, OSError):
         if reason.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EAFNOSUPPORT):
             return "网络不可达（IPv6 面板请检查容器 IPv6 出站网络）"
         if reason.errno == errno.ECONNREFUSED:
             return "连接被拒绝"
+        if reason.errno == errno.ECONNRESET:
+            return "连接被重置"
+    if isinstance(error, urllib.error.URLError) and reason is not None:
+        return f"网络错误 ({type(reason).__name__})"
     return type(error).__name__  # never print Token, panel URLs or response bodies
 
 

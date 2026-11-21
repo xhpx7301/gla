@@ -42,7 +42,9 @@ class ExporterTest(unittest.TestCase):
                     self.assertNotIn("secret-token", actual)
         http_error = urllib.error.HTTPError(private, 403, private, {}, None)
         self.assertEqual(EXPORTER.error_kind(http_error), "HTTP 403")
-        self.assertEqual(EXPORTER.error_kind(urllib.error.URLError(private)), "URLError")
+        self.assertEqual(EXPORTER.error_kind(urllib.error.URLError(ssl.SSLError(private))), "TLS 握手失败")
+        self.assertEqual(EXPORTER.error_kind(urllib.error.URLError(ConnectionResetError(private))), "连接被重置")
+        self.assertEqual(EXPORTER.error_kind(urllib.error.URLError(private)), "网络错误 (str)")
 
     def test_ssh_login_management_cli_adds_updates_and_generates_child_command(self):
         with tempfile.TemporaryDirectory() as directory, \
