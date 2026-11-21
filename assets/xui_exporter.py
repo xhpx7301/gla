@@ -2792,8 +2792,8 @@ def telegram_cli(argv, config_file=None, token_filename="telegram-bot.token",
 
 def ssh_login_cli(argv):
     parser = argparse.ArgumentParser(description="管理 SSH 登录告警服务器配置")
-    parser.add_argument("operation", choices=("list", "status", "set-url", "add", "set-cidrs", "set-groups",
-                                               "list-groups", "add-group", "set-group", "delete-group",
+    parser.add_argument("operation", choices=("list", "status", "set-url", "add", "update", "set-cidrs", "set-groups",
+                                               "list-groups", "add-group", "set-group", "rename-group", "delete-group",
                                                "rename", "delete", "install-command"))
     parser.add_argument("--name")
     parser.add_argument("--new-name")
@@ -2868,6 +2868,28 @@ def ssh_login_cli(argv):
         groups[args.name] = cidrs
         atomic_write(path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
         return
+    if args.operation == "rename-group":
+        if not args.name or args.name not in groups:
+            raise ValueError("IP 组不存在")
+        if not args.new_name or not NAME_RE.fullmatch(args.new_name):
+            raise ValueError("新 IP 组名称只能使用字母、数字、点、下划线和连字符")
+        if args.new_name != args.name and args.new_name in groups:
+            raise ValueError("目标 IP 组名称已存在")
+        cidrs = [value.strip() for value in args.cidrs.split(",") if value.strip()]
+        if not cidrs:
+            raise ValueError("IP 组至少需要一个可信来源 CIDR")
+        for cidr in cidrs:
+            ipaddress.ip_network(cidr, strict=False)
+        del groups[args.name]
+        groups[args.new_name] = cidrs
+        for item in servers.values():
+            if isinstance(item, dict):
+                item["allowed_ip_groups"] = sorted({
+                    args.new_name if group == args.name else group
+                    for group in item.get("allowed_ip_groups", [])
+                })
+        atomic_write(path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+        return
     if args.operation == "delete-group":
         if not args.name or args.name not in groups:
             raise ValueError("IP 组不存在")
@@ -2906,6 +2928,25 @@ def ssh_login_cli(argv):
             raise ValueError("未找到可信来源 IP 组：" + ", ".join(missing))
         servers[args.name] = {"key": secrets.token_hex(32), "allowed_cidrs": cidrs,
                               "allowed_ip_groups": sorted(set(selected_groups))}
+    elif args.operation == "update":
+        if not args.name or args.name not in servers:
+            raise ValueError("服务器不存在")
+        target_name = args.new_name or args.name
+        if not NAME_RE.fullmatch(target_name):
+            raise ValueError("新服务器名称只能使用字母、数字、点、下划线和连字符")
+        if target_name != args.name and target_name in servers:
+            raise ValueError("该服务器名称已存在")
+        cidrs = [value.strip() for value in args.cidrs.split(",") if value.strip()]
+        for cidr in cidrs:
+            ipaddress.ip_network(cidr, strict=False)
+        selected_groups = [value.strip() for value in args.groups.split(",") if value.strip()]
+        missing = sorted(set(selected_groups) - groups.keys())
+        if missing:
+            raise ValueError("未找到可信来源 IP 组：" + ", ".join(missing))
+        entry = servers.pop(args.name)
+        entry["allowed_cidrs"] = cidrs
+        entry["allowed_ip_groups"] = sorted(set(selected_groups))
+        servers[target_name] = entry
     elif args.operation == "set-cidrs":
         if not args.name or args.name not in servers:
             raise ValueError("服务器不存在")
@@ -3038,8 +3079,11 @@ def apply_admin_action(method, path, body, admin_config):
 
     if path == "/api/admin/ssh-login/groups":
         name = str(body.get("name", "")).strip()
+        orig_name = str(body.get("orig_name", "")).strip()
         if method == "DELETE":
             ssh_login_cli(["delete-group", "--name", name])
+        elif orig_name and orig_name != name:
+            ssh_login_cli(["rename-group", "--name", orig_name, "--new-name", name, "--cidrs", str(body.get("cidrs", ""))])
         else:
             existing = json.loads(Path(SSH_LOGIN_CONFIG_FILE).read_text(encoding="utf-8")).get("ip_groups", {}) if Path(SSH_LOGIN_CONFIG_FILE).is_file() else {}
             op = "set-group" if name in existing else "add-group"
@@ -3048,8 +3092,12 @@ def apply_admin_action(method, path, body, admin_config):
 
     if path == "/api/admin/ssh-login/servers":
         name = str(body.get("name", "")).strip()
+        orig_name = str(body.get("orig_name", "")).strip()
         if method == "DELETE":
             ssh_login_cli(["delete", "--name", name])
+        elif orig_name:
+            ssh_login_cli(["update", "--name", orig_name, "--new-name", name,
+                           "--cidrs", str(body.get("cidrs", "")), "--groups", str(body.get("groups", ""))])
         else:
             ssh_login_cli(["add", "--name", name, "--cidrs", str(body.get("cidrs", "")), "--groups", str(body.get("groups", ""))])
         return {"ok": True}

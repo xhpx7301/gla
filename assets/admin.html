@@ -354,11 +354,15 @@
               <tbody id="ip-groups-tbody"></tbody>
             </table>
           </div>
-          <h3>新增或更新 IP 组</h3>
+          <h3 id="ip-group-form-title">新增或更新 IP 组</h3>
           <form id="ip-group-form" class="grid">
+            <input type="hidden" id="ip-group-orig-name">
             <div><label>组名</label><input id="ip-group-name" required placeholder="例如 office"></div>
             <div><label>CIDR（逗号分隔）</label><input id="ip-group-cidrs" required placeholder="203.0.113.1/32,198.51.100.0/24"></div>
-            <div style="display:flex;align-items:flex-end;"><button type="submit">保存 IP 组</button></div>
+            <div class="row" style="align-items:flex-end;">
+              <button type="submit">保存 IP 组</button>
+              <button type="button" class="secondary hidden" id="ip-group-cancel-btn">取消编辑</button>
+            </div>
           </form>
         </div>
 
@@ -377,15 +381,19 @@
             </div>
             <pre id="install-cmd-text" class="mono" style="white-space:pre-wrap;margin:10px 0 0;color:var(--accent);"></pre>
           </div>
-          <h3>新增服务器</h3>
+          <h3 id="ssh-server-form-title">新增服务器</h3>
           <form id="ssh-server-form">
+            <input type="hidden" id="ssh-server-orig-name">
             <div class="grid">
               <div><label>服务器名称</label><input id="ssh-server-name" required placeholder="例如 node-hk"></div>
               <div><label>额外 CIDR（可选，逗号分隔）</label><input id="ssh-server-cidrs" placeholder="留空表示所有非可信 IP 均告警"></div>
             </div>
             <label style="margin-top:12px;">复用可信 IP 组</label>
             <div id="ssh-server-groups" class="checkbox-list"></div>
-            <button type="submit">新增服务器</button>
+            <div class="row">
+              <button type="submit">保存服务器</button>
+              <button type="button" class="secondary hidden" id="ssh-server-cancel-btn">取消编辑</button>
+            </div>
           </form>
         </div>
 
@@ -554,10 +562,7 @@
       groupChecks.replaceChildren();
       for (const [gname, cidrs] of Object.entries(data.ssh_login.ip_groups)) {
         const fillBtn = el("button", { className: "sm secondary", type: "button", text: "编辑" });
-        fillBtn.onclick = () => {
-          document.getElementById("ip-group-name").value = gname;
-          document.getElementById("ip-group-cidrs").value = cidrs.join(",");
-        };
+        fillBtn.onclick = () => editIpGroup(gname, cidrs);
         const delBtn = el("button", { className: "sm danger", type: "button", text: "删除" });
         delBtn.onclick = () => deleteIpGroup(gname);
         groupsTbody.appendChild(el("tr", {}, [
@@ -578,6 +583,8 @@
         const parts = [];
         if ((sinfo.allowed_ip_groups || []).length) parts.push("组: " + sinfo.allowed_ip_groups.join(", "));
         if ((sinfo.allowed_cidrs || []).length) parts.push("CIDR: " + sinfo.allowed_cidrs.join(", "));
+        const editBtn = el("button", { className: "sm secondary", type: "button", text: "编辑" });
+        editBtn.onclick = () => editSshServer(sname, sinfo);
         const cmdBtn = el("button", { className: "sm secondary", type: "button", text: "安装命令" });
         cmdBtn.onclick = () => fetchInstallCommand(sname);
         const delBtn = el("button", { className: "sm danger", type: "button", text: "删除" });
@@ -585,7 +592,7 @@
         serversTbody.appendChild(el("tr", {}, [
           el("td", { style: "font-weight:600;", text: sname }),
           el("td", { className: "mono", text: parts.join(" ; ") || "无（所有登录均告警）" }),
-          el("td", {}, [el("div", { className: "row" }, [cmdBtn, delBtn])])
+          el("td", {}, [el("div", { className: "row" }, [editBtn, cmdBtn, delBtn])])
         ]));
       }
       if (!Object.keys(data.ssh_login.servers).length) {
@@ -625,6 +632,42 @@
       document.getElementById("panel-log-count").value = 1000;
       document.getElementById("panel-logs").checked = true;
       document.getElementById("panel-cancel-btn").classList.add("hidden");
+    }
+
+    function editIpGroup(name, cidrs) {
+      document.getElementById("ip-group-form-title").textContent = "编辑 IP 组：" + name;
+      document.getElementById("ip-group-orig-name").value = name;
+      document.getElementById("ip-group-name").value = name;
+      document.getElementById("ip-group-cidrs").value = cidrs.join(",");
+      document.getElementById("ip-group-cancel-btn").classList.remove("hidden");
+      document.getElementById("ip-group-form").scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+
+    function resetIpGroupForm() {
+      document.getElementById("ip-group-form-title").textContent = "新增或更新 IP 组";
+      document.getElementById("ip-group-form").reset();
+      document.getElementById("ip-group-orig-name").value = "";
+      document.getElementById("ip-group-cancel-btn").classList.add("hidden");
+    }
+
+    function editSshServer(name, info) {
+      document.getElementById("ssh-server-form-title").textContent = "编辑服务器：" + name;
+      document.getElementById("ssh-server-orig-name").value = name;
+      document.getElementById("ssh-server-name").value = name;
+      document.getElementById("ssh-server-cidrs").value = (info.allowed_cidrs || []).join(",");
+      const selected = new Set(info.allowed_ip_groups || []);
+      document.querySelectorAll("#ssh-server-groups input[type='checkbox']").forEach(cb => {
+        cb.checked = selected.has(cb.value);
+      });
+      document.getElementById("ssh-server-cancel-btn").classList.remove("hidden");
+      document.getElementById("ssh-server-form").scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+
+    function resetSshServerForm() {
+      document.getElementById("ssh-server-form-title").textContent = "新增服务器";
+      document.getElementById("ssh-server-form").reset();
+      document.getElementById("ssh-server-orig-name").value = "";
+      document.getElementById("ssh-server-cancel-btn").classList.add("hidden");
     }
 
     async function deletePanel(name) {
@@ -705,6 +748,8 @@
       });
     };
     document.getElementById("panel-cancel-btn").onclick = resetPanelForm;
+    document.getElementById("ip-group-cancel-btn").onclick = resetIpGroupForm;
+    document.getElementById("ssh-server-cancel-btn").onclick = resetSshServerForm;
 
     document.getElementById("panel-form").onsubmit = async e => {
       e.preventDefault();
@@ -744,30 +789,34 @@
         await api("/api/admin/ssh-login/groups", {
           method: "POST",
           body: JSON.stringify({
+            orig_name: document.getElementById("ip-group-orig-name").value.trim(),
             name: document.getElementById("ip-group-name").value.trim(),
             cidrs: document.getElementById("ip-group-cidrs").value.trim()
           })
         });
         toast("IP 组已保存");
-        document.getElementById("ip-group-form").reset();
+        resetIpGroupForm();
         await loadOverview();
       } catch (err) { toast(err.message, true); }
     };
 
     document.getElementById("ssh-server-form").onsubmit = async e => {
       e.preventDefault();
+      const orig = document.getElementById("ssh-server-orig-name").value.trim();
+      const name = document.getElementById("ssh-server-name").value.trim();
       const groups = Array.from(document.querySelectorAll("#ssh-server-groups input:checked")).map(el => el.value);
       try {
         await api("/api/admin/ssh-login/servers", {
           method: "POST",
           body: JSON.stringify({
-            name: document.getElementById("ssh-server-name").value.trim(),
+            orig_name: orig,
+            name: name,
             cidrs: document.getElementById("ssh-server-cidrs").value.trim(),
             groups: groups.join(",")
           })
         });
-        toast("服务器已添加");
-        document.getElementById("ssh-server-form").reset();
+        toast(orig && orig !== name ? "服务器已改名，请重新执行安装命令以更新子服务器名称" : (orig ? "服务器配置已更新" : "服务器已添加"));
+        resetSshServerForm();
         await loadOverview();
       } catch (err) { toast(err.message, true); }
     };

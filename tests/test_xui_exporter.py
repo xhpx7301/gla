@@ -1839,6 +1839,17 @@ class ExporterTest(unittest.TestCase):
                     call("POST", "/api/admin/ssh-login/url", {"url": "https://ssh.example.com/api/ssh-login"})
                     call("POST", "/api/admin/ssh-login/groups", {"name": "office", "cidrs": "203.0.113.0/24"})
                     call("POST", "/api/admin/ssh-login/servers", {"name": "vm-1", "cidrs": "", "groups": "office"})
+                    orig_key = json.loads(ssh_cfg.read_text(encoding="utf-8"))["servers"]["vm-1"]["key"]
+                    call("POST", "/api/admin/ssh-login/groups", {
+                        "orig_name": "office", "name": "hq", "cidrs": "203.0.113.0/24,198.51.100.1/32"})
+                    call("POST", "/api/admin/ssh-login/servers", {
+                        "orig_name": "vm-1", "name": "vm-1-hk", "cidrs": "192.0.2.1/32", "groups": "hq"})
+                    ssh_saved = json.loads(ssh_cfg.read_text(encoding="utf-8"))
+                    self.assertNotIn("office", ssh_saved["ip_groups"])
+                    self.assertEqual(ssh_saved["ip_groups"]["hq"], ["203.0.113.0/24", "198.51.100.1/32"])
+                    self.assertEqual(ssh_saved["servers"]["vm-1-hk"]["key"], orig_key)
+                    self.assertEqual(ssh_saved["servers"]["vm-1-hk"]["allowed_ip_groups"], ["hq"])
+                    self.assertEqual(ssh_saved["servers"]["vm-1-hk"]["allowed_cidrs"], ["192.0.2.1/32"])
                     call("POST", "/api/admin/telegram", {
                         "token": "123:tg-secret", "user_ids": "42",
                         "notification_cooldown_seconds": 1200, "online_confirmation_samples": 5})
@@ -1849,7 +1860,7 @@ class ExporterTest(unittest.TestCase):
                     raw = json.dumps(overview)
                     self.assertNotIn("panel-secret", raw)
                     self.assertNotIn("tg-secret", raw)
-                    self.assertNotIn("key", overview["ssh_login"]["servers"]["vm-1"])
+                    self.assertNotIn("key", overview["ssh_login"]["servers"]["vm-1-hk"])
                     self.assertEqual(overview["telegram"]["online_confirmation_samples"], 5)
                     self.assertEqual(len(overview["panels"]), 1)
 
