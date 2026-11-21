@@ -46,12 +46,15 @@ LOKI_URL = os.environ.get("XUI_LOKI_URL", "http://alloy:3500/loki/api/v1/push")
 TELEGRAM_CONFIG_FILE = os.environ.get("XUI_TELEGRAM_CONFIG_FILE", "/run/secrets/telegram-config.json")
 SSH_TELEGRAM_CONFIG_FILE = os.environ.get("XUI_SSH_TELEGRAM_CONFIG_FILE", "/run/secrets/ssh-telegram-config.json")
 SSH_LOGIN_CONFIG_FILE = os.environ.get("XUI_SSH_LOGIN_CONFIG_FILE", "/run/secrets/ssh-login-config.json")
+WEB_ADMIN_CONFIG_FILE = os.environ.get("XUI_WEB_ADMIN_CONFIG_FILE", "/run/secrets/web-admin.json")
+ADMIN_HTML_FILE = os.environ.get("XUI_ADMIN_HTML_FILE", str(Path(__file__).with_name("admin.html")))
 DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 3600
 PREVIOUS_DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = (600, 1800)
 MAX_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 86400
 IP_RECORD_MAX_AGE_SECONDS = 86400
 IP_RECORD_MAX_FUTURE_SKEW_SECONDS = 300
 TELEGRAM_ONLINE_CONFIRMATION_SAMPLES = 20
+MAX_ONLINE_CONFIRMATION_SAMPLES = 60
 TELEGRAM_ONLINE_FAST_CONFIRMATION_SAMPLES = 3
 TELEGRAM_ONLINE_FAST_CONFIRMATION_MIN_BYTES = 100 * 1024
 LOCAL_SOURCE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in (
@@ -173,6 +176,13 @@ def configured_notification_cooldown(value):
     return validate_notification_cooldown(value)
 
 
+def validate_online_confirmation_samples(value):
+    if (type(value) is not int or value < 1
+            or value > MAX_ONLINE_CONFIRMATION_SAMPLES):
+        raise ValueError("上线确认采样次数必须是 1 到 60 的整数")
+    return value
+
+
 def telegram_config(path=None):
     config_path = Path(path or TELEGRAM_CONFIG_FILE)
     if not config_path.exists():
@@ -191,8 +201,12 @@ def telegram_config(path=None):
         raise ValueError("Telegram Token 文件必须位于 /run/secrets/ 目录")
     cooldown = configured_notification_cooldown(
         config.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS))
+    confirmation_samples = validate_online_confirmation_samples(
+        config.get("online_confirmation_samples", TELEGRAM_ONLINE_CONFIRMATION_SAMPLES))
     return {**config, "allowed_user_ids": user_ids, "allowed_chat_ids": chat_ids,
-            "notification_cooldown_seconds": cooldown, "token": read_token(token_file)}
+            "notification_cooldown_seconds": cooldown,
+            "online_confirmation_samples": confirmation_samples,
+            "token": read_token(token_file)}
 
 
 def telegram_request(token, method, payload=None, timeout=35):
@@ -286,6 +300,8 @@ class TelegramBot:
         self.pending_traffic_views = {}
         self.notification_cooldown_seconds = validate_notification_cooldown(
             config.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS))
+        self.online_confirmation_samples = validate_online_confirmation_samples(
+            config.get("online_confirmation_samples", TELEGRAM_ONLINE_CONFIRMATION_SAMPLES))
 
     def snapshot(self):
         series = {}
@@ -770,13 +786,14 @@ class TelegramBot:
                 online = item["online"] == 1
                 total_traffic = item["up"] + item["down"]
                 start_traffic = None
+                target_samples = self.online_confirmation_samples
                 if baseline is None:
-                    streak = TELEGRAM_ONLINE_CONFIRMATION_SAMPLES if online else 0
+                    streak = target_samples if online else 0
                 elif observation is None:
                     # Existing state from before confirmation support is treated
                     # as a baseline when it was already online.
                     if online and old and old[1] == 1:
-                        streak = TELEGRAM_ONLINE_CONFIRMATION_SAMPLES
+                        streak = target_samples
                     elif online:
                         streak = 1
                         start_traffic = total_traffic
@@ -789,19 +806,19 @@ class TelegramBot:
                         streak = 1
                         start_traffic = total_traffic
                     else:
-                        streak = min(prev_streak + 1, TELEGRAM_ONLINE_CONFIRMATION_SAMPLES)
+                        streak = min(prev_streak + 1, target_samples)
                         if prev_start_traffic is not None and total_traffic < prev_start_traffic:
                             start_traffic = total_traffic
                         else:
                             start_traffic = prev_start_traffic
                     fast_confirmed = (
-                        prev_streak < TELEGRAM_ONLINE_CONFIRMATION_SAMPLES
+                        prev_streak < target_samples
                         and streak >= TELEGRAM_ONLINE_FAST_CONFIRMATION_SAMPLES
                         and start_traffic is not None
                         and (total_traffic - start_traffic) >= TELEGRAM_ONLINE_FAST_CONFIRMATION_MIN_BYTES
                     )
-                    if prev_streak == TELEGRAM_ONLINE_CONFIRMATION_SAMPLES - 1 or fast_confirmed:
-                        streak = TELEGRAM_ONLINE_CONFIRMATION_SAMPLES
+                    if prev_streak == target_samples - 1 or fast_confirmed:
+                        streak = target_samples
                         changes.append((key[0], item["email"], item["group"], "online"))
                 else:
                     streak = 0
@@ -1751,6 +1768,9 @@ class PanelWorker:
         self.client_inbounds = {}
         self.access_cache = {}
         self.lock = threading.Lock()
+        self.up = False
+        self.last_error = ""
+        self.last_success = 0.0
         self.metrics = [metric("xui_exporter_up", 0, server=panel["name"])]
         self.log_status = {"enabled": int(panel.get("logs", False)), "up": 0,
                            "last_success_timestamp_seconds": 0, "window_full": 0,
@@ -1759,6 +1779,8 @@ class PanelWorker:
     def poll(self, forwarder=None):
         panel = self.panel
         token = None
+        poll_error = ""
+        poll_up = False
         try:
             token = read_token(panel["token_file"])
             inbounds = request_json(panel["url"], token=token)
@@ -1767,11 +1789,17 @@ class PanelWorker:
             mapped_groups = client_group_map(clients or [])
             online = request_json(endpoint(panel["url"], "/clients/onlines"), "POST", token=token)
             data = render_metrics(panel["name"], inbounds or [], online or [], clients or [])
+            poll_up = True
         except ERRORS as error:
+            poll_error = error_kind(error)
             data = [metric("xui_exporter_up", 0, server=panel["name"])]
-            print(f'{panel["name"]}: 流量采集失败 ({error_kind(error)})', file=sys.stderr, flush=True)
+            print(f'{panel["name"]}: 流量采集失败 ({poll_error})', file=sys.stderr, flush=True)
         with self.lock:
             self.metrics = data  # discard stale client series on failure
+            self.up = poll_up
+            self.last_error = poll_error
+            if poll_up:
+                self.last_success = time.time()
             if "mapped_inbounds" in locals():
                 self.client_inbounds = mapped_inbounds
             if "mapped_groups" in locals():
@@ -1898,16 +1926,303 @@ class PanelWorker:
 WORKERS = []
 
 
-class MetricsHandler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        if self.path != "/api/ssh-login":
-            self.send_error(404)
+class RuntimeManager:
+    """Coordinate hot-reloading of PanelWorker and TelegramBot threads."""
+
+    def __init__(self, root_stop=None):
+        self.root_stop = root_stop or threading.Event()
+        self.lock = threading.Lock()
+        self.worker_entries = []  # list of (panel_dict, PanelWorker, stop_event, thread)
+        self.bot_stop = None
+        self.bot_thread = None
+        self.bot_instance = None
+
+    def reload_panels(self):
+        if not PANELS_FILE:
             return
+        panels = load_config(PANELS_FILE)
+        with self.lock:
+            existing_by_name = {p["name"]: (p, w, stop, t) for p, w, stop, t in self.worker_entries}
+            new_entries = []
+            to_stop = []
+            desired_names = {p["name"] for p in panels}
+            for name, entry in existing_by_name.items():
+                if name not in desired_names:
+                    to_stop.append(entry)
+            for panel in panels:
+                prev = existing_by_name.get(panel["name"])
+                if prev and prev[0] == panel and prev[3].is_alive():
+                    new_entries.append(prev)
+                    continue
+                if prev:
+                    to_stop.append(prev)
+                worker = PanelWorker(panel)
+                stop_event = threading.Event()
+                thread = threading.Thread(target=worker.run, args=(stop_event,), daemon=True, name=panel["name"])
+                thread.start()
+                new_entries.append((dict(panel), worker, stop_event, thread))
+            self.worker_entries = new_entries
+            WORKERS[:] = [entry[1] for entry in new_entries]
+            if self.bot_instance is not None:
+                self.bot_instance.workers = list(WORKERS)
+        for _, _, stop_event, thread in to_stop:
+            stop_event.set()
+            thread.join(timeout=2)
+
+    def reload_telegram(self):
+        with self.lock:
+            old_stop = self.bot_stop
+            old_thread = self.bot_thread
+            self.bot_stop = None
+            self.bot_thread = None
+            self.bot_instance = None
+        if old_stop is not None:
+            old_stop.set()
+        if old_thread is not None and old_thread.is_alive():
+            old_thread.join(timeout=5)
         try:
-            self.handle_ssh_login()
-        except (ValueError, TypeError, KeyError, OSError, RuntimeError, sqlite3.Error) as error:
-            print(f"SSH 登录事件处理失败 ({error_kind(error)})", file=sys.stderr, flush=True)
-            self.send_error(400, "invalid event")
+            config = telegram_config()
+            if not config:
+                return
+            bot_stop = threading.Event()
+            bot = TelegramBot(config, list(WORKERS), STATE_DIR)
+            thread = threading.Thread(target=bot.run, args=(bot_stop,), daemon=True, name="telegram-bot")
+            thread.start()
+            with self.lock:
+                self.bot_stop = bot_stop
+                self.bot_thread = thread
+                self.bot_instance = bot
+            print("Telegram Bot started", flush=True)
+        except ERRORS as error:
+            print(f"Telegram 配置无效，Bot 未启动 ({error_kind(error)})", file=sys.stderr, flush=True)
+
+    def stop_all(self):
+        self.root_stop.set()
+        with self.lock:
+            entries = list(self.worker_entries)
+            bot_stop = self.bot_stop
+            bot_thread = self.bot_thread
+        if bot_stop is not None:
+            bot_stop.set()
+        for _, _, stop_event, _ in entries:
+            stop_event.set()
+        if bot_thread is not None and bot_thread.is_alive():
+            bot_thread.join(timeout=3)
+        for _, _, _, thread in entries:
+            thread.join(timeout=3)
+
+
+RUNTIME = None
+ADMIN_SESSION_TTL_SECONDS = 12 * 3600
+ADMIN_LOGIN_MAX_ATTEMPTS = 5
+ADMIN_LOGIN_WINDOW_SECONDS = 300
+_ADMIN_LOGIN_LOCK = threading.Lock()
+_ADMIN_LOGIN_FAILURES = {}
+
+
+def web_admin_config(path=None):
+    config_path = Path(path or WEB_ADMIN_CONFIG_FILE)
+    if not config_path.is_file():
+        return None
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if (not isinstance(config, dict)
+            or not isinstance(config.get("password_salt"), str)
+            or not isinstance(config.get("password_hash"), str)
+            or not isinstance(config.get("session_secret"), str)):
+        raise ValueError("Web 管理配置无效")
+    return config
+
+
+def hash_admin_password(password, salt_hex=None, iterations=200000):
+    if not isinstance(password, str) or len(password) < 8:
+        raise ValueError("管理员密码长度不能少于 8 位")
+    salt = bytes.fromhex(salt_hex) if salt_hex else secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return {"password_salt": salt.hex(), "password_hash": digest.hex(), "iterations": iterations}
+
+
+def verify_admin_password(password, config):
+    if not isinstance(password, str) or not password or not isinstance(config, dict):
+        return False
+    try:
+        salt = bytes.fromhex(config["password_salt"])
+        expected = bytes.fromhex(config["password_hash"])
+        iterations = int(config.get("iterations", 200000))
+    except (KeyError, ValueError, TypeError):
+        return False
+    actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return hmac.compare_digest(actual, expected)
+
+
+def save_web_admin_password(password, path=None, session_secret=None):
+    target = Path(path or WEB_ADMIN_CONFIG_FILE)
+    existing = web_admin_config(target) if target.is_file() else None
+    hashed = hash_admin_password(password)
+    secret = session_secret or (existing["session_secret"] if existing else secrets.token_hex(32))
+    atomic_write(target, json.dumps({**hashed, "session_secret": secret}, indent=2) + "\n")
+
+
+def web_admin_cli(argv):
+    parser = argparse.ArgumentParser(description="管理 GLA Web 配置台")
+    parser.add_argument("operation", choices=("set-password", "disable", "status"))
+    args = parser.parse_args(argv)
+    target = Path(WEB_ADMIN_CONFIG_FILE)
+    if args.operation == "status":
+        print("已启用 Web 配置台" if web_admin_config(target) else "未启用 Web 配置台")
+        return
+    if args.operation == "disable":
+        target.unlink(missing_ok=True)
+        print("已关闭 Web 配置台")
+        return
+    password = sys.stdin.read().rstrip("\r\n")
+    save_web_admin_password(password, target)
+    print("Web 配置台密码已更新")
+
+
+def _b64u_encode(raw):
+    import base64
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _b64u_decode(text):
+    import base64
+    padded = text + "=" * (-len(text) % 4)
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def issue_admin_session(config, now=None):
+    now = time.time() if now is None else now
+    payload = {"exp": int(now + ADMIN_SESSION_TTL_SECONDS), "csrf": secrets.token_urlsafe(24)}
+    encoded = _b64u_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    sig = hmac.new(config["session_secret"].encode("utf-8"), encoded.encode("ascii"), hashlib.sha256).digest()
+    return f"{encoded}.{_b64u_encode(sig)}", payload["csrf"]
+
+
+def verify_admin_session(cookie_header, config, now=None):
+    if not cookie_header or not config:
+        return None
+    now = time.time() if now is None else now
+    token = ""
+    for part in cookie_header.split(";"):
+        name, _, value = part.strip().partition("=")
+        if name == "gla_admin_session":
+            token = value.strip()
+            break
+    if "." not in token:
+        return None
+    encoded, sig_b64 = token.split(".", 1)
+    try:
+        expected_sig = hmac.new(config["session_secret"].encode("utf-8"), encoded.encode("ascii"), hashlib.sha256).digest()
+        actual_sig = _b64u_decode(sig_b64)
+        if not hmac.compare_digest(actual_sig, expected_sig):
+            return None
+        payload = json.loads(_b64u_decode(encoded).decode("utf-8"))
+        if int(payload.get("exp", 0)) < now or not payload.get("csrf"):
+            return None
+        return payload
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return None
+
+
+def _admin_login_allowed(client_ip, now=None):
+    now = time.time() if now is None else now
+    with _ADMIN_LOGIN_LOCK:
+        attempts = [ts for ts in _ADMIN_LOGIN_FAILURES.get(client_ip, []) if now - ts < ADMIN_LOGIN_WINDOW_SECONDS]
+        if attempts:
+            _ADMIN_LOGIN_FAILURES[client_ip] = attempts
+        else:
+            _ADMIN_LOGIN_FAILURES.pop(client_ip, None)
+        return len(attempts) < ADMIN_LOGIN_MAX_ATTEMPTS
+
+
+def _record_admin_login_failure(client_ip, now=None):
+    now = time.time() if now is None else now
+    with _ADMIN_LOGIN_LOCK:
+        attempts = [ts for ts in _ADMIN_LOGIN_FAILURES.get(client_ip, []) if now - ts < ADMIN_LOGIN_WINDOW_SECONDS]
+        attempts.append(now)
+        _ADMIN_LOGIN_FAILURES[client_ip] = attempts
+
+
+def _clear_admin_login_failures(client_ip):
+    with _ADMIN_LOGIN_LOCK:
+        _ADMIN_LOGIN_FAILURES.pop(client_ip, None)
+
+
+class MetricsHandler(BaseHTTPRequestHandler):
+    def _send_json(self, status, payload, extra_headers=None):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        for key, value in (extra_headers or []):
+            self.send_header(key, value)
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _read_json_body(self):
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        if length <= 0 or length > 65536:
+            raise ValueError("请求体大小无效")
+        data = json.loads(self.rfile.read(length).decode("utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("请求体必须是 JSON 对象")
+        return data
+
+    def _admin_client_ip(self):
+        real_ip = (self.headers.get("X-Real-IP") or "").strip()
+        if real_ip:
+            return real_ip
+        forwarded = (self.headers.get("X-Forwarded-For") or "").strip()
+        if forwarded:
+            return forwarded.split(",")[-1].strip()
+        return self.client_address[0] if self.client_address else "unknown"
+
+    def _cookie_attrs(self):
+        attrs = "HttpOnly; SameSite=Strict; Path=/"
+        if (self.headers.get("X-Forwarded-Proto") or "").strip().lower() == "https":
+            attrs += "; Secure"
+        return attrs
+
+    def _require_admin(self, require_csrf=False):
+        config = web_admin_config()
+        if not config:
+            self._send_json(404, {"error": "Web 配置台未启用"})
+            return None, None
+        session = verify_admin_session(self.headers.get("Cookie", ""), config)
+        if not session:
+            self._send_json(401, {"error": "未登录或会话已过期"})
+            return None, None
+        if require_csrf:
+            supplied = self.headers.get("X-CSRF-Token", "")
+            if not supplied or not hmac.compare_digest(supplied, session["csrf"]):
+                self._send_json(403, {"error": "CSRF 校验失败"})
+                return None, None
+        return config, session
+
+    def do_DELETE(self):
+        path = urllib.parse.urlsplit(self.path).path
+        if path.startswith("/api/admin/"):
+            self.handle_admin_mutation("DELETE", path)
+            return
+        self.send_error(404)
+
+    def do_POST(self):
+        path = urllib.parse.urlsplit(self.path).path
+        if path == "/api/ssh-login":
+            try:
+                self.handle_ssh_login()
+            except (ValueError, TypeError, KeyError, OSError, RuntimeError, sqlite3.Error) as error:
+                print(f"SSH 登录事件处理失败 ({error_kind(error)})", file=sys.stderr, flush=True)
+                self.send_error(400, "invalid event")
+            return
+        if path.startswith("/api/admin/"):
+            self.handle_admin_mutation("POST", path)
+            return
+        self.send_error(404)
 
     def handle_ssh_login(self):
         config_path = Path(SSH_LOGIN_CONFIG_FILE)
@@ -1979,6 +2294,42 @@ class MetricsHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        path = urllib.parse.urlsplit(self.path).path
+        if path in ("/", "/admin"):
+            if not web_admin_config() or not Path(ADMIN_HTML_FILE).is_file():
+                self.send_error(404)
+                return
+            if path == "/":
+                self.send_response(302)
+                self.send_header("Location", "/admin")
+                self.end_headers()
+                return
+            body = Path(ADMIN_HTML_FILE).read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+        if path == "/api/admin/session":
+            config = web_admin_config()
+            if not config:
+                self._send_json(404, {"error": "Web 配置台未启用"})
+                return
+            session = verify_admin_session(self.headers.get("Cookie", ""), config)
+            self._send_json(200, {"authenticated": bool(session),
+                                  "csrf_token": session["csrf"] if session else ""})
+            return
+        if path == "/api/admin/overview":
+            config, _ = self._require_admin(require_csrf=False)
+            if not config:
+                return
+            self._send_json(200, admin_overview_payload())
+            return
         if self.path not in ("/metrics", "/metrics?"):
             self.send_error(404)
             return
@@ -1999,6 +2350,46 @@ class MetricsHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
             pass
+
+    def handle_admin_mutation(self, method, path):
+        if path == "/api/admin/login" and method == "POST":
+            config = web_admin_config()
+            if not config:
+                self._send_json(404, {"error": "Web 配置台未启用"})
+                return
+            client_ip = self._admin_client_ip()
+            if not _admin_login_allowed(client_ip):
+                self._send_json(429, {"error": "登录失败次数过多，请 5 分钟后再试"})
+                return
+            try:
+                body = self._read_json_body()
+            except (ValueError, json.JSONDecodeError) as error:
+                self._send_json(400, {"error": str(error)})
+                return
+            if not verify_admin_password(body.get("password", ""), config):
+                _record_admin_login_failure(client_ip)
+                self._send_json(401, {"error": "密码错误"})
+                return
+            _clear_admin_login_failures(client_ip)
+            cookie_val, csrf = issue_admin_session(config)
+            self._send_json(200, {"authenticated": True, "csrf_token": csrf}, [
+                ("Set-Cookie", f"gla_admin_session={cookie_val}; Max-Age={ADMIN_SESSION_TTL_SECONDS}; {self._cookie_attrs()}")
+            ])
+            return
+        if path == "/api/admin/logout" and method == "POST":
+            self._send_json(200, {"ok": True}, [
+                ("Set-Cookie", f"gla_admin_session=; Max-Age=0; {self._cookie_attrs()}")
+            ])
+            return
+        config, _ = self._require_admin(require_csrf=True)
+        if not config:
+            return
+        try:
+            body = self._read_json_body()
+            result = apply_admin_action(method, path, body, config)
+            self._send_json(200, result)
+        except (ValueError, TypeError, KeyError, OSError, RuntimeError, json.JSONDecodeError) as error:
+            self._send_json(400, {"error": str(error)})
 
     def log_message(self, *_args):
         pass
@@ -2220,9 +2611,13 @@ def telegram_cli(argv, config_file=None, token_filename="telegram-bot.token",
     cooldown = configured_notification_cooldown(
         previous.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS)
         if isinstance(previous, dict) else DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS)
-    atomic_write(path, json.dumps({"token_file": f"/run/secrets/{token_filename}",
-                                   "allowed_user_ids": sorted(set(user_ids)),
-                                   "notification_cooldown_seconds": cooldown}, ensure_ascii=False, indent=2) + "\n")
+    payload = {"token_file": f"/run/secrets/{token_filename}",
+               "allowed_user_ids": sorted(set(user_ids)),
+               "notification_cooldown_seconds": cooldown}
+    if isinstance(previous, dict) and "online_confirmation_samples" in previous:
+        payload["online_confirmation_samples"] = validate_online_confirmation_samples(
+            previous["online_confirmation_samples"])
+    atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 def ssh_login_cli(argv):
@@ -2375,7 +2770,180 @@ def ssh_login_cli(argv):
     atomic_write(path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
 
 
+def admin_overview_payload():
+    worker_map = {worker.panel["name"]: worker for worker in WORKERS}
+    panels_list = []
+    if PANELS_FILE and Path(PANELS_FILE).is_file():
+        for panel in load_config(PANELS_FILE):
+            worker = worker_map.get(panel["name"])
+            with (worker.lock if worker else threading.Lock()):
+                up = bool(worker.up) if worker else False
+                last_error = worker.last_error if worker else "未运行"
+                last_success = worker.last_success if worker else 0.0
+            panels_list.append({
+                "name": panel["name"],
+                "url": panel["url"],
+                "logs": bool(panel.get("logs", False)),
+                "interval": panel.get("interval", 30),
+                "log_count": panel.get("log_count", 1000),
+                "up": up,
+                "last_error": last_error,
+                "last_success": last_success,
+            })
+    ssh_raw = json.loads(Path(SSH_LOGIN_CONFIG_FILE).read_text(encoding="utf-8")) if Path(SSH_LOGIN_CONFIG_FILE).is_file() else {}
+    ssh_servers = {}
+    for name, info in sorted((ssh_raw.get("servers") or {}).items()):
+        if isinstance(info, dict):
+            ssh_servers[name] = {
+                "allowed_cidrs": info.get("allowed_cidrs", []),
+                "allowed_ip_groups": info.get("allowed_ip_groups", []),
+            }
+    tg_raw = json.loads(Path(TELEGRAM_CONFIG_FILE).read_text(encoding="utf-8")) if Path(TELEGRAM_CONFIG_FILE).is_file() else {}
+    ssh_tg_raw = json.loads(Path(SSH_TELEGRAM_CONFIG_FILE).read_text(encoding="utf-8")) if Path(SSH_TELEGRAM_CONFIG_FILE).is_file() else {}
+    return {
+        "server_name": SERVER_NAME,
+        "panels": panels_list,
+        "ssh_login": {
+            "ingest_url": ssh_raw.get("ingest_url", ""),
+            "ip_groups": ssh_raw.get("ip_groups", {}),
+            "servers": ssh_servers,
+        },
+        "telegram": {
+            "configured": Path(TELEGRAM_CONFIG_FILE).is_file(),
+            "allowed_user_ids": tg_raw.get("allowed_user_ids", []),
+            "notification_cooldown_seconds": configured_notification_cooldown(
+                tg_raw.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS)),
+            "online_confirmation_samples": validate_online_confirmation_samples(
+                tg_raw.get("online_confirmation_samples", TELEGRAM_ONLINE_CONFIRMATION_SAMPLES)),
+        },
+        "ssh_telegram": {
+            "configured": Path(SSH_TELEGRAM_CONFIG_FILE).is_file(),
+            "allowed_user_ids": ssh_tg_raw.get("allowed_user_ids", []),
+        },
+    }
+
+
+def _run_cli_with_stdin(func, argv, stdin_text=""):
+    old_stdin = sys.stdin
+    try:
+        sys.stdin = io.StringIO(stdin_text)
+        return func(argv)
+    finally:
+        sys.stdin = old_stdin
+
+
+def apply_admin_action(method, path, body, admin_config):
+    import io
+    if path == "/api/admin/panels":
+        if method == "DELETE":
+            panels_cli(["delete", "--name", str(body.get("name", ""))])
+        else:
+            op = "update" if body.get("operation") == "update" else "add"
+            argv = [op, "--name", str(body.get("name", "")),
+                    "--url", str(body.get("url", "")),
+                    "--logs", "true" if body.get("logs", True) else "false",
+                    "--interval", str(int(body.get("interval", 30))),
+                    "--log-count", str(int(body.get("log_count", 1000)))]
+            new_name = str(body.get("new_name", "")).strip()
+            if op == "update" and new_name:
+                argv.extend(["--new-name", new_name])
+            old_stdin = sys.stdin
+            try:
+                sys.stdin = io.StringIO(str(body.get("token", "")))
+                panels_cli(argv)
+            finally:
+                sys.stdin = old_stdin
+        if RUNTIME is not None:
+            RUNTIME.reload_panels()
+        return {"ok": True}
+
+    if path == "/api/admin/ssh-login/url" and method == "POST":
+        ssh_login_cli(["set-url", "--url", str(body.get("url", ""))])
+        return {"ok": True}
+
+    if path == "/api/admin/ssh-login/groups":
+        name = str(body.get("name", "")).strip()
+        if method == "DELETE":
+            ssh_login_cli(["delete-group", "--name", name])
+        else:
+            existing = json.loads(Path(SSH_LOGIN_CONFIG_FILE).read_text(encoding="utf-8")).get("ip_groups", {}) if Path(SSH_LOGIN_CONFIG_FILE).is_file() else {}
+            op = "set-group" if name in existing else "add-group"
+            ssh_login_cli([op, "--name", name, "--cidrs", str(body.get("cidrs", ""))])
+        return {"ok": True}
+
+    if path == "/api/admin/ssh-login/servers":
+        name = str(body.get("name", "")).strip()
+        if method == "DELETE":
+            ssh_login_cli(["delete", "--name", name])
+        else:
+            ssh_login_cli(["add", "--name", name, "--cidrs", str(body.get("cidrs", "")), "--groups", str(body.get("groups", ""))])
+        return {"ok": True}
+
+    if path == "/api/admin/ssh-login/install-command" and method == "POST":
+        buf = io.StringIO()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = buf
+            ssh_login_cli(["install-command", "--name", str(body.get("name", ""))])
+        finally:
+            sys.stdout = old_stdout
+        return {"command": buf.getvalue().strip()}
+
+    if path == "/api/admin/telegram" and method == "POST":
+        tg_path = Path(TELEGRAM_CONFIG_FILE)
+        token = str(body.get("token", "")).strip()
+        if not token:
+            token = read_token(tg_path.parent / "telegram-bot.token")
+        cooldown = validate_notification_cooldown(int(body.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS)))
+        confirm = validate_online_confirmation_samples(int(body.get("online_confirmation_samples", TELEGRAM_ONLINE_CONFIRMATION_SAMPLES)))
+        old_stdin = sys.stdin
+        try:
+            sys.stdin = io.StringIO(token)
+            telegram_cli(["set", "--user-ids", str(body.get("user_ids", ""))])
+        finally:
+            sys.stdin = old_stdin
+        saved = json.loads(tg_path.read_text(encoding="utf-8"))
+        saved["notification_cooldown_seconds"] = cooldown
+        saved["online_confirmation_samples"] = confirm
+        atomic_write(tg_path, json.dumps(saved, ensure_ascii=False, indent=2) + "\n")
+        if RUNTIME is not None:
+            RUNTIME.reload_telegram()
+        return {"ok": True}
+
+    if path == "/api/admin/telegram/test" and method == "POST":
+        telegram_cli(["test"])
+        return {"ok": True}
+
+    if path == "/api/admin/ssh-login/telegram" and method == "POST":
+        tg_path = Path(SSH_TELEGRAM_CONFIG_FILE)
+        token = str(body.get("token", "")).strip()
+        if not token:
+            token = read_token(tg_path.parent / "ssh-telegram-bot.token")
+        old_stdin = sys.stdin
+        try:
+            sys.stdin = io.StringIO(token)
+            telegram_cli(["set", "--user-ids", str(body.get("user_ids", ""))],
+                         SSH_TELEGRAM_CONFIG_FILE, "ssh-telegram-bot.token")
+        finally:
+            sys.stdin = old_stdin
+        return {"ok": True}
+
+    if path == "/api/admin/ssh-login/telegram/test" and method == "POST":
+        telegram_cli(["test"], SSH_TELEGRAM_CONFIG_FILE, "ssh-telegram-bot.token",
+                     "✅ SSH 登录告警 Bot 测试消息；接收配置正常。")
+        return {"ok": True}
+
+    if path == "/api/admin/password" and method == "POST":
+        if not verify_admin_password(str(body.get("current_password", "")), admin_config):
+            raise ValueError("当前密码错误")
+        save_web_admin_password(str(body.get("new_password", "")), session_secret=admin_config["session_secret"])
+        return {"ok": True}
+
+    raise ValueError("未知操作路径")
+
+
 def main():
+    global RUNTIME
     if len(sys.argv) > 1 and sys.argv[1] == "panels":
         panels_cli(sys.argv[2:])
         return
@@ -2389,24 +2957,14 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "ssh-login":
         ssh_login_cli(sys.argv[2:])
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "web-admin":
+        web_admin_cli(sys.argv[2:])
+        return
     stop_event = threading.Event()
-    worker_threads = []
+    RUNTIME = RuntimeManager(stop_event)
     if PANELS_FILE:
-        panels = load_config(PANELS_FILE)
-        for panel in panels:
-            worker = PanelWorker(panel)
-            WORKERS.append(worker)
-            thread = threading.Thread(target=worker.run, args=(stop_event,), daemon=True, name=panel["name"])
-            thread.start()
-            worker_threads.append(thread)
-        try:
-            config = telegram_config()
-            if config:
-                threading.Thread(target=TelegramBot(config, WORKERS, STATE_DIR).run, args=(stop_event,),
-                                 daemon=True, name="telegram-bot").start()
-                print("Telegram Bot started", flush=True)
-        except ERRORS as error:
-            print(f"Telegram 配置无效，Bot 未启动 ({error_kind(error)})", file=sys.stderr, flush=True)
+        RUNTIME.reload_panels()
+        RUNTIME.reload_telegram()
     elif not API_URL:
         raise ValueError("缺少 XUI_API_URL 或 XUI_PANELS_FILE")
     server = ThreadingHTTPServer(("0.0.0.0", 9105), MetricsHandler)
@@ -2422,10 +2980,8 @@ def main():
     try:
         server.serve_forever()
     finally:
-        stop_event.set()
         server.server_close()
-        for thread in worker_threads:
-            thread.join(timeout=3)
+        RUNTIME.stop_all()
 
 
 if __name__ == "__main__":

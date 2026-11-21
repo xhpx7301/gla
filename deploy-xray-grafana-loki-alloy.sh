@@ -377,6 +377,7 @@ install -d -m 0750 "$STACK_DIR" "$STACK_DIR/alloy" \
   "$STACK_DIR/grafana/provisioning/dashboards" "$STACK_DIR/grafana/dashboards" \
   "$STACK_DIR/assets" "$STACK_DIR/secrets" "$STACK_DIR/geoip"
 download_asset assets/xui_exporter.py "$STACK_DIR/assets/xui_exporter.py"
+download_asset assets/admin.html "$STACK_DIR/assets/admin.html"
 download_asset assets/xui-exporter.Dockerfile "$STACK_DIR/assets/xui-exporter.Dockerfile"
 [ -f "$STACK_DIR/secrets/xui-panels.json" ] || printf '[]\n' >"$STACK_DIR/secrets/xui-panels.json"
 [ -f "$STACK_DIR/secrets/ssh-login-config.json" ] || printf '{"servers":{}}\n' >"$STACK_DIR/secrets/ssh-login-config.json"
@@ -597,14 +598,17 @@ ${SECURITY_TRAFFIC_VOLUME_LINE}
       XUI_TELEGRAM_CONFIG_FILE: /run/secrets/telegram-config.json
       XUI_SSH_TELEGRAM_CONFIG_FILE: /run/secrets/ssh-telegram-config.json
       XUI_SSH_LOGIN_CONFIG_FILE: /run/secrets/ssh-login-config.json
+      XUI_WEB_ADMIN_CONFIG_FILE: /run/secrets/web-admin.json
+      XUI_ADMIN_HTML_FILE: /app/admin.html
       GEOIP_CITY_DB: /var/lib/gla/geoip/GeoLite2-City.mmdb
       GEOIP_ASN_DB: /var/lib/gla/geoip/GeoLite2-ASN.mmdb
 ${XUI_EXTRA_HOST_LINE}
     volumes:
       - ./assets/xui_exporter.py:/app/xui_exporter.py:ro
+      - ./assets/admin.html:/app/admin.html:ro
 ${XUI_CITY_VOLUME_LINE}
 ${XUI_ASN_VOLUME_LINE}
-      - ./secrets:/run/secrets:ro
+      - ./secrets:/run/secrets
       - xui-state:/var/lib/xui
     depends_on:
       - alloy
@@ -1670,6 +1674,44 @@ ssh_telegram_test() {
   docker exec gla-xui-exporter python3 /app/xui_exporter.py ssh-telegram test
 }
 
+web_admin_command() {
+  docker run --rm -i --network none \
+    -e XUI_WEB_ADMIN_CONFIG_FILE=/run/secrets/web-admin.json \
+    -v "$STACK_DIR/secrets:/run/secrets" \
+    -v "$STACK_DIR/assets/xui_exporter.py:/app/xui_exporter.py:ro" \
+    python:3.12-alpine python3 /app/xui_exporter.py web-admin "$@"
+}
+
+configure_web_admin() {
+  while true; do
+    clear
+    printf 'Web 配置台管理\n\n'
+    web_admin_command status || true
+    printf '\n1. 启用 / 修改管理员密码\n2. 关闭 Web 配置台\n0. 返回\n'
+    read -rp "请输入操作编号 [0-2]: " choice
+    case "$choice" in
+      0) return ;;
+      1)
+        local pwd1 pwd2
+        read -rsp "请输入管理员密码（至少 8 位）: " pwd1; printf '\n'
+        read -rsp "请再次输入密码: " pwd2; printf '\n'
+        if [ "$pwd1" != "$pwd2" ]; then
+          printf '两次输入的密码不一致。\n'; pause; continue
+        fi
+        if printf '%s\n' "$pwd1" | web_admin_command set-password; then
+          printf '可在 Nginx Proxy Manager 中配置 HTTPS Proxy Host：转发主机 gla-xui-exporter、端口 9105，访问 /admin。\n'
+        fi
+        pause
+        ;;
+      2)
+        web_admin_command disable || true
+        pause
+        ;;
+      *) printf '无效选择。\n'; pause ;;
+    esac
+  done
+}
+
 ssh_telegram_state() {
   if [ ! -f "$STACK_DIR/secrets/ssh-telegram-config.json" ]; then
     printf '[未配置]'
@@ -2160,8 +2202,9 @@ while true; do
 9. 更新容器镜像
 10. 卸载并删除全部数据
 11. 数据备份与导入导出
+12. 管理 Web 配置台（启用/改密/关闭）
 MENU
-  read -rp "请输入操作编号 [0-11]: " choice
+  read -rp "请输入操作编号 [0-12]: " choice
   case "$choice" in
     0) exit 0 ;;
     1) update_script_and_deploy; exit $? ;;
@@ -2175,6 +2218,7 @@ MENU
     9) update_stack; pause ;;
     10) uninstall_everything ;;
     11) backup_menu ;;
+    12) configure_web_admin ;;
     *) printf '无效选择。\n'; pause ;;
   esac
 done

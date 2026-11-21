@@ -1713,6 +1713,124 @@ class ExporterTest(unittest.TestCase):
             finally:
                 bot.db.close()
 
+    def test_web_admin_cli_auth_csrf_rate_limit_and_mutations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            web_cfg = root / "web-admin.json"
+            panels_cfg = root / "xui-panels.json"
+            panels_cfg.write_text("[]\n", encoding="utf-8")
+            ssh_cfg = root / "ssh-login-config.json"
+            ssh_cfg.write_text('{"servers":{}}\n', encoding="utf-8")
+            tg_cfg = root / "telegram-config.json"
+            ssh_tg_cfg = root / "ssh-telegram-config.json"
+            admin_html = pathlib.Path(__file__).parents[1] / "assets" / "admin.html"
+            server = EXPORTER.ThreadingHTTPServer(("127.0.0.1", 0), EXPORTER.MetricsHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            try:
+                with mock.patch.object(EXPORTER, "WEB_ADMIN_CONFIG_FILE", str(web_cfg)), \
+                        mock.patch.object(EXPORTER, "ADMIN_HTML_FILE", str(admin_html)), \
+                        mock.patch.object(EXPORTER, "PANELS_FILE", str(panels_cfg)), \
+                        mock.patch.object(EXPORTER, "SSH_LOGIN_CONFIG_FILE", str(ssh_cfg)), \
+                        mock.patch.object(EXPORTER, "TELEGRAM_CONFIG_FILE", str(tg_cfg)), \
+                        mock.patch.object(EXPORTER, "SSH_TELEGRAM_CONFIG_FILE", str(ssh_tg_cfg)), \
+                        mock.patch.object(EXPORTER, "_ADMIN_LOGIN_FAILURES", {}):
+                    # Disabled by default
+                    with self.assertRaises(urllib.error.HTTPError) as err:
+                        urllib.request.urlopen(f"{base}/admin", timeout=3)
+                    self.assertEqual(err.exception.code, 404)
+
+                    with self.assertRaises(ValueError):
+                        with mock.patch("sys.stdin", io.StringIO("short")):
+                            EXPORTER.web_admin_cli(["set-password"])
+                    with mock.patch("sys.stdin", io.StringIO("secret1234")):
+                        EXPORTER.web_admin_cli(["set-password"])
+
+                    # /metrics still rejects forwarded requests
+                    req_metrics = urllib.request.Request(f"{base}/metrics", headers={"X-Forwarded-For": "1.2.3.4"})
+                    with self.assertRaises(urllib.error.HTTPError) as err:
+                        urllib.request.urlopen(req_metrics, timeout=3)
+                    self.assertEqual(err.exception.code, 404)
+
+                    # Rate limiting after 5 failed attempts
+                    for _ in range(5):
+                        req = urllib.request.Request(
+                            f"{base}/api/admin/login",
+                            data=json.dumps({"password": "wrong"}).encode(),
+                            headers={"Content-Type": "application/json", "X-Real-IP": "198.51.100.2"},
+                            method="POST")
+                        with self.assertRaises(urllib.error.HTTPError) as err:
+                            urllib.request.urlopen(req, timeout=3)
+                        self.assertEqual(err.exception.code, 401)
+                    req_locked = urllib.request.Request(
+                        f"{base}/api/admin/login",
+                        data=json.dumps({"password": "secret1234"}).encode(),
+                        headers={"Content-Type": "application/json", "X-Real-IP": "198.51.100.2"},
+                        method="POST")
+                    with self.assertRaises(urllib.error.HTTPError) as err:
+                        urllib.request.urlopen(req_locked, timeout=3)
+                    self.assertEqual(err.exception.code, 429)
+
+                    # Login from a clean IP succeeds
+                    req_ok = urllib.request.Request(
+                        f"{base}/api/admin/login",
+                        data=json.dumps({"password": "secret1234"}).encode(),
+                        headers={"Content-Type": "application/json", "X-Real-IP": "198.51.100.3"},
+                        method="POST")
+                    with urllib.request.urlopen(req_ok, timeout=3) as resp:
+                        self.assertEqual(resp.status, 200)
+                        cookie = resp.headers.get("Set-Cookie").split(";", 1)[0]
+                        csrf = json.loads(resp.read().decode())["csrf_token"]
+
+                    # Mutation without CSRF fails
+                    req_nocsrf = urllib.request.Request(
+                        f"{base}/api/admin/ssh-login/groups",
+                        data=json.dumps({"name": "office", "cidrs": "203.0.113.0/24"}).encode(),
+                        headers={"Content-Type": "application/json", "Cookie": cookie},
+                        method="POST")
+                    with self.assertRaises(urllib.error.HTTPError) as err:
+                        urllib.request.urlopen(req_nocsrf, timeout=3)
+                    self.assertEqual(err.exception.code, 403)
+
+                    # Valid mutations work and overview redacts secrets
+                    def call(method, path, payload):
+                        r = urllib.request.Request(
+                            base + path,
+                            data=json.dumps(payload).encode(),
+                            headers={"Content-Type": "application/json", "Cookie": cookie, "X-CSRF-Token": csrf},
+                            method=method)
+                        with urllib.request.urlopen(r, timeout=3) as resp:
+                            return json.loads(resp.read().decode())
+
+                    call("POST", "/api/admin/panels", {
+                        "operation": "add", "name": "node-a",
+                        "url": "https://panel.example.com/panel/api/inbounds/list",
+                        "token": "panel-secret", "logs": True, "interval": 30, "log_count": 1000})
+                    call("POST", "/api/admin/ssh-login/url", {"url": "https://ssh.example.com/api/ssh-login"})
+                    call("POST", "/api/admin/ssh-login/groups", {"name": "office", "cidrs": "203.0.113.0/24"})
+                    call("POST", "/api/admin/ssh-login/servers", {"name": "vm-1", "cidrs": "", "groups": "office"})
+                    call("POST", "/api/admin/telegram", {
+                        "token": "123:tg-secret", "user_ids": "42",
+                        "notification_cooldown_seconds": 1200, "online_confirmation_samples": 5})
+
+                    with urllib.request.urlopen(urllib.request.Request(
+                            f"{base}/api/admin/overview", headers={"Cookie": cookie}), timeout=3) as resp:
+                        overview = json.loads(resp.read().decode())
+                    raw = json.dumps(overview)
+                    self.assertNotIn("panel-secret", raw)
+                    self.assertNotIn("tg-secret", raw)
+                    self.assertNotIn("key", overview["ssh_login"]["servers"]["vm-1"])
+                    self.assertEqual(overview["telegram"]["online_confirmation_samples"], 5)
+                    self.assertEqual(len(overview["panels"]), 1)
+
+                    EXPORTER.web_admin_cli(["disable"])
+                    self.assertFalse(web_cfg.exists())
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
 
 if __name__ == "__main__":
     unittest.main()
