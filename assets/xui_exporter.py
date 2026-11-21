@@ -682,8 +682,6 @@ class TelegramBot:
             inbound_text = "\n" + "\n".join(f"  • {inbound}" for inbound in inbounds)
         else:
             inbound_text = inbounds[0] if inbounds else "未找到配置关联"
-        recent_inbound = worker.last_inbound_for_client(item["email"]) if worker else None
-        recent_inbound_line = f"\n🎯 最近命中入站：{recent_inbound}" if recent_inbound else ""
         detail_lines = []
         if not test and item.get("first_seen_at"):
             first_dt = datetime.fromtimestamp(float(item["first_seen_at"]), timezone(timedelta(hours=8)))
@@ -695,7 +693,7 @@ class TelegramBot:
         status = "在线" if item.get("online") else "离线"
         suffix = f"\n\nℹ️ 测试样例，客户端当前状态：{status}。不会记录在线状态或通知冷却。" if test else ""
         return (f"{title}\n\n👥 分组：{item['group']}\n👤 客户端：{item['email']}\n"
-                f"🖥 面板：{item['server']}\n🔗 关联入站：{inbound_text}{recent_inbound_line}\n{ip_text}\n\n"
+                f"🖥 面板：{item['server']}\n🔗 关联入站：{inbound_text}\n{ip_text}\n\n"
                 + "\n".join(detail_lines) + suffix)
 
     def send_online_notification(self, chat_id, notification, reply_markup=None):

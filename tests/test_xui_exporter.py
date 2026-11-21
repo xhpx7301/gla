@@ -1704,7 +1704,7 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(run(200 * 1024), 1)   # 3 samples + enough traffic: notified early
         self.assertEqual(run(1024), 0)         # probe-sized traffic keeps waiting
 
-    def test_online_notification_shows_recent_inbound_from_access_log(self):
+    def test_online_notification_omits_raw_access_log_inbound_tag(self):
         worker = EXPORTER.PanelWorker({"name": "node-a"})
         item = {"server": "node-a", "email": "alice", "group": "shared", "online": 1}
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request"), \
@@ -1712,7 +1712,7 @@ class ExporterTest(unittest.TestCase):
                 mock.patch.object(worker, "last_inbound_for_client", return_value="in-30303"):
             bot = EXPORTER.TelegramBot({"token": "bot-token"}, [worker], directory)
             try:
-                self.assertIn("🎯 最近命中入站：in-30303\n", bot.online_notification_text(item))
+                self.assertNotIn("最近命中入站", bot.online_notification_text(item))
             finally:
                 bot.db.close()
 
@@ -1907,7 +1907,7 @@ class ExporterTest(unittest.TestCase):
             try:
                 text = bot.online_notification_text(item)
                 self.assertIn("暂无24小时内公网记录（来源为本机/内网转发）", text)
-                self.assertIn("🎯 最近命中入站：in-30303", text)
+                self.assertNotIn("最近命中入站", text)
             finally:
                 bot.db.close()
 
