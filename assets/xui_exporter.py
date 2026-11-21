@@ -50,7 +50,12 @@ DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 3600
 PREVIOUS_DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = (600, 1800)
 MAX_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 86400
 IP_RECORD_MAX_AGE_SECONDS = 86400
+IP_RECORD_MAX_FUTURE_SKEW_SECONDS = 300
 TELEGRAM_ONLINE_CONFIRMATION_SAMPLES = 20
+TELEGRAM_ONLINE_FAST_CONFIRMATION_SAMPLES = 3
+TELEGRAM_ONLINE_FAST_CONFIRMATION_MIN_BYTES = 100 * 1024
+LOCAL_SOURCE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7"))
 TIMEOUT = float(os.environ.get("XUI_API_TIMEOUT", "10"))
 SERVER_NAME = os.environ.get("SERVER_NAME", "").strip() or "unknown"
 GEOIP_CITY_DB = os.environ.get("GEOIP_CITY_DB", "/var/lib/gla/geoip/GeoLite2-City.mmdb")
@@ -263,7 +268,10 @@ class TelegramBot:
         self.db.execute("CREATE TABLE IF NOT EXISTS subscriptions (chat_id INTEGER, group_name TEXT, PRIMARY KEY(chat_id,group_name))")
         self.db.execute("CREATE TABLE IF NOT EXISTS online_notify_settings (chat_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1)")
         self.db.execute("CREATE TABLE IF NOT EXISTS notification_cooldowns (chat_id INTEGER, server TEXT, email TEXT, notified_at REAL NOT NULL, PRIMARY KEY(chat_id,server,email))")
-        self.db.execute("CREATE TABLE IF NOT EXISTS online_confirmations (server TEXT, email TEXT, last_sample_at REAL NOT NULL, consecutive_online INTEGER NOT NULL, PRIMARY KEY(server,email))")
+        self.db.execute("CREATE TABLE IF NOT EXISTS online_confirmations (server TEXT, email TEXT, last_sample_at REAL NOT NULL, consecutive_online INTEGER NOT NULL, start_traffic INTEGER, PRIMARY KEY(server,email))")
+        confirmation_columns = {row[1] for row in self.db.execute("PRAGMA table_info(online_confirmations)")}
+        if "start_traffic" not in confirmation_columns:
+            self.db.execute("ALTER TABLE online_confirmations ADD COLUMN start_traffic INTEGER")
         self.db.execute("CREATE TABLE IF NOT EXISTS traffic_notify_settings (chat_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, notify_time TEXT NOT NULL DEFAULT '20:00')")
         self.db.execute("CREATE TABLE IF NOT EXISTS traffic_notify_groups (chat_id INTEGER, group_name TEXT, PRIMARY KEY(chat_id,group_name))")
         self.db.execute("CREATE TABLE IF NOT EXISTS traffic_notify_baselines (chat_id INTEGER, group_name TEXT, server TEXT, up INTEGER NOT NULL, down INTEGER NOT NULL, PRIMARY KEY(chat_id,group_name,server))")
@@ -643,11 +651,13 @@ class TelegramBot:
             inbound_text = "\n" + "\n".join(f"  • {inbound}" for inbound in inbounds)
         else:
             inbound_text = inbounds[0] if inbounds else "未找到配置关联"
+        recent_inbound = worker.last_inbound_for_client(item["email"]) if worker else None
+        recent_inbound_line = f"\n🎯 最近命中入站：{recent_inbound}" if recent_inbound else ""
         title = "🧪 上线通知测试" if test else "🟢 客户端上线"
         status = "在线" if item.get("online") else "离线"
         suffix = f"\n\nℹ️ 测试样例，客户端当前状态：{status}。不会记录在线状态或通知冷却。" if test else ""
         return (f"{title}\n\n👥 分组：{item['group']}\n👤 客户端：{item['email']}\n"
-                f"🖥 面板：{item['server']}\n🔗 关联入站：{inbound_text}\n{ip_text}\n\n"
+                f"🖥 面板：{item['server']}\n🔗 关联入站：{inbound_text}{recent_inbound_line}\n{ip_text}\n\n"
                 f"🕒 检测时间：{self.report_time()}{suffix}")
 
     def send_online_notification(self, chat_id, notification):
@@ -730,9 +740,9 @@ class TelegramBot:
                     "SELECT server,email,group_name,online FROM state")
             }
             existing_observations = {
-                (server, email): (float(last_sample_at), int(consecutive_online))
-                for server, email, last_sample_at, consecutive_online in self.db.execute(
-                    "SELECT server,email,last_sample_at,consecutive_online FROM online_confirmations")
+                (server, email): (float(last_sample_at), int(consecutive_online), start_traffic)
+                for server, email, last_sample_at, consecutive_online, start_traffic in self.db.execute(
+                    "SELECT server,email,last_sample_at,consecutive_online,start_traffic FROM online_confirmations")
             }
             missing_keys = [
                 key for key in existing_states
@@ -741,7 +751,7 @@ class TelegramBot:
             if missing_keys:
                 self.db.executemany("UPDATE state SET online=0 WHERE server=? AND email=?", missing_keys)
                 self.db.executemany(
-                    "UPDATE online_confirmations SET consecutive_online=0 WHERE server=? AND email=?",
+                    "UPDATE online_confirmations SET consecutive_online=0, start_traffic=NULL WHERE server=? AND email=?",
                     missing_keys)
             confirmation_updates = []
             state_updates = []
@@ -758,24 +768,48 @@ class TelegramBot:
                 if observation is not None and observation[0] == float(sample_at):
                     continue
                 online = item["online"] == 1
+                total_traffic = item["up"] + item["down"]
+                start_traffic = None
                 if baseline is None:
                     streak = TELEGRAM_ONLINE_CONFIRMATION_SAMPLES if online else 0
                 elif observation is None:
                     # Existing state from before confirmation support is treated
                     # as a baseline when it was already online.
-                    streak = (TELEGRAM_ONLINE_CONFIRMATION_SAMPLES if online and old and old[1] == 1
-                              else (1 if online else 0))
+                    if online and old and old[1] == 1:
+                        streak = TELEGRAM_ONLINE_CONFIRMATION_SAMPLES
+                    elif online:
+                        streak = 1
+                        start_traffic = total_traffic
+                    else:
+                        streak = 0
                 elif online:
-                    streak = min(observation[1] + 1, TELEGRAM_ONLINE_CONFIRMATION_SAMPLES)
-                    if observation[1] == TELEGRAM_ONLINE_CONFIRMATION_SAMPLES - 1:
+                    prev_streak = observation[1]
+                    prev_start_traffic = observation[2]
+                    if prev_streak == 0:
+                        streak = 1
+                        start_traffic = total_traffic
+                    else:
+                        streak = min(prev_streak + 1, TELEGRAM_ONLINE_CONFIRMATION_SAMPLES)
+                        if prev_start_traffic is not None and total_traffic < prev_start_traffic:
+                            start_traffic = total_traffic
+                        else:
+                            start_traffic = prev_start_traffic
+                    fast_confirmed = (
+                        prev_streak < TELEGRAM_ONLINE_CONFIRMATION_SAMPLES
+                        and streak >= TELEGRAM_ONLINE_FAST_CONFIRMATION_SAMPLES
+                        and start_traffic is not None
+                        and (total_traffic - start_traffic) >= TELEGRAM_ONLINE_FAST_CONFIRMATION_MIN_BYTES
+                    )
+                    if prev_streak == TELEGRAM_ONLINE_CONFIRMATION_SAMPLES - 1 or fast_confirmed:
+                        streak = TELEGRAM_ONLINE_CONFIRMATION_SAMPLES
                         changes.append((key[0], item["email"], item["group"], "online"))
                 else:
                     streak = 0
-                confirmation_updates.append((key[0], item["email"], sample_at, streak))
+                confirmation_updates.append((key[0], item["email"], sample_at, streak, start_traffic))
                 state_updates.append((*key, item["group"], item["online"]))
             if confirmation_updates:
                 self.db.executemany(
-                    "INSERT OR REPLACE INTO online_confirmations VALUES (?,?,?,?)",
+                    "INSERT OR REPLACE INTO online_confirmations(server,email,last_sample_at,consecutive_online,start_traffic) VALUES (?,?,?,?,?)",
                     confirmation_updates)
             if state_updates:
                 self.db.executemany("INSERT OR REPLACE INTO state VALUES (?,?,?,?)", state_updates)
@@ -1289,7 +1323,17 @@ def latest_ip_record(records):
         records = [records]
     if not isinstance(records, list) or not records:
         return None
-    record = records[0]
+    parsed = [item for item in (_parse_ip_record(record) for record in records) if item]
+    if not parsed:
+        return None
+    # The panel does not guarantee newest-first order; unparseable times rank last.
+    def rank(item):
+        moment = parse_ip_record_time(item["time"])
+        return moment.timestamp() if moment else float("-inf")
+    return max(parsed, key=rank)  # max keeps the first of equal ranks
+
+
+def _parse_ip_record(record):
     if isinstance(record, dict):
         raw_ip = str(record.get("ip") or record.get("IP") or "")
         timestamp = str(record.get("time") or record.get("timestamp") or record.get("date") or "")
@@ -1348,7 +1392,28 @@ def recent_ip_record(record, now=None, max_age=IP_RECORD_MAX_AGE_SECONDS):
         return None
     current = datetime.fromtimestamp(time.time() if now is None else now, timezone.utc)
     age = (current - timestamp).total_seconds()
-    return record if 0 <= age <= max_age else None
+    # Remote panel clocks may run slightly ahead of the central server.
+    return record if -IP_RECORD_MAX_FUTURE_SKEW_SECONDS <= age <= max_age else None
+
+
+def source_ip_from_address(value):
+    """Extract an IP from Xray FromAddress such as 1.2.3.4:5, [::1]:5 or tcp:1.2.3.4:5."""
+    text = str(value or "").strip()
+    if text.startswith(("tcp:", "udp:")):
+        text = text[4:]
+    candidates = [text]
+    if text.startswith("[") and "]" in text:
+        candidates.insert(0, text[1:text.index("]")])
+    elif text.count(":") == 1:
+        candidates.insert(0, text.rsplit(":", 1)[0])
+    elif text.count(":") > 1:
+        candidates.append(text.rsplit(":", 1)[0])
+    for candidate in candidates:
+        try:
+            return ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+    return None
 
 
 def mmdb_record(path, address):
@@ -1684,6 +1749,7 @@ class PanelWorker:
         self.panel = panel
         self.client_groups = {}
         self.client_inbounds = {}
+        self.access_cache = {}
         self.lock = threading.Lock()
         self.metrics = [metric("xui_exporter_up", 0, server=panel["name"])]
         self.log_status = {"enabled": int(panel.get("logs", False)), "up": 0,
@@ -1720,6 +1786,7 @@ class PanelWorker:
                 token = read_token(panel["token_file"])
             entries = request_json(endpoint(panel["url"], f'/server/xraylogs/{panel.get("log_count", 1000)}'),
                                    "POST", token=token, form={"showDirect": "true", "showBlocked": "true", "showProxy": "true"})
+            self.record_access_entries(entries)
             stats = forwarder.forward(entries, client_groups=current_groups)
             with self.lock:
                 self.log_status.update(stats, up=1, last_success_timestamp_seconds=time.time())
@@ -1760,7 +1827,61 @@ class PanelWorker:
         with self.lock:
             return list(self.client_inbounds.get(email, []))
 
+    def record_access_entries(self, entries):
+        """Remember each client's newest real source IP and inbound from access logs."""
+        if not isinstance(entries, list):
+            return
+        updates = {}
+        for entry in entries:
+            try:
+                email = entry.get("Email") or ""
+                if not email:
+                    continue
+                inbound = entry.get("Inbound") or ""
+                if inbound == "api":
+                    continue
+                seconds = timestamp_ns(entry.get("DateTime", "")) / 1e9
+                address = source_ip_from_address(entry.get("FromAddress"))
+            except (ValueError, TypeError, AttributeError):
+                continue
+            # Loopback, private and unspecified sources (e.g. a local fallback or
+            # reverse proxy) say nothing about the real client.
+            usable = (address is not None and not (
+                address.is_loopback or address.is_unspecified or address.is_link_local
+                or address.is_multicast or any(address in net for net in LOCAL_SOURCE_NETWORKS
+                                               if net.version == address.version)))
+            current = updates.setdefault(email, {})
+            if inbound and seconds >= current.get("inbound_at", float("-inf")):
+                current.update(inbound=inbound, inbound_at=seconds)
+            if usable and seconds >= current.get("ip_at", float("-inf")):
+                current.update(ip=str(address), ip_at=seconds)
+        with self.lock:
+            for email, new in updates.items():
+                old = self.access_cache.setdefault(email, {})
+                if "ip" in new and new["ip_at"] >= old.get("ip_at", float("-inf")):
+                    old.update(ip=new["ip"], ip_at=new["ip_at"])
+                if "inbound" in new and new["inbound_at"] >= old.get("inbound_at", float("-inf")):
+                    old.update(inbound=new["inbound"], inbound_at=new["inbound_at"])
+            cutoff = time.time() - IP_RECORD_MAX_AGE_SECONDS
+            for email in [e for e, v in self.access_cache.items()
+                          if max(v.get("ip_at", 0), v.get("inbound_at", 0)) < cutoff]:
+                del self.access_cache[email]
+
+    def last_inbound_for_client(self, email):
+        with self.lock:
+            cached = self.access_cache.get(email, {})
+            if cached.get("inbound") and time.time() - cached.get("inbound_at", 0) <= IP_RECORD_MAX_AGE_SECONDS:
+                return cached["inbound"]
+        return None
+
     def last_ip_for_client(self, email):
+        with self.lock:
+            cached = dict(self.access_cache.get(email, {}))
+        if cached.get("ip"):
+            record = recent_ip_record({"ip": cached["ip"],
+                                       "time": format_ip_record_time(str(int(cached["ip_at"])))})
+            if record:
+                return record
         if not self.panel.get("url") or not self.panel.get("token_file"):
             return None
         try:

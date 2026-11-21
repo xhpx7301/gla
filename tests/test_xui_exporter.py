@@ -1620,5 +1620,99 @@ class ExporterTest(unittest.TestCase):
                 forwarder.close()
 
 
+    def test_latest_ip_record_picks_newest_regardless_of_order(self):
+        record = EXPORTER.latest_ip_record([
+            {"ip": "203.0.113.1", "time": "2026-10-01 10:00:00"},
+            {"ip": "203.0.113.2", "time": "2026-11-21 10:00:00"},
+            {"ip": "203.0.113.3", "time": "2026-11-05 10:00:00"}])
+        self.assertEqual(record["ip"], "203.0.113.2")
+
+    def test_recent_ip_record_tolerates_small_clock_skew(self):
+        current = EXPORTER.datetime(2026, 11, 19, 12, 0, tzinfo=EXPORTER.timezone.utc).timestamp()
+        ahead = {"ip": "203.0.113.1", "time": "2026-11-19 20:00:02（UTC+8）"}
+        far_ahead = {"ip": "203.0.113.1", "time": "2026-11-19 21:00:00（UTC+8）"}
+        self.assertEqual(EXPORTER.recent_ip_record(ahead, now=current), ahead)
+        self.assertIsNone(EXPORTER.recent_ip_record(far_ahead, now=current))
+
+    def test_source_ip_from_address_variants(self):
+        parse = EXPORTER.source_ip_from_address
+        self.assertEqual(str(parse("1.2.3.4:5678")), "1.2.3.4")
+        self.assertEqual(str(parse("tcp:1.2.3.4:5678")), "1.2.3.4")
+        self.assertEqual(str(parse("[2001:db8::1]:443")), "2001:db8::1")
+        self.assertEqual(str(parse("1.2.3.4")), "1.2.3.4")
+        self.assertIsNone(parse("example.com:443"))
+
+    def test_access_log_provides_latest_ip_and_inbound_before_panel_ip_log(self):
+        worker = EXPORTER.PanelWorker({"name": "node-a", "url": "https://panel.example.com/panel/api/inbounds/list",
+                                       "token_file": "/run/secrets/xui-node-a.token"})
+        now = EXPORTER.datetime.now(EXPORTER.timezone.utc)
+        def entry(offset, source, inbound="in-1", email="alice"):
+            moment = (now - EXPORTER.timedelta(seconds=offset)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            return {"DateTime": moment, "FromAddress": source, "ToAddress": "tcp:example.com:443",
+                    "Inbound": inbound, "Outbound": "direct", "Email": email}
+        worker.record_access_entries([
+            entry(300, "198.51.100.7:1111", "old-in"),
+            entry(60, "203.0.113.9:2222", "new-in"),
+            entry(10, "127.0.0.1:3333", "new-in"),      # loopback must not replace the real IP
+            entry(5, "203.0.113.50:1", email="")])      # no client attribution
+        with mock.patch.object(EXPORTER, "request_json") as request:
+            record = worker.last_ip_for_client("alice")
+            request.assert_not_called()
+        self.assertEqual(record["ip"], "203.0.113.9")
+        self.assertEqual(worker.last_inbound_for_client("alice"), "new-in")
+        self.assertIsNone(worker.last_inbound_for_client("bob"))
+
+    def test_worker_falls_back_to_panel_ip_log_without_access_records(self):
+        worker = EXPORTER.PanelWorker({"name": "node-a", "url": "https://panel.example.com/panel/api/inbounds/list",
+                                       "token_file": "/run/secrets/xui-node-a.token"})
+        recent = EXPORTER.datetime.now(EXPORTER.timezone.utc).isoformat()
+        worker.record_access_entries([{"DateTime": "2026-10-01T00:00:00Z", "FromAddress": "198.51.100.7:1",
+                                       "Inbound": "in-1", "Email": "alice"}])  # stale: ignored
+        with mock.patch.object(EXPORTER, "read_token", return_value="secret"), \
+                mock.patch.object(EXPORTER, "request_json", return_value=[
+                    {"ip": "198.51.100.4", "time": recent}]) as request:
+            self.assertEqual(worker.last_ip_for_client("alice")["ip"], "198.51.100.4")
+            request.assert_called_once()
+
+    def test_fast_online_confirmation_requires_traffic_growth(self):
+        def run(growth):
+            panel = EXPORTER.PanelWorker({"name": "node-a"})
+            sent = []
+            with tempfile.TemporaryDirectory() as directory, \
+                    mock.patch.object(EXPORTER, "telegram_request") as request, \
+                    mock.patch.object(EXPORTER.TelegramBot, "report_time", return_value="t"):
+                bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, [panel], directory)
+                try:
+                    with bot.db:
+                        bot.db.execute("INSERT INTO subscriptions VALUES (420,'shared')")
+                    def sample(index, online, traffic):
+                        clients = [{"email": "alice", "group": "shared", "traffic": {"up": traffic, "down": 0}}]
+                        with mock.patch.object(EXPORTER.time, "time", return_value=1000 + index * 30):
+                            panel.metrics = EXPORTER.render_metrics(
+                                "node-a", [], ["alice"] if online else [], clients)
+                        bot.process_online()
+                    sample(0, False, 0)   # baseline
+                    sample(1, False, 0)
+                    for index in range(2, 5):
+                        sample(index, True, (index - 1) * growth)
+                    return request.call_count
+                finally:
+                    bot.db.close()
+        self.assertEqual(run(200 * 1024), 1)   # 3 samples + enough traffic: notified early
+        self.assertEqual(run(1024), 0)         # probe-sized traffic keeps waiting
+
+    def test_online_notification_shows_recent_inbound_from_access_log(self):
+        worker = EXPORTER.PanelWorker({"name": "node-a"})
+        item = {"server": "node-a", "email": "alice", "group": "shared", "online": 1}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request"), \
+                mock.patch.object(worker, "last_ip_for_client", return_value=None), \
+                mock.patch.object(worker, "last_inbound_for_client", return_value="in-30303"):
+            bot = EXPORTER.TelegramBot({"token": "bot-token"}, [worker], directory)
+            try:
+                self.assertIn("🎯 最近命中入站：in-30303\n", bot.online_notification_text(item))
+            finally:
+                bot.db.close()
+
+
 if __name__ == "__main__":
     unittest.main()
