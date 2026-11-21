@@ -6,114 +6,288 @@
   <title>GLA 配置控制台</title>
   <style>
     :root {
-      --bg: #0f172a;
-      --card: #1e293b;
-      --border: #334155;
-      --text: #e2e8f0;
+      --bg: #090e1a;
+      --bg-glow: radial-gradient(circle at 18% 0%, rgba(56, 189, 248, 0.10), transparent 45%),
+                 radial-gradient(circle at 85% 10%, rgba(99, 102, 241, 0.08), transparent 40%);
+      --surface: #111827;
+      --surface-2: #162033;
+      --input-bg: #0b1220;
+      --border: rgba(148, 163, 184, 0.16);
+      --border-strong: rgba(148, 163, 184, 0.28);
+      --text: #f1f5f9;
+      --text-soft: #cbd5e1;
       --muted: #94a3b8;
       --accent: #38bdf8;
-      --accent-hover: #0ea5e9;
-      --danger: #ef4444;
+      --accent-2: #0ea5e9;
+      --accent-soft: rgba(56, 189, 248, 0.14);
       --ok: #22c55e;
-      --warn: #f59e0b;
+      --ok-soft: rgba(34, 197, 94, 0.15);
+      --err: #f87171;
+      --err-soft: rgba(248, 113, 113, 0.15);
+      --warn: #fbbf24;
+      --warn-soft: rgba(251, 191, 36, 0.12);
+      --radius: 12px;
+      --shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
     }
     * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
     body {
       margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
       background: var(--bg);
+      background-image: var(--bg-glow);
+      background-attachment: fixed;
       color: var(--text);
-      line-height: 1.5;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
     }
-    .container { max-width: 1100px; margin: 0 auto; padding: 20px; }
-    header {
-      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
-      gap: 12px; padding-bottom: 16px; border-bottom: 1px solid var(--border); margin-bottom: 20px;
-    }
-    h1 { font-size: 20px; margin: 0; }
-    h2 { font-size: 16px; margin: 0 0 12px; }
-    h3 { font-size: 14px; margin: 16px 0 8px; color: var(--muted); }
-    .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
-    .tab {
-      background: var(--card); color: var(--muted); border: 1px solid var(--border);
-      padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 14px;
-    }
-    .tab.active { background: var(--accent); color: #0f172a; border-color: var(--accent); font-weight: 600; }
-    .card {
-      background: var(--card); border: 1px solid var(--border); border-radius: 10px;
-      padding: 16px; margin-bottom: 16px;
-    }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
-    label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
-    input, select, textarea {
-      width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border);
-      background: #0f172a; color: var(--text); font-size: 14px;
-    }
-    input[type="checkbox"] { width: auto; margin-right: 6px; }
-    .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
-    button {
-      background: var(--accent); color: #0f172a; border: none; border-radius: 6px;
-      padding: 8px 14px; font-size: 13px; font-weight: 600; cursor: pointer;
-    }
-    button:hover { background: var(--accent-hover); }
-    button.secondary { background: #334155; color: var(--text); }
-    button.secondary:hover { background: #475569; }
-    button.danger { background: var(--danger); color: #fff; }
-    button.sm { padding: 4px 10px; font-size: 12px; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
-    th { color: var(--muted); font-weight: 600; }
-    .badge {
-      display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600;
-    }
-    .badge.ok { background: rgba(34, 197, 94, 0.18); color: var(--ok); }
-    .badge.err { background: rgba(239, 68, 68, 0.18); color: var(--danger); }
-    .badge.muted { background: rgba(148, 163, 184, 0.18); color: var(--muted); }
-    .toast {
-      position: fixed; right: 20px; bottom: 20px; padding: 10px 16px; border-radius: 8px;
-      background: #0f172a; border: 1px solid var(--border); color: var(--text); z-index: 100;
-      box-shadow: 0 10px 25px rgba(0,0,0,0.4); display: none; max-width: 420px;
-    }
-    .toast.show { display: block; }
-    .toast.err { border-color: var(--danger); color: #fecaca; }
-    .toast.ok { border-color: var(--ok); color: #bbf7d0; }
+    .container { max-width: 1160px; margin: 0 auto; padding: 24px 20px 48px; }
     .hidden { display: none !important; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; word-break: break-all; }
-    .login-box { max-width: 380px; margin: 80px auto; }
-    .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
-    .checkbox-list { display: flex; flex-wrap: wrap; gap: 10px; margin: 6px 0; }
-    .checkbox-item { display: inline-flex; align-items: center; background: #0f172a; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border); font-size: 13px; }
+
+    /* Header */
+    .topbar {
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px;
+      padding: 16px 20px; margin-bottom: 20px;
+      background: rgba(17, 24, 39, 0.85);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-icon {
+      width: 38px; height: 38px; border-radius: 10px;
+      display: grid; place-items: center;
+      background: linear-gradient(135deg, rgba(56,189,248,0.22), rgba(99,102,241,0.22));
+      border: 1px solid rgba(56,189,248,0.35);
+      color: var(--accent);
+      flex-shrink: 0;
+    }
+    .brand h1 { font-size: 18px; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+    .subtitle { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+
+    /* KPI Strip */
+    .kpi-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 12px; margin-bottom: 20px;
+    }
+    .kpi-card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 14px 16px; display: flex; flex-direction: column; gap: 4px;
+    }
+    .kpi-label { font-size: 12px; color: var(--muted); font-weight: 500; }
+    .kpi-value { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; display: flex; align-items: center; gap: 8px; }
+    .kpi-sub { font-size: 12px; color: var(--muted); }
+
+    /* Alert Banner */
+    .alert-warn {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+      padding: 12px 16px; margin-bottom: 18px;
+      background: var(--warn-soft); border: 1px solid rgba(251, 191, 36, 0.35);
+      border-radius: var(--radius); color: #fde68a; font-size: 13.5px;
+    }
+
+    /* Tabs */
+    .tabs {
+      display: inline-flex; flex-wrap: wrap; gap: 6px; padding: 5px; margin-bottom: 20px;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    }
+    .tab {
+      background: transparent; color: var(--muted); border: 1px solid transparent;
+      padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 13.5px; font-weight: 500;
+      transition: all 0.16s ease;
+    }
+    .tab:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+    .tab.active {
+      background: var(--accent-soft); color: var(--accent);
+      border-color: rgba(56, 189, 248, 0.3); font-weight: 600;
+    }
+
+    /* Cards */
+    .card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 20px; margin-bottom: 16px; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+    }
+    .card-header {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+    }
+    h2 { font-size: 15.5px; font-weight: 600; margin: 0; }
+    h3 { font-size: 13.5px; font-weight: 600; margin: 18px 0 10px; color: var(--text-soft); }
+
+    /* Forms */
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+    label { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 6px; font-weight: 500; }
+    input, select, textarea {
+      width: 100%; padding: 9px 12px; border-radius: 8px;
+      border: 1px solid var(--border); background: var(--input-bg); color: var(--text);
+      font-size: 13.5px; transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: none; border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.16);
+    }
+    input[type="checkbox"] { width: auto; accent-color: var(--accent); margin-right: 8px; cursor: pointer; }
+    .check-label {
+      display: inline-flex; align-items: center; margin: 0;
+      color: var(--text-soft); font-size: 13.5px; cursor: pointer;
+    }
+    .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+
+    /* Buttons */
+    button {
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #082f49; border: none; border-radius: 8px;
+      padding: 9px 16px; font-size: 13.5px; font-weight: 600; cursor: pointer;
+      transition: transform 0.1s, opacity 0.15s, background 0.15s;
+    }
+    button:hover:not(:disabled) { opacity: 0.92; }
+    button:active:not(:disabled) { transform: translateY(1px); }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    button.secondary {
+      background: var(--surface-2); color: var(--text-soft);
+      border: 1px solid var(--border);
+    }
+    button.secondary:hover:not(:disabled) { background: #1e293b; border-color: var(--border-strong); }
+    button.danger {
+      background: var(--err-soft); color: var(--err);
+      border: 1px solid rgba(248, 113, 113, 0.3);
+    }
+    button.danger:hover:not(:disabled) { background: rgba(248, 113, 113, 0.25); }
+    button.sm { padding: 5px 11px; font-size: 12px; border-radius: 6px; }
+
+    /* Tables */
+    .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    th {
+      background: rgba(15, 23, 42, 0.65); color: var(--muted);
+      font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
+    .url-cell { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* Badges */
+    .badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap;
+    }
+    .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .badge.ok { background: var(--ok-soft); color: var(--ok); }
+    .badge.err { background: var(--err-soft); color: var(--err); }
+    .badge.muted { background: rgba(148, 163, 184, 0.14); color: var(--muted); }
+
+    /* Misc */
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; word-break: break-all; }
+    .hint { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+    .hint code { background: rgba(148, 163, 184, 0.14); padding: 1px 6px; border-radius: 4px; color: var(--text-soft); }
+    .checkbox-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 12px; }
+    .checkbox-item {
+      display: inline-flex; align-items: center; background: var(--input-bg);
+      padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border);
+      font-size: 13px; color: var(--text-soft); cursor: pointer;
+    }
+    .checkbox-item:hover { border-color: var(--border-strong); }
+    .cmd-box {
+      margin-top: 14px; padding: 14px; border-radius: 10px;
+      background: var(--input-bg); border: 1px solid var(--border-strong);
+    }
+
+    /* Login */
+    .login-wrap { min-height: calc(100vh - 96px); display: grid; place-items: center; }
+    .login-box { width: 100%; max-width: 400px; padding: 28px; }
+    .login-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+
+    /* Toast */
+    .toast {
+      position: fixed; right: 20px; bottom: 20px; padding: 11px 16px; border-radius: 10px;
+      background: var(--surface-2); border: 1px solid var(--border-strong); color: var(--text);
+      z-index: 100; box-shadow: var(--shadow); font-size: 13.5px; max-width: 420px;
+      opacity: 0; transform: translateY(10px); pointer-events: none;
+      transition: opacity 0.18s ease, transform 0.18s ease;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); pointer-events: auto; }
+    .toast.err { border-color: rgba(248, 113, 113, 0.5); color: #fecaca; }
+    .toast.ok { border-color: rgba(34, 197, 94, 0.5); color: #bbf7d0; }
+
+    @media (max-width: 640px) {
+      .container { padding: 14px 12px 36px; }
+      .topbar { padding: 14px; }
+      .card { padding: 16px; }
+      .tabs { width: 100%; }
+      .tab { flex: 1 1 auto; text-align: center; padding: 8px 10px; }
+    }
   </style>
 </head>
 <body>
   <div class="container">
-    <div id="login-view" class="card login-box hidden">
-      <h1>GLA 配置控制台</h1>
-      <p class="hint">请输入管理员账户与密码（可在中心服务器 <code>gla -> 12</code> 查看或修改）。</p>
-      <form id="login-form">
-        <label for="login-username">管理账户</label>
-        <input id="login-username" type="text" autocomplete="username" required>
-        <label for="login-password" style="margin-top:10px;">管理员密码</label>
-        <input id="login-password" type="password" autocomplete="current-password" required>
-        <div style="margin-top:12px;">
-          <button type="submit" style="width:100%;">登录</button>
+    <div id="login-view" class="login-wrap hidden">
+      <div class="card login-box">
+        <div class="login-head">
+          <div class="brand-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+          </div>
+          <div>
+            <h1 style="font-size:18px;margin:0;">GLA 配置控制台</h1>
+            <div class="subtitle">中心观测与告警管理</div>
+          </div>
         </div>
-      </form>
+        <p class="hint" style="margin-bottom:18px;">请输入管理员账户与密码（可在中心服务器 <code>gla -> 12</code> 查看或修改）。</p>
+        <form id="login-form">
+          <label for="login-username">管理账户</label>
+          <input id="login-username" type="text" autocomplete="username" placeholder="请输入管理账户" required>
+          <label for="login-password" style="margin-top:12px;">管理员密码</label>
+          <input id="login-password" type="password" autocomplete="current-password" placeholder="请输入密码" required>
+          <div style="margin-top:18px;">
+            <button type="submit" style="width:100%;">登录控制台</button>
+          </div>
+        </form>
+      </div>
     </div>
 
     <div id="app-view" class="hidden">
-      <header>
-        <div>
-          <h1>GLA 配置控制台</h1>
-          <div class="hint" id="server-summary">加载中...</div>
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+          </div>
+          <div>
+            <h1>GLA 配置控制台</h1>
+            <div class="subtitle" id="server-summary">加载中...</div>
+          </div>
         </div>
         <div class="row">
           <button class="secondary" id="refresh-btn">刷新状态</button>
           <button class="secondary" id="logout-btn">退出登录</button>
         </div>
       </header>
-      <div id="default-pwd-warn" class="card hidden" style="border-color:var(--warn);color:#fde68a;">
-        ⚠️ 当前仍在使用初始默认密码，请尽快在「安全设置」中修改账户密码。
+
+      <div id="default-pwd-warn" class="alert-warn hidden">
+        <span>⚠️ 当前仍在使用初始默认密码，请尽快前往「安全设置」修改账户密码。</span>
+      </div>
+
+      <div class="kpi-grid">
+        <div class="kpi-card">
+          <span class="kpi-label">3x-ui 面板健康</span>
+          <div class="kpi-value" id="kpi-panels">-</div>
+          <span class="kpi-sub" id="kpi-panels-sub">等待加载</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">SSH 受监控节点</span>
+          <div class="kpi-value" id="kpi-ssh">-</div>
+          <span class="kpi-sub" id="kpi-ssh-sub">等待加载</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">监控 Telegram Bot</span>
+          <div class="kpi-value" id="kpi-tg">-</div>
+          <span class="kpi-sub" id="kpi-tg-sub">等待加载</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">SSH 告警 Bot</span>
+          <div class="kpi-value" id="kpi-ssh-tg">-</div>
+          <span class="kpi-sub" id="kpi-ssh-tg-sub">等待加载</span>
+        </div>
       </div>
 
       <div class="tabs">
@@ -125,8 +299,11 @@
 
       <section id="tab-panels">
         <div class="card">
-          <h2>已配置面板</h2>
-          <div style="overflow-x:auto;">
+          <div class="card-header">
+            <h2>已配置面板</h2>
+            <span class="hint" style="margin:0;">保存或删除后自动热重载，无需重启容器</span>
+          </div>
+          <div class="table-wrap">
             <table>
               <thead><tr><th>名称</th><th>状态</th><th>API 地址</th><th>日志 / 间隔 / 窗口</th><th>操作</th></tr></thead>
               <tbody id="panels-tbody"></tbody>
@@ -134,20 +311,22 @@
           </div>
         </div>
         <div class="card">
-          <h2 id="panel-form-title">添加 3x-ui 面板</h2>
+          <div class="card-header">
+            <h2 id="panel-form-title">添加 3x-ui 面板</h2>
+          </div>
           <form id="panel-form">
             <input type="hidden" id="panel-orig-name">
             <div class="grid">
               <div><label>面板名称</label><input id="panel-name" required placeholder="例如 central-server"></div>
               <div><label>API 地址（以 /panel/api/inbounds/list 结尾）</label><input id="panel-url" required placeholder="https://example.com/path/panel/api/inbounds/list"></div>
-              <div><label>API Token（修改时留空保留原值）</label><input id="panel-token" type="password" autocomplete="new-password"></div>
+              <div><label>API Token（修改时留空保留原值）</label><input id="panel-token" type="password" autocomplete="new-password" placeholder="粘贴 3x-ui API Token"></div>
               <div><label>采集间隔（秒，10-3600）</label><input id="panel-interval" type="number" min="10" max="3600" value="30" required></div>
               <div><label>日志窗口（条，100-10000）</label><input id="panel-log-count" type="number" min="100" max="10000" value="1000" required></div>
-              <div style="display:flex;align-items:flex-end;padding-bottom:6px;">
-                <label style="margin:0;color:var(--text);cursor:pointer;"><input id="panel-logs" type="checkbox" checked> 开启 Xray 访问日志采集</label>
+              <div style="display:flex;align-items:flex-end;padding-bottom:8px;">
+                <label class="check-label"><input id="panel-logs" type="checkbox" checked> 开启 Xray 访问日志采集</label>
               </div>
             </div>
-            <div class="row" style="margin-top:12px;">
+            <div class="row" style="margin-top:16px;">
               <button type="submit">保存面板</button>
               <button type="button" class="secondary hidden" id="panel-cancel-btn">取消编辑</button>
             </div>
@@ -157,7 +336,7 @@
 
       <section id="tab-ssh" class="hidden">
         <div class="card">
-          <h2>HTTPS 接收地址</h2>
+          <div class="card-header"><h2>HTTPS 接收地址</h2></div>
           <form id="ssh-url-form" class="row">
             <div style="flex:1;min-width:260px;">
               <input id="ssh-ingest-url" placeholder="https://ssh.example.com/api/ssh-login" required>
@@ -168,8 +347,8 @@
         </div>
 
         <div class="card">
-          <h2>可信来源 IP 组</h2>
-          <div style="overflow-x:auto;">
+          <div class="card-header"><h2>可信来源 IP 组</h2></div>
+          <div class="table-wrap">
             <table>
               <thead><tr><th>组名</th><th>CIDR 列表</th><th>操作</th></tr></thead>
               <tbody id="ip-groups-tbody"></tbody>
@@ -184,19 +363,19 @@
         </div>
 
         <div class="card">
-          <h2>受监控服务器</h2>
-          <div style="overflow-x:auto;">
+          <div class="card-header"><h2>受监控服务器</h2></div>
+          <div class="table-wrap">
             <table>
               <thead><tr><th>服务器</th><th>可信来源</th><th>操作</th></tr></thead>
               <tbody id="ssh-servers-tbody"></tbody>
             </table>
           </div>
-          <div id="install-cmd-box" class="card hidden" style="margin-top:12px;background:#0f172a;">
+          <div id="install-cmd-box" class="cmd-box hidden">
             <div class="row" style="justify-content:space-between;">
-              <strong>子服务器安装命令</strong>
+              <strong style="font-size:13px;">子服务器安装命令</strong>
               <button type="button" class="sm secondary" id="copy-install-cmd">复制命令</button>
             </div>
-            <pre id="install-cmd-text" class="mono" style="white-space:pre-wrap;margin:8px 0 0;"></pre>
+            <pre id="install-cmd-text" class="mono" style="white-space:pre-wrap;margin:10px 0 0;color:var(--accent);"></pre>
           </div>
           <h3>新增服务器</h3>
           <form id="ssh-server-form">
@@ -204,20 +383,20 @@
               <div><label>服务器名称</label><input id="ssh-server-name" required placeholder="例如 node-hk"></div>
               <div><label>额外 CIDR（可选，逗号分隔）</label><input id="ssh-server-cidrs" placeholder="留空表示所有非可信 IP 均告警"></div>
             </div>
-            <label style="margin-top:10px;">复用可信 IP 组</label>
+            <label style="margin-top:12px;">复用可信 IP 组</label>
             <div id="ssh-server-groups" class="checkbox-list"></div>
-            <button type="submit" style="margin-top:8px;">新增服务器</button>
+            <button type="submit">新增服务器</button>
           </form>
         </div>
 
         <div class="card">
-          <h2>SSH 告警专用 Telegram Bot</h2>
+          <div class="card-header"><h2>SSH 告警专用 Telegram Bot</h2></div>
           <form id="ssh-tg-form">
             <div class="grid">
               <div><label>Bot Token（留空保留原值）</label><input id="ssh-tg-token" type="password" autocomplete="new-password"></div>
               <div><label>允许接收告警的用户 ID（逗号分隔）</label><input id="ssh-tg-users" required placeholder="123456789"></div>
             </div>
-            <div class="row" style="margin-top:12px;">
+            <div class="row" style="margin-top:14px;">
               <button type="submit">保存配置</button>
               <button type="button" class="secondary" id="ssh-tg-test">发送测试消息</button>
             </div>
@@ -227,19 +406,19 @@
 
       <section id="tab-telegram" class="hidden">
         <div class="card">
-          <h2>监控与上线通知 Telegram Bot</h2>
+          <div class="card-header"><h2>监控与上线通知 Telegram Bot</h2></div>
           <form id="tg-form">
             <div class="grid">
               <div><label>Bot Token（留空保留原值）</label><input id="tg-token" type="password" autocomplete="new-password"></div>
               <div><label>授权用户 ID（逗号分隔）</label><input id="tg-users" required placeholder="123456789"></div>
               <div><label>上线通知冷却（秒，0-86400）</label><input id="tg-cooldown" type="number" min="0" max="86400" value="3600" required></div>
               <div><label>兜底连续确认次数（1-60）</label><input id="tg-confirm" type="number" min="1" max="60" value="20" required></div>
-              <div style="display:flex;align-items:flex-end;padding-bottom:6px;">
-                <label style="margin:0;color:var(--text);cursor:pointer;"><input id="tg-cross-panel" type="checkbox"> 跨面板去重冷却（同客户端多面板不重复通知）</label>
+              <div style="display:flex;align-items:flex-end;padding-bottom:8px;">
+                <label class="check-label"><input id="tg-cross-panel" type="checkbox"> 跨面板去重冷却（同客户端多面板不重复通知）</label>
               </div>
             </div>
             <div class="hint">修改后会自动热重启 Bot 线程，保留 SQLite 中的分组订阅与冷却状态。</div>
-            <div class="row" style="margin-top:12px;">
+            <div class="row" style="margin-top:14px;">
               <button type="submit">保存配置</button>
               <button type="button" class="secondary" id="tg-test">发送测试消息</button>
             </div>
@@ -249,10 +428,10 @@
 
       <section id="tab-security" class="hidden">
         <div class="card">
-          <h2>修改管理账户与密码</h2>
+          <div class="card-header"><h2>修改管理账户与密码</h2></div>
           <form id="pwd-form" class="grid">
             <div><label>当前密码</label><input id="pwd-current" type="password" required></div>
-            <div><label>管理账户（留空保留原值）</label><input id="pwd-username" placeholder="gla"></div>
+            <div><label>管理账户（留空保留原值）</label><input id="pwd-username" placeholder="输入新账户名"></div>
             <div><label>新密码（至少 8 位）</label><input id="pwd-new" type="password" minlength="8" required></div>
             <div style="display:flex;align-items:flex-end;"><button type="submit">更新账户与密码</button></div>
           </form>
@@ -312,12 +491,40 @@
       return node;
     }
 
+    async function withSubmitting(btn, fn) {
+      if (!btn) return fn();
+      const orig = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "处理中...";
+      try { return await fn(); }
+      finally { btn.disabled = false; btn.textContent = orig; }
+    }
+
     function renderOverview(data) {
       state = data;
+      const totalPanels = data.panels.length;
+      const upPanels = data.panels.filter(p => p.up).length;
+      const sshCount = Object.keys(data.ssh_login.servers).length;
+      const ipGroupCount = Object.keys(data.ssh_login.ip_groups).length;
+
       document.getElementById("server-summary").textContent =
-        `中心节点：${data.server_name} ｜ 账户：${data.admin?.username || "gla"} ｜ 面板数：${data.panels.length} ｜ SSH 服务器：${Object.keys(data.ssh_login.servers).length}`;
+        `中心节点：${data.server_name}  ·  当前账户：${data.admin?.username || "-"}`;
       document.getElementById("default-pwd-warn").classList.toggle("hidden", !data.admin?.default_password);
-      document.getElementById("pwd-username").value = data.admin?.username || "gla";
+      document.getElementById("pwd-username").value = data.admin?.username || "";
+
+      document.getElementById("kpi-panels").textContent = `${upPanels} / ${totalPanels}`;
+      document.getElementById("kpi-panels-sub").textContent =
+        totalPanels === 0 ? "尚未添加面板" : (upPanels === totalPanels ? "全部采集正常" : `${totalPanels - upPanels} 个面板异常`);
+      document.getElementById("kpi-ssh").textContent = `${sshCount} 台`;
+      document.getElementById("kpi-ssh-sub").textContent = `可信 IP 组：${ipGroupCount} 个`;
+      document.getElementById("kpi-tg").textContent = data.telegram.configured ? "已配置" : "未配置";
+      document.getElementById("kpi-tg-sub").textContent = data.telegram.configured
+        ? `冷却 ${data.telegram.notification_cooldown_seconds}s · 确认 ${data.telegram.online_confirmation_samples} 次`
+        : "前往 Telegram Bot 页配置";
+      document.getElementById("kpi-ssh-tg").textContent = data.ssh_telegram.configured ? "已配置" : "未配置";
+      document.getElementById("kpi-ssh-tg-sub").textContent = data.ssh_telegram.configured
+        ? `接收用户：${(data.ssh_telegram.allowed_user_ids || []).length} 人`
+        : "前往 SSH 登录告警页配置";
 
       const panelsTbody = document.getElementById("panels-tbody");
       panelsTbody.replaceChildren();
@@ -329,9 +536,9 @@
         delBtn.onclick = () => deletePanel(p.name);
         const ops = el("div", { className: "row" }, [editBtn, delBtn]);
         panelsTbody.appendChild(el("tr", {}, [
-          el("td", { text: p.name }),
+          el("td", { style: "font-weight:600;", text: p.name }),
           el("td", {}, [badge]),
-          el("td", { className: "mono", text: p.url }),
+          el("td", { className: "mono url-cell", title: p.url, text: p.url }),
           el("td", { text: `${p.logs ? "开启" : "关闭"} / ${p.interval}s / ${p.log_count}` }),
           el("td", {}, [ops])
         ]));
@@ -354,12 +561,15 @@
         const delBtn = el("button", { className: "sm danger", type: "button", text: "删除" });
         delBtn.onclick = () => deleteIpGroup(gname);
         groupsTbody.appendChild(el("tr", {}, [
-          el("td", { text: gname }),
+          el("td", { style: "font-weight:600;", text: gname }),
           el("td", { className: "mono", text: cidrs.join(", ") }),
           el("td", {}, [el("div", { className: "row" }, [fillBtn, delBtn])])
         ]));
         const cb = el("input", { type: "checkbox", value: gname });
         groupChecks.appendChild(el("label", { className: "checkbox-item" }, [cb, document.createTextNode(gname)]));
+      }
+      if (!Object.keys(data.ssh_login.ip_groups).length) {
+        groupsTbody.appendChild(el("tr", {}, [el("td", { colspan: "3", className: "hint", text: "尚未添加可信来源 IP 组" })]));
       }
 
       const serversTbody = document.getElementById("ssh-servers-tbody");
@@ -373,10 +583,13 @@
         const delBtn = el("button", { className: "sm danger", type: "button", text: "删除" });
         delBtn.onclick = () => deleteSshServer(sname);
         serversTbody.appendChild(el("tr", {}, [
-          el("td", { text: sname }),
+          el("td", { style: "font-weight:600;", text: sname }),
           el("td", { className: "mono", text: parts.join(" ; ") || "无（所有登录均告警）" }),
           el("td", {}, [el("div", { className: "row" }, [cmdBtn, delBtn])])
         ]));
+      }
+      if (!Object.keys(data.ssh_login.servers).length) {
+        serversTbody.appendChild(el("tr", {}, [el("td", { colspan: "3", className: "hint", text: "尚未添加受监控服务器" })]));
       }
 
       document.getElementById("tg-users").value = (data.telegram.allowed_user_ids || []).join(",");
@@ -401,6 +614,7 @@
       document.getElementById("panel-log-count").value = p.log_count;
       document.getElementById("panel-logs").checked = !!p.logs;
       document.getElementById("panel-cancel-btn").classList.remove("hidden");
+      document.getElementById("panel-form").scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
 
     function resetPanelForm() {
@@ -460,19 +674,22 @@
 
     document.getElementById("login-form").onsubmit = async e => {
       e.preventDefault();
-      try {
-        const res = await api("/api/admin/login", {
-          method: "POST",
-          body: JSON.stringify({
-            username: document.getElementById("login-username").value.trim(),
-            password: document.getElementById("login-password").value
-          })
-        });
-        csrfToken = res.csrf_token;
-        document.getElementById("login-password").value = "";
-        showApp();
-        await loadOverview();
-      } catch (err) { toast(err.message, true); }
+      const btn = e.target.querySelector('button[type="submit"]');
+      await withSubmitting(btn, async () => {
+        try {
+          const res = await api("/api/admin/login", {
+            method: "POST",
+            body: JSON.stringify({
+              username: document.getElementById("login-username").value.trim(),
+              password: document.getElementById("login-password").value
+            })
+          });
+          csrfToken = res.csrf_token;
+          document.getElementById("login-password").value = "";
+          showApp();
+          await loadOverview();
+        } catch (err) { toast(err.message, true); }
+      });
     };
 
     document.getElementById("logout-btn").onclick = async () => {
@@ -480,28 +697,37 @@
       csrfToken = "";
       showLogin();
     };
-    document.getElementById("refresh-btn").onclick = () => loadOverview().then(() => toast("状态已刷新")).catch(e => toast(e.message, true));
+    document.getElementById("refresh-btn").onclick = async () => {
+      const btn = document.getElementById("refresh-btn");
+      await withSubmitting(btn, async () => {
+        try { await loadOverview(); toast("状态已刷新"); }
+        catch (e) { toast(e.message, true); }
+      });
+    };
     document.getElementById("panel-cancel-btn").onclick = resetPanelForm;
 
     document.getElementById("panel-form").onsubmit = async e => {
       e.preventDefault();
-      const orig = document.getElementById("panel-orig-name").value;
-      const payload = {
-        operation: orig ? "update" : "add",
-        name: orig || document.getElementById("panel-name").value.trim(),
-        new_name: document.getElementById("panel-name").value.trim(),
-        url: document.getElementById("panel-url").value.trim(),
-        token: document.getElementById("panel-token").value.trim(),
-        interval: Number(document.getElementById("panel-interval").value),
-        log_count: Number(document.getElementById("panel-log-count").value),
-        logs: document.getElementById("panel-logs").checked
-      };
-      try {
-        await api("/api/admin/panels", { method: "POST", body: JSON.stringify(payload) });
-        toast("面板配置已保存并热重载");
-        resetPanelForm();
-        await loadOverview();
-      } catch (err) { toast(err.message, true); }
+      const btn = e.target.querySelector('button[type="submit"]');
+      await withSubmitting(btn, async () => {
+        const orig = document.getElementById("panel-orig-name").value;
+        const payload = {
+          operation: orig ? "update" : "add",
+          name: orig || document.getElementById("panel-name").value.trim(),
+          new_name: document.getElementById("panel-name").value.trim(),
+          url: document.getElementById("panel-url").value.trim(),
+          token: document.getElementById("panel-token").value.trim(),
+          interval: Number(document.getElementById("panel-interval").value),
+          log_count: Number(document.getElementById("panel-log-count").value),
+          logs: document.getElementById("panel-logs").checked
+        };
+        try {
+          await api("/api/admin/panels", { method: "POST", body: JSON.stringify(payload) });
+          toast("面板配置已保存并热重载");
+          resetPanelForm();
+          await loadOverview();
+        } catch (err) { toast(err.message, true); }
+      });
     };
 
     document.getElementById("ssh-url-form").onsubmit = async e => {
