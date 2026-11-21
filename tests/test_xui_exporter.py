@@ -1736,10 +1736,17 @@ class ExporterTest(unittest.TestCase):
                         mock.patch.object(EXPORTER, "TELEGRAM_CONFIG_FILE", str(tg_cfg)), \
                         mock.patch.object(EXPORTER, "SSH_TELEGRAM_CONFIG_FILE", str(ssh_tg_cfg)), \
                         mock.patch.object(EXPORTER, "_ADMIN_LOGIN_FAILURES", {}):
-                    # Enabled by default with gla / gla12345
+                    # Enabled by default with gla / gla12345, and credentials are not leaked in admin.html
                     with urllib.request.urlopen(f"{base}/admin", timeout=3) as resp:
                         self.assertEqual(resp.status, 200)
+                        html_body = resp.read().decode("utf-8")
+                        self.assertNotIn("gla12345", html_body)
                     self.assertTrue(web_cfg.exists())
+                    status_out = io.StringIO()
+                    with mock.patch("sys.stdout", status_out):
+                        EXPORTER.web_admin_cli(["status"])
+                    self.assertIn("账户：gla", status_out.getvalue())
+                    self.assertIn("初始密码：gla12345", status_out.getvalue())
 
                     # Wrong username is rejected even with default password
                     req_bad_user = urllib.request.Request(

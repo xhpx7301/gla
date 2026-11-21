@@ -1566,6 +1566,10 @@ show_access_info() {
     printf 'Grafana 凭据： 未找到\n'
   fi
 
+  printf 'Web 配置台：    '
+  web_admin_command status 2>/dev/null || printf '未就绪\n'
+  printf 'Web 转发入口：  gla-xui-exporter:9105（通过 HTTPS 反代访问 /admin）\n'
+
   printf '\n已配置仪表盘：\n'
   [ -f "$STACK_DIR/grafana/dashboards/xray-access.json" ] && printf '  - Xray 访问日志\n'
   [ -f "$STACK_DIR/grafana/dashboards/xray-gateway.json" ] && printf '  - Xray 网关流量与连接\n'

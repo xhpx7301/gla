@@ -2099,7 +2099,12 @@ def web_admin_cli(argv):
     target = Path(WEB_ADMIN_CONFIG_FILE)
     if args.operation == "status":
         cfg = web_admin_config(target)
-        print(f"已启用 Web 配置台（账户：{cfg['username']}）" if cfg else "已关闭 Web 配置台")
+        if not cfg:
+            print("已关闭 Web 配置台")
+        elif cfg.get("default_password"):
+            print(f"已启用 Web 配置台（账户：{cfg['username']}，初始密码：{DEFAULT_WEB_ADMIN_PASSWORD}，请及时修改）")
+        else:
+            print(f"已启用 Web 配置台（账户：{cfg['username']}，已修改自定义密码）")
         return
     if args.operation == "disable":
         atomic_write(target, json.dumps({"enabled": False}, indent=2) + "\n")

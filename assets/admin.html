@@ -89,10 +89,10 @@
   <div class="container">
     <div id="login-view" class="card login-box hidden">
       <h1>GLA 配置控制台</h1>
-      <p class="hint">默认管理账户：<code>gla</code>，初始密码：<code>gla12345</code>，登录后请及时修改。</p>
+      <p class="hint">请输入管理员账户与密码（可在中心服务器 <code>gla -> 12</code> 查看或修改）。</p>
       <form id="login-form">
         <label for="login-username">管理账户</label>
-        <input id="login-username" type="text" autocomplete="username" value="gla" required>
+        <input id="login-username" type="text" autocomplete="username" required>
         <label for="login-password" style="margin-top:10px;">管理员密码</label>
         <input id="login-password" type="password" autocomplete="current-password" required>
         <div style="margin-top:12px;">
@@ -113,7 +113,7 @@
         </div>
       </header>
       <div id="default-pwd-warn" class="card hidden" style="border-color:var(--warn);color:#fde68a;">
-        ⚠️ 当前仍在使用默认密码 <code>gla12345</code>，请尽快在「安全设置」中修改账户密码。
+        ⚠️ 当前仍在使用初始默认密码，请尽快在「安全设置」中修改账户密码。
       </div>
 
       <div class="tabs">
