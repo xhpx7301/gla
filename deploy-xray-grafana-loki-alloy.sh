@@ -483,7 +483,7 @@ if [ -f "$CREDENTIALS_FILE" ]; then
   done
   [ -n "$GRAFANA_ADMIN_PASSWORD" ] || die "凭据文件无效：$CREDENTIALS_FILE"
 elif [ -z "${GRAFANA_ADMIN_PASSWORD:-}" ]; then
-  GRAFANA_ADMIN_PASSWORD="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \\n')"
+  GRAFANA_ADMIN_PASSWORD="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 fi
 printf 'GRAFANA_ADMIN_PASSWORD=%s\n' "$GRAFANA_ADMIN_PASSWORD" >"$CREDENTIALS_FILE"
 chmod 0600 "$CREDENTIALS_FILE"
@@ -494,6 +494,11 @@ services:
     image: grafana/grafana:latest
     container_name: xray-grafana
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "${GRAFANA_BIND}:${GRAFANA_PORT}:3000"
     environment:
@@ -513,6 +518,11 @@ services:
     image: grafana/loki:latest
     container_name: xray-loki
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: -config.file=/etc/loki/config.yaml
     networks:
       - default
@@ -525,6 +535,11 @@ services:
     image: victoriametrics/victoria-metrics:latest
     container_name: gla-victoriametrics
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     command:
       - -storageDataPath=/victoria-metrics-data
       - -retentionPeriod=${METRICS_RETENTION}
@@ -538,6 +553,11 @@ services:
     image: grafana/alloy:latest
     container_name: xray-alloy
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     user: "0:0"
     command: run --server.http.listen-addr=0.0.0.0:12345 --storage.path=/var/lib/alloy/data /etc/alloy/config.alloy
     volumes:
@@ -563,6 +583,11 @@ ${SECURITY_TRAFFIC_VOLUME_LINE}
     image: gla-xui-exporter:local
     container_name: gla-xui-exporter
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["python3", "/app/xui_exporter.py"]
     environment:
       SERVER_NAME: "${SERVER_NAME}"
@@ -1137,7 +1162,7 @@ show_status() {
 
   local image volume mountpoint
   printf '\n项目镜像占用：\n'
-  for image in grafana/grafana:latest grafana/loki:latest grafana/alloy:latest victoriametrics/victoria-metrics:latest python:3.12-alpine; do
+  for image in grafana/grafana:latest grafana/loki:latest grafana/alloy:latest victoriametrics/victoria-metrics:latest python:3.12-alpine gla-xui-exporter:local; do
     docker image ls "$image"
   done
 
@@ -1439,8 +1464,18 @@ backup_data() (
       done <<< "$volumes"
       printf '正在停止服务并恢复数据...\n'
       compose stop
-      rm -rf "$STACK_DIR"
-      cp -a "$workdir/backup/stack" "$STACK_DIR"
+      old_stack="${STACK_DIR}.pre-restore.$$"
+      rm -rf "$old_stack"
+      if [ -e "$STACK_DIR" ]; then
+        mv "$STACK_DIR" "$old_stack"
+      fi
+      if ! cp -a "$workdir/backup/stack" "$STACK_DIR"; then
+        rm -rf "$STACK_DIR"
+        [ ! -e "$old_stack" ] || mv "$old_stack" "$STACK_DIR"
+        printf '恢复配置目录失败，已回滚原配置。\n' >&2
+        return 1
+      fi
+      rm -rf "$old_stack"
       while IFS= read -r volume; do
         [ -n "$volume" ] || continue
         mountpoint="$(docker volume inspect -f '{{.Mountpoint}}' "$volume")"
@@ -2065,8 +2100,9 @@ configure_api_panels() {
 }
 
 update_stack() {
-  printf '正在拉取 Grafana、Loki、VictoriaMetrics 和 Alloy 的最新镜像，服务可能短暂重建。\n'
-  compose pull
+  printf '正在拉取 Grafana、Loki、VictoriaMetrics 和 Alloy 的最新镜像，并重建 3x-ui API 采集镜像，服务可能短暂重建。\n'
+  compose pull grafana loki victoriametrics alloy
+  compose build --pull xui-exporter
   compose up -d
   printf '服务组件更新完成。\n'
 }
@@ -2076,13 +2112,25 @@ uninstall_everything() {
     printf '已取消。\n'
     return
   fi
+  if [ -r "$STACK_DIR/security-traffic.env" ] && [ -x "$STACK_DIR/assets/security_traffic_collector.sh" ]; then
+    (
+      set -a
+      # shellcheck disable=SC1090
+      . "$STACK_DIR/security-traffic.env"
+      set +a
+      "$STACK_DIR/assets/security_traffic_collector.sh" --cleanup
+    ) || true
+  fi
+  systemctl disable --now gla-security-traffic.timer 2>/dev/null || true
+  systemctl stop gla-security-traffic.service 2>/dev/null || true
+  rm -f /etc/systemd/system/gla-security-traffic.timer /etc/systemd/system/gla-security-traffic.service
   systemctl disable --now gla-backup.timer 2>/dev/null || true
   systemctl stop gla-backup.service 2>/dev/null || true
   rm -f /etc/systemd/system/gla-backup.timer /etc/systemd/system/gla-backup.service
   systemctl daemon-reload || true
   [ -f "$COMPOSE_FILE" ] && compose down -v || true
   docker volume ls -q --filter label=com.docker.compose.project=xray-log-dashboard | xargs -r docker volume rm
-  docker image rm grafana/grafana:latest grafana/loki:latest grafana/alloy:latest victoriametrics/victoria-metrics:latest python:3.12-alpine 2>/dev/null || true
+  docker image rm grafana/grafana:latest grafana/loki:latest grafana/alloy:latest victoriametrics/victoria-metrics:latest python:3.12-alpine gla-xui-exporter:local 2>/dev/null || true
   rm -rf "$STACK_DIR"
   rm -f "$0"
   printf 'GLA 已完整卸载。NPM 和外部 Docker 网络未被修改。\n'

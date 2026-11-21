@@ -267,6 +267,26 @@ download_installer() { printf 'printf "ipv6=%%s subnet=%%s\\n" "$XUI_ENABLE_IPV6
                     self.assertIn(f"ipv6={expected}", result.stdout)
                     self.assertIn("subnet=fd12:3456:789a:0::/64", result.stdout)
 
+    def test_generated_compose_configures_log_rotation_and_safe_image_updates(self):
+        with tempfile.TemporaryDirectory() as center_dir, tempfile.TemporaryDirectory() as collector_dir:
+            center_compose, _, _ = self.render(
+                "deploy-xray-grafana-loki-alloy.sh", "install_stack",
+                'note "正在创建部署文件：$STACK_DIR"',
+                'note "正在启动 Grafana、Loki、VictoriaMetrics 和 Alloy"',
+                center_dir, center=True)
+            collector_compose, _, _ = self.render(
+                "deploy-xray-alloy-collector.sh", "install_collector",
+                'note "正在创建采集器文件：$STACK_DIR"',
+                'note "正在启动 Alloy 采集器"',
+                collector_dir, center=False)
+            self.assertEqual(center_compose.count("driver: json-file"), 5)
+            self.assertEqual(center_compose.count('max-size: "10m"'), 5)
+            self.assertEqual(collector_compose.count("driver: json-file"), 1)
+            self.assertEqual(collector_compose.count('max-size: "10m"'), 1)
+        central_script = (ROOT / "deploy-xray-grafana-loki-alloy.sh").read_text(encoding="utf-8")
+        self.assertIn("compose pull grafana loki victoriametrics alloy", central_script)
+        self.assertIn("compose build --pull xui-exporter", central_script)
+
 
 if __name__ == "__main__":
     unittest.main()

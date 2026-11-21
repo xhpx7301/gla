@@ -309,6 +309,11 @@ services:
     image: $ALLOY_IMAGE
     container_name: xray-alloy
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     user: "0:0"
     command: run --storage.path=/var/lib/alloy/data /etc/alloy/config.alloy
     volumes:
@@ -1182,11 +1187,30 @@ update_collector() {
   printf '采集器更新完成。\n'
 }
 
+cleanup_security_traffic_collector() {
+  if [ -r "$STACK_DIR/security-traffic.env" ] && [ -x "$STACK_DIR/assets/security_traffic_collector.sh" ]; then
+    (
+      set -a
+      # shellcheck disable=SC1090
+      . "$STACK_DIR/security-traffic.env"
+      set +a
+      "$STACK_DIR/assets/security_traffic_collector.sh" --cleanup
+    ) || true
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now gla-security-traffic.timer 2>/dev/null || true
+    systemctl stop gla-security-traffic.service 2>/dev/null || true
+    rm -f /etc/systemd/system/gla-security-traffic.timer /etc/systemd/system/gla-security-traffic.service
+    systemctl daemon-reload 2>/dev/null || true
+  fi
+}
+
 uninstall_keep_data() {
   if ! confirm "停止采集器并删除配置，同时保留 Docker 数据卷？"; then
     printf '已取消。\n'
     return
   fi
+  cleanup_security_traffic_collector
   [ -f "$COMPOSE_FILE" ] && compose down
   rm -rf "$STACK_DIR"
   printf '已删除采集器容器和配置，Alloy 数据卷已保留。\n'
@@ -1197,6 +1221,7 @@ uninstall_everything() {
     printf '已取消。\n'
     return
   fi
+  cleanup_security_traffic_collector
   [ -f "$COMPOSE_FILE" ] && compose down -v || true
   docker volume ls -q --filter label=com.docker.compose.project=xray-alloy-collector | xargs -r docker volume rm
   docker image rm grafana/alloy:latest python:3.12-alpine 2>/dev/null || true

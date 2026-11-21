@@ -70,7 +70,16 @@ class DashboardTableTest(unittest.TestCase):
         )
 
     def test_ssh_login_dashboard_queries_all_server_events_without_ip_labels(self):
-        dashboard = load_dashboard("ssh-login.json")
+        raw = (ROOT / "dashboards" / "ssh-login.json").read_text(encoding="utf-8")
+
+        def reject_duplicate_keys(pairs):
+            result = {}
+            for key, value in pairs:
+                self.assertNotIn(key, result, f"duplicate JSON key: {key}")
+                result[key] = value
+            return result
+
+        dashboard = json.loads(raw, object_pairs_hook=reject_duplicate_keys)
         self.assertEqual(dashboard["uid"], "ssh-login")
         self.assertIn("label_values({job=\"ssh-login\"}, server)", dashboard["templating"]["list"][0]["query"])
         expression = dashboard["panels"][2]["targets"][0]["expr"]

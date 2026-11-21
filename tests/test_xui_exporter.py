@@ -1504,6 +1504,121 @@ class ExporterTest(unittest.TestCase):
             finally:
                 bot.db.close()
 
+    def test_ssh_login_agent_never_passes_secret_key_on_command_line(self):
+        agent = (pathlib.Path(__file__).parents[1] / "install-ssh-login-agent.sh").read_text(encoding="utf-8")
+        self.assertNotIn('-H "X-GLA-Key:', agent)
+        self.assertIn("--config -", agent)
+        self.assertIn('header = "X-GLA-Key:', agent)
+        self.assertIn('/usr/local/sbin/gla-ssh-login --send', agent)
+
+    def test_ssh_login_notification_prevents_concurrent_duplicate_sends(self):
+        record = {"server": "node-a", "user": "root", "source_ip": "203.0.113.9",
+                  "location": "广东深圳", "network": "中国电信", "ssh_port": "22",
+                  "auth_method": "密钥认证"}
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_send(*_args, **_kwargs):
+            entered.set()
+            release.wait(timeout=5)
+            return {}
+
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(EXPORTER, "STATE_DIR", directory), \
+                mock.patch.object(EXPORTER, "telegram_config", return_value={
+                    "token": "bot-token", "allowed_user_ids": [42, 43], "allowed_chat_ids": [],
+                    "notify_cooldown_seconds": 600}), \
+                mock.patch.object(EXPORTER, "telegram_request", side_effect=slow_send) as send:
+            first = threading.Thread(target=EXPORTER.notify_ssh_login, args=(record,))
+            second = threading.Thread(target=EXPORTER.notify_ssh_login, args=(record,))
+            first.start()
+            self.assertTrue(entered.wait(timeout=5))
+            second.start()
+            second.join(timeout=5)
+            release.set()
+            first.join(timeout=5)
+            # Only the first login sends (to 2 chats); the concurrent duplicate is suppressed.
+            self.assertEqual(send.call_count, 2)
+
+    def test_telegram_time_prompt_allows_menu_and_slash_commands_to_escape(self):
+        worker = EXPORTER.PanelWorker({"name": "node-a"})
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, [worker], directory)
+            try:
+                bot.handle_callback({"id": "time", "from": {"id": 42}, "message": {"chat": {"id": 420}},
+                                     "data": "trafficnotify:time"})
+                self.assertIn(420, bot.pending_traffic_times)
+                bot.handle_callback({"id": "home", "from": {"id": 42}, "message": {"chat": {"id": 420}},
+                                     "data": "menu:home"})
+                self.assertNotIn(420, bot.pending_traffic_times)
+                sent_texts = [call.args[2].get("text", "") for call in request.call_args_list
+                              if call.args[1] == "sendMessage"]
+                self.assertFalse(any("时间格式无效" in text for text in sent_texts))
+                self.assertTrue(any("欢迎使用 GLA" in text for text in sent_texts))
+            finally:
+                bot.db.close()
+
+    def test_telegram_unwatch_and_traffic_remove_allow_deleted_groups(self):
+        worker = EXPORTER.PanelWorker({"name": "node-a"})
+        worker.metrics = EXPORTER.render_metrics("node-a", [], [], [
+            {"email": "alice", "group": "active", "traffic": {}}])
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request"):
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, [worker], directory)
+            try:
+                with bot.db:
+                    bot.db.execute("INSERT INTO subscriptions VALUES (420, 'removed-group')")
+                    bot.db.execute("INSERT INTO traffic_notify_groups VALUES (420, 'removed-group')")
+                bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/unwatch removed-group"})
+                bot.handle_message({"chat": {"id": 420}, "from": {"id": 42}, "text": "/traffic_notify remove removed-group"})
+                self.assertEqual(bot.db.execute("SELECT * FROM subscriptions WHERE chat_id=420").fetchall(), [])
+                self.assertEqual(bot.db.execute("SELECT * FROM traffic_notify_groups WHERE chat_id=420").fetchall(), [])
+            finally:
+                bot.db.close()
+
+    def test_telegram_traffic_notify_add_excludes_already_subscribed_groups(self):
+        worker = EXPORTER.PanelWorker({"name": "node-a"})
+        worker.metrics = EXPORTER.render_metrics("node-a", [], [], [
+            {"email": "alice", "group": "alpha", "traffic": {}},
+            {"email": "bob", "group": "beta", "traffic": {}},
+        ])
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, [worker], directory)
+            try:
+                with bot.db:
+                    bot.db.execute("INSERT INTO traffic_notify_groups VALUES (420, 'alpha')")
+                bot.handle_callback({"id": "add", "from": {"id": 42}, "message": {"chat": {"id": 420}},
+                                     "data": "trafficnotify:add"})
+                markup = json.loads(request.call_args.args[2]["reply_markup"])
+                labels = [row[0]["text"] for row in markup["inline_keyboard"]]
+                self.assertEqual(labels, ["beta"])
+            finally:
+                bot.db.close()
+
+    def test_log_forwarder_batched_dedup_handles_more_than_500_records(self):
+        panel = {"name": "node-a", "url": "https://panel.example.com/panel/api/inbounds/list",
+                 "log_count": 1000, "max_log_age": 3600}
+        now = 1_760_000_000.0
+        entries = [
+            {"DateTime": f"2025-10-09T08:53:{index % 60:02d}.{index:06d}Z",
+             "FromAddress": f"203.0.113.{index % 250}:{10000 + index}",
+             "ToAddress": f"tcp:example-{index}.com:443",
+             "Inbound": "in-1", "Outbound": "direct", "Email": "alice"}
+            for index in range(650)
+        ]
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "push_loki") as push:
+            forwarder = EXPORTER.LogForwarder(panel, state_dir=directory)
+            try:
+                forwarder.forward(entries, now=now, client_groups={"alice": "shared"})
+                self.assertEqual(push.call_count, 1)
+                pushed_first = sum(len(stream["values"]) for stream in push.call_args.args[0])
+                self.assertEqual(pushed_first, 650)
+                push.reset_mock()
+                # Replaying the exact same 650 entries must forward nothing.
+                forwarder.forward(entries, now=now + 10, client_groups={"alice": "shared"})
+                push.assert_not_called()
+            finally:
+                forwarder.close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -53,11 +53,17 @@ ensure_ufw_default_counter() {
 }
 
 cleanup_family() {
-  local command_name="$1"
+  local command_name="$1" rule
   command -v "$command_name" >/dev/null 2>&1 || return 0
 
   while "$command_name" -w -t filter -D INPUT -p tcp --dport "$GLA_SSH_PORT" -j "$SSH_CHAIN" >/dev/null 2>&1; do :; done
   while "$command_name" -w -t filter -D INPUT -j "$UFW_CHAIN" >/dev/null 2>&1; do :; done
+  # Remove any stale jump rules left behind if GLA_SSH_PORT was changed earlier.
+  while IFS= read -r rule; do
+    [ -n "$rule" ] || continue
+    # shellcheck disable=SC2086
+    "$command_name" -w -t filter -D ${rule#-A } >/dev/null 2>&1 || break
+  done < <("$command_name" -w -t filter -S INPUT 2>/dev/null | grep -E -- "-j (${SSH_CHAIN}|${UFW_CHAIN})$" || true)
   "$command_name" -w -t filter -F "$SSH_CHAIN" >/dev/null 2>&1 || true
   "$command_name" -w -t filter -X "$SSH_CHAIN" >/dev/null 2>&1 || true
   "$command_name" -w -t filter -F "$UFW_CHAIN" >/dev/null 2>&1 || true

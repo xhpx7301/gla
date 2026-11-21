@@ -21,11 +21,12 @@ GLA 是面向个人和小型 Linux 服务器的轻量观测项目，用一台中
                                        Loki / VictoriaMetrics --> Grafana
 ```
 
-项目默认提供三个 Grafana 仪表盘：
+项目默认提供四个 Grafana 仪表盘：
 
 - `Xray 访问日志`：API 解析访问记录、最新访问记录、客户端、入站和访问目标统计。
 - `Xray 网关流量与连接`：在线用户、3x-ui API 状态、指标最新时间、上下行速率、客户端和入站流量、来源 IP 连接数。
 - `服务器安全事件与系统资源`：SSH 失败、Fail2ban、UFW、指标最新时间、CPU、内存、网卡、SSH 端口入站和 UFW 默认拒绝流量。
+- `SSH 登录记录`：各服务器成功 SSH 登录次数、登录趋势以及含来源 IP、端口、认证方式和归属信息的登录详情。
 
 ## 数据从哪里来
 
@@ -50,9 +51,9 @@ GLA 是面向个人和小型 Linux 服务器的轻量观测项目，用一台中
 
 3x-ui 3.3.0、3.3.1 和 3.5.0 可使用同一组接口。在中心服务器运行 `gla`，选择 `1` 更新部署，再选择 `2. 管理 3x-ui API 面板`，逐个输入服务器名称、完整 HTTPS 地址、Token 和日志采集选项。地址示例：`https://example.com/面板路径/panel/api/inbounds/list`。Token 从面板设置中的 API Token 功能创建；它有管理权限，应只通过 HTTPS 使用。面板配置保存在中心端的 `secrets/xui-panels.json`，Token 分别写入权限为 `600` 的文件。输入 Token 时直接显示字符，方便核对；面板列表不显示已保存的 Token。只监控 Xray 时，被监控服务器只需运行已有的 3x-ui；需要安全事件和系统资源时，再安装 GLA 采集端。中心服务器自己的面板也通过此菜单添加，名称应与 `SERVER_NAME` 一致。
 
-中心端每个面板独立轮询入站、客户端、在线名单和访问日志。流量与在线状态写入 VictoriaMetrics；启用日志采集后，最近的解析访问记录经 Alloy 补充 GeoIP 写入 Loki。两个 Xray 仪表盘均可按服务器筛选。采集状态和日志窗口风险显示在仪表盘底部，服务错误可在 `gla -> 6. 查看服务日志 -> 5` 查看。旧采集端升级后会停用 Xray 文件日志和本地 3x-ui 导出器，中心端升级后也会停用 Xray 文件日志。为避免过渡期间重复计数，按下文升级顺序迁移。
+中心端每个面板独立轮询入站、客户端、在线名单和访问日志。流量与在线状态写入 VictoriaMetrics；启用日志采集后，最近的解析访问记录经 Alloy 补充 GeoIP 写入 Loki。两个 Xray 仪表盘均可按服务器筛选。采集状态和日志窗口风险显示在仪表盘底部，服务错误可在 `gla -> 7. 查看服务日志 -> 5` 查看。旧采集端升级后会停用 Xray 文件日志和本地 3x-ui 导出器，中心端升级后也会停用 Xray 文件日志。为避免过渡期间重复计数，按下文升级顺序迁移。
 
-中心端可在 `gla -> 3. 管理 Telegram Bot` 配置机器人。输入 BotFather 创建的 Token 和允许访问的 Telegram 用户 ID（可用逗号分隔多个 ID；也可以在机器人里发送 `/id` 查询）；Token 保存为权限 `600` 的独立文件，不写入 Compose。机器人使用长轮询，不需要开放公网入站端口。启动后会自动注册 Telegram 原生斜杠命令菜单：`/start`、`/menu`、`/help`、`/status`、`/id`、`/groups`、`/online`、`/traffic`、`/online_notify`、`/traffic_notify`、`/watch`、`/unwatch`、`/watches`。`/start` 或 `/menu` 会在聊天页面发送主菜单消息，操作按钮附在这条消息下方，不会占用输入框下方的键盘区域。主菜单的“上线通知”和“流量通知”可分别管理开关、查看订阅分组、添加或移除分组及发送测试消息；也可继续使用 `/watch 分组` 和 `/unwatch 分组` 管理上线订阅。`/id` 仅返回发送者自己的 Telegram 用户 ID 和当前 Chat ID，不受白名单限制；其余命令仅对白名单用户开放。`/groups` 列出当前分组，`/online [分组]` 查看在线客户端，`/traffic [分组]` 查看累计上行/下行/总流量，`/watches` 分类别显示上线通知和流量通知的订阅分组及开关状态；`/status` 显示面板 API 状态和在线客户端数。首次启动只建立在线状态基线，不会把已有在线客户端误报为刚上线；状态、订阅、上线通知冷却和流量通知设置保存在中心端 `xui-state` 卷。流量是 3X-UI API 返回的累计值，机器人不把它当作实时速率。
+中心端可在 `gla -> 4. 管理 Telegram Bot` 配置机器人。输入 BotFather 创建的 Token 和允许访问的 Telegram 用户 ID（可用逗号分隔多个 ID；也可以在机器人里发送 `/id` 查询）；Token 保存为权限 `600` 的独立文件，不写入 Compose。机器人使用长轮询，不需要开放公网入站端口。启动后会自动注册 Telegram 原生斜杠命令菜单：`/start`、`/menu`、`/help`、`/status`、`/id`、`/groups`、`/online`、`/traffic`、`/online_notify`、`/traffic_notify`、`/watch`、`/unwatch`、`/watches`。`/start` 或 `/menu` 会在聊天页面发送主菜单消息，操作按钮附在这条消息下方，不会占用输入框下方的键盘区域。主菜单的“上线通知”和“流量通知”可分别管理开关、查看订阅分组、添加或移除分组及发送测试消息；也可继续使用 `/watch 分组` 和 `/unwatch 分组` 管理上线订阅。`/id` 仅返回发送者自己的 Telegram 用户 ID 和当前 Chat ID，不受白名单限制；其余命令仅对白名单用户开放。`/groups` 列出当前分组，`/online [分组]` 查看在线客户端，`/traffic [分组]` 查看累计上行/下行/总流量，`/watches` 分类别显示上线通知和流量通知的订阅分组及开关状态；`/status` 显示面板 API 状态和在线客户端数。首次启动只建立在线状态基线，不会把已有在线客户端误报为刚上线；状态、订阅、上线通知冷却和流量通知设置保存在中心端 `xui-state` 卷。流量是 3X-UI API 返回的累计值，机器人不把它当作实时速率。
 
 上线通知菜单可开关通知、查看订阅分组、逐个新增或移除分组，并发送测试通知。关闭通知会保留分组订阅，重新开启后继续监控。测试从已订阅分组的当前客户端中选择一个样例，立即发送含 IP、归属地和关联入站的模拟通知，即使客户端当前离线也可测试；消息会标明当前状态，不写入在线状态、确认次数或冷却记录。也可发送 `/online_notify test` 测试，或用 `/online_notify` 打开设置。通知默认按每个聊天、面板和客户端分别冷却 60 分钟；冷却期内该客户端再次上线不重复通知，不同客户端互不影响。冷却记录在 Telegram 消息发送成功后持久化，机器人重启后继续生效。可在 `secrets/telegram-config.json` 中设置 `notification_cooldown_seconds`（允许 `0` 到 `86400` 秒，`0` 表示关闭冷却）；旧默认值 `600` 秒和 `1800` 秒会升级为 `3600` 秒，其他自定义值保留；通过菜单更新 Bot 配置会保留该设置。
 
@@ -222,18 +223,19 @@ Alloy 内部日志原本使用 UTC 的 `Z` 时间，管理菜单会在显示时�
 
 运行 `gla` 后，顶部会显示 Grafana、Loki、VictoriaMetrics、Alloy 和中心端 3x-ui API 采集服务的状态。每台面板的 API、日志状态应在 Xray 仪表盘中查看；容器“运行中”本身不代表面板可访问。
 
-| 选项 | 作用 |
-| --- | --- |
-| 更新配置、脚本与仪表盘 | 下载当前仓库脚本，重新生成配置并保留数据卷 |
-| 管理 3x-ui API 面板 | 在中心端管理本机和远程面板的流量、在线状态与访问日志采集 |
-| 管理 Telegram Bot | 配置 Bot Token 和用户白名单；Bot 支持分组上线通知、在线客户端和累计流量查询 |
-| 服务控制 | 启停全部组件，或单独重启某个组件 |
-| 查看运行状态与资源占用 | 查看容器状态、镜像、数据卷和日志文件占用 |
-| 查看服务日志 | 分别查看五个组件的最近日志 |
-| 查看访问地址、凭据与模块 | 查看 Grafana 地址、密码、内部接口和已安装仪表盘 |
-| 更新容器镜像 | 拉取最新镜像并重建容器，不修改采集参数 |
-| 数据备份与导入导出 | 导出配置、密钥和 Docker 数据卷；配置每日自动备份、查看结果和日志；从备份恢复会覆盖当前 GLA 配置与数据 |
-| 卸载并删除全部数据 | 删除容器、配置和项目数据卷，执行前需要二次确认 |
+| 编号 | 选项 | 作用 |
+| --- | --- | --- |
+| 1 | 更新配置、脚本与仪表盘 | 下载当前仓库脚本，重新生成配置并保留数据卷 |
+| 2 | 管理 3x-ui API 面板 | 在中心端管理本机和远程面板的流量、在线状态与访问日志采集 |
+| 3 | 管理 SSH 登录告警 | 管理多服务器 SSH 登录接收地址、密钥、可信来源 IP 组与独立告警 Bot |
+| 4 | 管理 Telegram Bot | 配置 Bot Token 和用户白名单；Bot 支持分组上线通知、在线客户端和累计流量查询 |
+| 5 | 服务控制 | 启停全部组件，或单独重启某个组件 |
+| 6 | 查看运行状态与资源占用 | 查看容器状态、镜像、数据卷和日志文件占用 |
+| 7 | 查看服务日志 | 分别查看五个组件的最近日志 |
+| 8 | 查看访问地址、凭据与模块 | 查看 Grafana 地址、密码、内部接口和已安装仪表盘 |
+| 9 | 更新容器镜像 | 拉取最新远程镜像并重建 `xui-exporter` 容器镜像，不修改采集参数 |
+| 10 | 卸载并删除全部数据 | 删除容器、配置、定时任务和项目数据卷，执行前需要二次确认 |
+| 11 | 数据备份与导入导出 | 导出配置、密钥和 Docker 数据卷；配置每日自动备份、查看结果和日志；从备份恢复会覆盖当前 GLA 配置与数据 |
 
 在 `gla -> 11` 导出或导入备份。备份包含 Grafana、Loki、VictoriaMetrics、Alloy 和 3x-ui 状态数据，以及 GLA 配置和密钥。手动导出时路径留空会保存到 `/var/backups/gla/gla-manual-时间戳.tar.gz`；自动备份保存在同一目录，文件名以 `gla-auto-` 开头。导出和恢复时服务会短暂停止；导出后恢复原先运行的服务。备份文件含有面板 Token、Bot Token 和历史日志，应妥善保管。恢复前会要求确认，并覆盖当前配置和数据卷；新服务器需先安装 GLA 并创建相同项目的数据卷，再导入备份。Docker 镜像、NPM 和外部网络不在备份内，迁移时需自行准备。建议定期将导出的 `.tar.gz` 复制到另一台设备保存。
 
@@ -304,7 +306,7 @@ docker logs --tail=100 xray-alloy
 - **3x-ui API 状态不可用**：检查 API URL、Token、证书，以及中心服务器能否访问面板域名。
 - **Xray 网关流量与连接的服务器列表只有 All**：在中心端 `gla -> 2` 添加面板，检查 API 采集服务和指标写入；可用 `count by (server) (xui_exporter_up)` 验证。
 - **中心服务器本机 3x-ui 显示超时**：设置 `XUI_LOCAL_HOST=本机面板域名` 后重新部署，使该域名在 API 采集容器内直连宿主机网关；同时确认宿主机上的 HTTPS 反向代理可从 Docker 网络访问。
-- **面板尚未开始采集**：在中心端 `gla -> 2` 确认面板已添加，再查看 `gla -> 6 -> 5` 的 API 采集服务日志。
+- **面板尚未开始采集**：在中心端 `gla -> 2` 确认面板已添加，再查看 `gla -> 7 -> 5` 的 API 采集服务日志。
 - **Xray 面板无日志**：在中心端检查面板 API 配置、Token、日志状态和采集服务错误；确认 3x-ui 已启用访问日志且能读取它。
 - **旧日志没有全部出现**：systemd journal 首次默认读取最近数据；GLA 主要保证安装后的持续采集。
 
@@ -330,15 +332,18 @@ docker logs --tail=100 xray-alloy
 ## 项目文件
 
 ```text
-deploy-xray-grafana-loki-alloy.sh  中心服务器安装与 gla 菜单
-deploy-xray-alloy-collector.sh     采集服务器安装与 alloy 菜单
-assets/xui_exporter.py             中心端 3x-ui API 指标与日志采集服务
+deploy-xray-grafana-loki-alloy.sh    中心服务器安装与 gla 菜单
+deploy-xray-alloy-collector.sh       采集服务器安装与 alloy 菜单
+install-ssh-login-agent.sh           子服务器轻量 SSH 登录告警安装与卸载脚本
+assets/xui_exporter.py               中心端 3x-ui API 指标、日志采集、Telegram Bot 与 SSH 登录接收服务
+assets/xui-exporter.Dockerfile       中心端 API 采集服务镜像构建文件
 assets/security_traffic_collector.sh SSH/UFW 聚合流量采集器
-dashboards/xray-gateway.json       Xray / 3x-ui 流量仪表盘
-dashboards/server-security.json    服务器安全事件与系统资源仪表盘
-tests/test_xui_exporter.py         3x-ui 导出器测试
-tests/test_generated_alloy_regex.sh Bash 到 Alloy 的正则转义测试
-tests/test_security_traffic_collector.sh 安全流量采集器配置测试
+dashboards/xray-gateway.json         Xray / 3x-ui 流量仪表盘
+dashboards/server-security.json      服务器安全事件与系统资源仪表盘
+dashboards/ssh-login.json            SSH 成功登录记录仪表盘
+tests/test_xui_exporter.py           3x-ui 导出器、Bot 与 SSH 告警测试
+tests/test_generated_alloy_regex.sh  Bash 到 Alloy 的正则转义测试
+tests/test_security_traffic_collector.sh 安全流量采集器与脚本语法测试
 ```
 
 原始来源 IP 会直接显示在表格中。第一阶段支持在采集阶段使用 GeoLite2-City 本地数据库离线解析国家/地区、省份和城市。默认下载地址是用户指定的 `P3TERX/GeoLite.mmdb` GitHub 镜像；如果未配置数据库，相关地理列会为空，原有 IP、失败次数、封禁次数和连接次数统计仍可用。

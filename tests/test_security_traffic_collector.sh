@@ -7,11 +7,19 @@ COLLECTOR="$ROOT/assets/security_traffic_collector.sh"
 bash -n "$COLLECTOR"
 bash -n "$ROOT/deploy-xray-grafana-loki-alloy.sh"
 bash -n "$ROOT/deploy-xray-alloy-collector.sh"
-awk '
-  /cat >"\$AGENT_FILE" << '\''AGENT'\''/ { capture=1; next }
+bash -n "$ROOT/install-ssh-login-agent.sh"
+agent_script="$(awk '
+  /cat >"\$AGENT_FILE" <<'\''AGENT'\''/ { capture=1; next }
   capture && $0 == "AGENT" { exit }
   capture { print }
-' "$ROOT/install-ssh-login-agent.sh" | bash -n
+' "$ROOT/install-ssh-login-agent.sh")"
+[ -n "$agent_script" ] || { printf '未能提取 SSH 登录采集脚本。\n' >&2; exit 1; }
+printf '%s\n' "$agent_script" | bash -n
+awk '
+  /cat >.*MANAGER_PATH.*EOF/ { capture=1; next }
+  capture && $0 == "EOF" { exit }
+  capture { print }
+' "$ROOT/deploy-xray-grafana-loki-alloy.sh" | bash -n
 awk '
   /cat >.*MANAGER_PATH.*EOF/ { capture=1; next }
   capture && $0 == "EOF" { exit }

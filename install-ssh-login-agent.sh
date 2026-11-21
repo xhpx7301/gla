@@ -86,10 +86,34 @@ case "$ACTION" in
     cat >"$AGENT_FILE" <<'AGENT'
 #!/usr/bin/env bash
 set -u
+if [ "${1:-}" = "--send" ]; then
+  [ "$#" -eq 7 ] || exit 0
+  [ -r /etc/gla/ssh-login.env ] || exit 0
+  # shellcheck disable=SC1091
+  . /etc/gla/ssh-login.env
+  username="$2"
+  source_ip="$3"
+  source_port="$4"
+  ssh_port="$5"
+  event_time="$6"
+  auth_method="$7"
+  curl_bin="$(command -v curl || printf '/usr/bin/curl')"
+  escaped_key="$(printf '%s' "$GLA_SSH_LOGIN_KEY" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+  printf 'header = "X-GLA-Key: %s"\n' "$escaped_key" | \
+    "$curl_bin" --config - --silent --show-error --fail --retry 3 --retry-delay 2 \
+      --connect-timeout 3 --max-time 10 \
+      --data-urlencode "server=$GLA_SERVER_NAME" \
+      --data-urlencode "user=$username" \
+      --data-urlencode "source_ip=$source_ip" \
+      --data-urlencode "source_port=$source_port" \
+      --data-urlencode "ssh_port=$ssh_port" \
+      --data-urlencode "event_time=$event_time" \
+      --data-urlencode "auth_method=$auth_method" \
+      "$GLA_SSH_LOGIN_URL" >/dev/null 2>&1 || true
+  exit 0
+fi
 [ "${PAM_TYPE:-}" = open_session ] || exit 0
 [ -r /etc/gla/ssh-login.env ] || exit 0
-# shellcheck disable=SC1091
-. /etc/gla/ssh-login.env
 source_ip="${PAM_RHOST:-}"
 username="${PAM_USER:-}"
 [ -n "$source_ip" ] && [ -n "$username" ] || exit 0
@@ -123,17 +147,9 @@ case "$auth_methods" in
 esac
 unit="gla-ssh-login-${$}-${RANDOM}"
 systemd-run --quiet --no-block --collect --unit="$unit" \
-  /usr/bin/curl --silent --show-error --fail --retry 3 --retry-delay 2 \
-  --connect-timeout 2 --max-time 3 \
-  -H "X-GLA-Key: $GLA_SSH_LOGIN_KEY" \
-  --data-urlencode "server=$GLA_SERVER_NAME" \
-  --data-urlencode "user=$username" \
-  --data-urlencode "source_ip=$source_ip" \
-  --data-urlencode "source_port=$source_port" \
-  --data-urlencode "ssh_port=$ssh_port" \
-  --data-urlencode "event_time=$event_time" \
-  --data-urlencode "auth_method=$auth_method" \
-  "$GLA_SSH_LOGIN_URL" >/dev/null 2>&1 || true
+  /usr/local/sbin/gla-ssh-login --send \
+  "$username" "$source_ip" "$source_port" "$ssh_port" "$event_time" "$auth_method" \
+  >/dev/null 2>&1 || true
 exit 0
 AGENT
     chmod 0750 "$AGENT_FILE"
@@ -148,17 +164,8 @@ AGENT
     if [ -f "$PAM_FILE" ]; then
       sed -i '\|^session optional pam_exec\.so quiet type=open_session /usr/local/sbin/gla-ssh-login$|d; /^# GLA SSH successful login event$/d' "$PAM_FILE"
     fi
-    if [ -e "$SSH_AUTH_INFO_MARKER" ]; then
-      if [ -e "$SSH_AUTH_INFO_FILE.gla-backup" ]; then
-        mv -f "$SSH_AUTH_INFO_FILE.gla-backup" "$SSH_AUTH_INFO_FILE"
-      else
-        rm -f "$SSH_AUTH_INFO_FILE"
-      fi
-      rm -f "$SSH_AUTH_INFO_MARKER"
-    fi
-    if [ -e "$SSH_INCLUDE_MARKER" ]; then
-      sed -i '\|^Include /etc/ssh/sshd_config.d/\*\.conf$|d' "$SSHD_CONFIG_FILE"
-      rm -f "$SSH_INCLUDE_MARKER"
+    if [ -e "$SSH_AUTH_INFO_MARKER" ] || [ -e "$SSH_INCLUDE_MARKER" ]; then
+      restore_ssh_auth_config
     fi
     if command -v sshd >/dev/null 2>&1 && sshd -t 2>/dev/null && command -v systemctl >/dev/null 2>&1; then
       systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
