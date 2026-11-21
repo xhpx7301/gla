@@ -291,8 +291,7 @@ class ExporterTest(unittest.TestCase):
                 self.assertIn("📍 归属地：广东深圳\n🏢 运营商：中国电信", message)
                 self.assertIn("🕒 IP 记录时间：", message)
                 payload = send.call_args.args[2]
-                markup = json.loads(payload["reply_markup"])
-                self.assertEqual([b["text"] for b in markup["inline_keyboard"][0]], ["📈 累计流量", "🔇 静默 6 小时"])
+                self.assertNotIn("reply_markup", payload)
                 entity, = json.loads(payload["entities"])
                 encoded = message.encode("utf-16-le")
                 self.assertEqual(encoded[entity["offset"] * 2:(entity["offset"] + entity["length"]) * 2]
@@ -1922,7 +1921,7 @@ class ExporterTest(unittest.TestCase):
             finally:
                 bot.db.close()
 
-    def test_cross_panel_cooldown_and_quick_mute_and_traffic_callbacks(self):
+    def test_cross_panel_cooldown_suppresses_second_panel_for_same_client(self):
         panels = [EXPORTER.PanelWorker({"name": name}) for name in ("node-a", "node-b")]
         clients = [{"email": "alice", "group": "shared", "traffic": {"up": 1024, "down": 2048}}]
         with tempfile.TemporaryDirectory() as directory, \
@@ -1946,19 +1945,11 @@ class ExporterTest(unittest.TestCase):
                 for idx in range(20):
                     set_online(1060 + idx * 30, True, False)
                 self.assertEqual(request.call_count, 1)
-                markup = json.loads(request.call_args.args[2]["reply_markup"])
-                traffic_cb = markup["inline_keyboard"][0][0]["callback_data"]
-                mute_cb = markup["inline_keyboard"][0][1]["callback_data"]
+                self.assertNotIn("reply_markup", request.call_args.args[2])
                 # Second panel coming online for same client is suppressed by cross-panel cooldown
                 for idx in range(20):
                     set_online(2000 + idx * 30, False, True)
                 self.assertEqual(request.call_count, 1)
-                # Quick traffic button
-                bot.handle_callback({"id": "cb1", "from": {"id": 42}, "message": {"chat": {"id": 420}}, "data": traffic_cb})
-                self.assertIn("⬆️ 上行：1.00 KiB", request.call_args.args[2]["text"])
-                # Quick mute button silences for 6h
-                bot.handle_callback({"id": "cb2", "from": {"id": 42}, "message": {"chat": {"id": 420}}, "data": mute_cb})
-                self.assertIn("已静默客户端通知 6 小时", request.call_args.args[2]["text"])
             finally:
                 bot.db.close()
 

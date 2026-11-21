@@ -64,7 +64,6 @@ PROBE_TARGET_HOSTS = frozenset({
     "cp.cloudflare.com", "detectportal.firefox.com", "captive.apple.com",
     "www.msftconnecttest.com", "www.msftncsi.com",
 })
-CLIENT_MUTE_SECONDS = 6 * 3600
 TIMEOUT = float(os.environ.get("XUI_API_TIMEOUT", "10"))
 SERVER_NAME = os.environ.get("SERVER_NAME", "").strip() or "unknown"
 GEOIP_CITY_DB = os.environ.get("GEOIP_CITY_DB", "/var/lib/gla/geoip/GeoLite2-City.mmdb")
@@ -290,7 +289,6 @@ class TelegramBot:
         self.db.execute("CREATE TABLE IF NOT EXISTS subscriptions (chat_id INTEGER, group_name TEXT, PRIMARY KEY(chat_id,group_name))")
         self.db.execute("CREATE TABLE IF NOT EXISTS online_notify_settings (chat_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1)")
         self.db.execute("CREATE TABLE IF NOT EXISTS notification_cooldowns (chat_id INTEGER, server TEXT, email TEXT, notified_at REAL NOT NULL, PRIMARY KEY(chat_id,server,email))")
-        self.db.execute("CREATE TABLE IF NOT EXISTS client_mutes (chat_id INTEGER, server TEXT, email TEXT, until_at REAL NOT NULL, PRIMARY KEY(chat_id,server,email))")
         self.db.execute("CREATE TABLE IF NOT EXISTS online_confirmations (server TEXT, email TEXT, last_sample_at REAL NOT NULL, consecutive_online INTEGER NOT NULL, start_traffic INTEGER, first_seen_at REAL, PRIMARY KEY(server,email))")
         confirmation_columns = {row[1] for row in self.db.execute("PRAGMA table_info(online_confirmations)")}
         if "start_traffic" not in confirmation_columns:
@@ -309,7 +307,6 @@ class TelegramBot:
         self.pending_traffic_groups = {}
         self.pending_traffic_times = set()
         self.pending_traffic_views = {}
-        self.pending_notification_actions = {}
         self.notification_cooldown_seconds = validate_notification_cooldown(
             config.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS))
         self.online_confirmation_samples = validate_online_confirmation_samples(
@@ -875,11 +872,6 @@ class TelegramBot:
             eligible_chats = []
             for chat_id in chats:
                 now = time.time()
-                muted = self.db.execute(
-                    "SELECT until_at FROM client_mutes WHERE chat_id=? AND server=? AND email=?",
-                    (chat_id, server, email)).fetchone()
-                if muted is not None and now < float(muted[0]):
-                    continue
                 if self.cross_panel_cooldown:
                     last = self.db.execute(
                         "SELECT MAX(notified_at) FROM notification_cooldowns WHERE chat_id=? AND email=?",
@@ -898,16 +890,8 @@ class TelegramBot:
                     "first_seen_at": first_seen_at, "delta_bytes": delta_bytes}
             notification = self.online_notification_text(item)
             for chat_id in eligible_chats:
-                action_token = hashlib.sha256(f"{chat_id}\n{server}\n{email}".encode()).hexdigest()[:16]
-                self.pending_notification_actions[(chat_id, action_token)] = (server, email, group)
-                while len(self.pending_notification_actions) > 512:
-                    self.pending_notification_actions.pop(next(iter(self.pending_notification_actions)))
-                keyboard = {"inline_keyboard": [[
-                    {"text": "📈 累计流量", "callback_data": f"ntf:traffic:{action_token}"},
-                    {"text": "🔇 静默 6 小时", "callback_data": f"ntf:mute:{action_token}"},
-                ]]}
                 try:
-                    self.send_online_notification(chat_id, notification, reply_markup=keyboard)
+                    self.send_online_notification(chat_id, notification)
                 except ERRORS as error:
                     print(f"Telegram 通知发送失败 ({error_kind(error)})", file=sys.stderr, flush=True)
                 else:
@@ -920,7 +904,6 @@ class TelegramBot:
                         self.db.execute(
                             "DELETE FROM notification_cooldowns WHERE notified_at < ?",
                             (prune_before,))
-                        self.db.execute("DELETE FROM client_mutes WHERE until_at < ?", (recorded_at,))
 
     def handle_message(self, message):
         chat_id = message.get("chat", {}).get("id")
@@ -1152,32 +1135,6 @@ class TelegramBot:
         if data in menu_commands:
             telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
             self.handle_message({"chat": {"id": chat_id}, "from": {"id": user_id}, "text": menu_commands[data]})
-            return
-        match = re.fullmatch(r"ntf:(traffic|mute):([0-9a-f]{16})", data)
-        if match:
-            action, token = match.groups()
-            target = self.pending_notification_actions.get((chat_id, token))
-            if not target:
-                telegram_request(self.config["token"], "answerCallbackQuery", {
-                    "callback_query_id": callback_id, "text": "操作已过期，请使用 /online 或 /traffic 查询。"})
-                return
-            server, email, group = target
-            if action == "mute":
-                until_at = time.time() + CLIENT_MUTE_SECONDS
-                with self.db:
-                    self.db.execute("INSERT OR REPLACE INTO client_mutes VALUES (?,?,?,?)",
-                                    (chat_id, server, email, until_at))
-                telegram_request(self.config["token"], "answerCallbackQuery", {
-                    "callback_query_id": callback_id, "text": f"已静默 {email} 6 小时"})
-                self.send(chat_id, f"🔇 已静默客户端通知 6 小时：{email}（面板：{server}）")
-                return
-            telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
-            series, servers_up = self.snapshot()
-            item = series.get((server, email))
-            if not item or server not in servers_up:
-                self.send(chat_id, f"📈 客户端累计流量\n\n👤 客户端：{email}\n🖥 面板：{server}\n⚠️ 面板当前不可用或客户端已移除")
-                return
-            self.send(chat_id, f"📈 客户端累计流量\n\n{self.online_client_block(item)}\n\n🕒 查询时间：{self.report_time()}")
             return
         match = re.fullmatch(r"trafficview:(groups|panels):(all|[0-9a-f]{16})", data)
         if match:
