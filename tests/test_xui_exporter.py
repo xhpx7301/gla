@@ -1677,9 +1677,8 @@ class ExporterTest(unittest.TestCase):
             request.assert_called_once()
 
     def test_fast_online_confirmation_requires_traffic_growth(self):
-        def run(growth):
+        def run(samples, step_bytes):
             panel = EXPORTER.PanelWorker({"name": "node-a"})
-            sent = []
             with tempfile.TemporaryDirectory() as directory, \
                     mock.patch.object(EXPORTER, "telegram_request") as request, \
                     mock.patch.object(EXPORTER.TelegramBot, "report_time", return_value="t"):
@@ -1695,13 +1694,14 @@ class ExporterTest(unittest.TestCase):
                         bot.process_online()
                     sample(0, False, 0)   # baseline
                     sample(1, False, 0)
-                    for index in range(2, 5):
-                        sample(index, True, (index - 1) * growth)
+                    for index in range(2, 2 + samples):
+                        sample(index, True, (index - 1) * step_bytes)
                     return request.call_count
                 finally:
                     bot.db.close()
-        self.assertEqual(run(200 * 1024), 1)   # 3 samples + enough traffic: notified early
-        self.assertEqual(run(1024), 0)         # probe-sized traffic keeps waiting
+        self.assertEqual(run(3, 500 * 1024), 0)    # 3 samples is too short
+        self.assertEqual(run(6, 50 * 1024), 0)     # 6 samples + 300 KiB (< 1 MiB) keeps waiting
+        self.assertEqual(run(6, 250 * 1024), 1)    # 6 samples + > 1 MiB notifies early
 
     def test_online_notification_omits_raw_access_log_inbound_tag(self):
         worker = EXPORTER.PanelWorker({"name": "node-a"})
@@ -1872,37 +1872,34 @@ class ExporterTest(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=3)
 
-    def test_access_log_real_target_fast_confirms_and_probe_host_waits(self):
-        def run(target):
-            panel = EXPORTER.PanelWorker({"name": "node-a"})
-            with tempfile.TemporaryDirectory() as directory, \
-                    mock.patch.object(EXPORTER, "telegram_request") as request, \
-                    mock.patch.object(EXPORTER.TelegramBot, "report_time", return_value="t"):
-                bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, [panel], directory)
-                try:
-                    with bot.db:
-                        bot.db.execute("INSERT INTO subscriptions VALUES (420,'shared')")
-                    def sample(ts, online):
-                        with mock.patch.object(EXPORTER.time, "time", return_value=ts):
-                            panel.metrics = EXPORTER.render_metrics(
-                                "node-a", [], ["alice"] if online else [],
-                                [{"email": "alice", "group": "shared", "traffic": {}}])
-                        bot.process_online()
-                    sample(1000, False)
-                    sample(1030, False)
-                    moment = EXPORTER.datetime.fromtimestamp(1065, EXPORTER.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    with mock.patch.object(EXPORTER.time, "time", return_value=1065):
-                        panel.record_access_entries([{
-                            "DateTime": moment, "FromAddress": "127.0.0.1:40000",
-                            "ToAddress": target, "Inbound": "in-1", "Email": "alice",
-                        }])
-                    for ts in (1060, 1090, 1120):
-                        sample(ts, True)
-                    return request.call_count
-                finally:
-                    bot.db.close()
-        self.assertEqual(run("tcp:www.gstatic.com:80"), 0)
-        self.assertEqual(run("tcp:api.github.com:443"), 1)
+    def test_access_log_real_target_without_traffic_growth_does_not_fast_confirm(self):
+        panel = EXPORTER.PanelWorker({"name": "node-a"})
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(EXPORTER, "telegram_request") as request, \
+                mock.patch.object(EXPORTER.TelegramBot, "report_time", return_value="t"):
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, [panel], directory)
+            try:
+                with bot.db:
+                    bot.db.execute("INSERT INTO subscriptions VALUES (420,'shared')")
+                def sample(ts, online):
+                    with mock.patch.object(EXPORTER.time, "time", return_value=ts):
+                        panel.metrics = EXPORTER.render_metrics(
+                            "node-a", [], ["alice"] if online else [],
+                            [{"email": "alice", "group": "shared", "traffic": {}}])
+                    bot.process_online()
+                sample(1000, False)
+                sample(1030, False)
+                moment = EXPORTER.datetime.fromtimestamp(1065, EXPORTER.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                with mock.patch.object(EXPORTER.time, "time", return_value=1065):
+                    panel.record_access_entries([{
+                        "DateTime": moment, "FromAddress": "127.0.0.1:40000",
+                        "ToAddress": "tcp:api.github.com:443", "Inbound": "in-1", "Email": "alice",
+                    }])
+                for idx in range(6):
+                    sample(1060 + idx * 30, True)
+                self.assertEqual(request.call_count, 0)
+            finally:
+                bot.db.close()
 
     def test_local_source_only_shows_distinct_ip_placeholder(self):
         worker = EXPORTER.PanelWorker({"name": "node-a"})
