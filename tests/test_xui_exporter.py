@@ -289,7 +289,8 @@ class ExporterTest(unittest.TestCase):
                 self.assertIn("📍 归属地：广东深圳\n🏢 运营商：中国电信", message)
                 self.assertIn("🕒 IP 记录时间：", message)
                 payload = send.call_args.args[2]
-                self.assertNotIn("reply_markup", payload)
+                markup = json.loads(payload["reply_markup"])
+                self.assertEqual([b["text"] for b in markup["inline_keyboard"][0]], ["📈 累计流量", "🔇 静默 6 小时"])
                 entity, = json.loads(payload["entities"])
                 encoded = message.encode("utf-16-le")
                 self.assertEqual(encoded[entity["offset"] * 2:(entity["offset"] + entity["length"]) * 2]
@@ -1858,6 +1859,95 @@ class ExporterTest(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=3)
+
+    def test_access_log_real_target_fast_confirms_and_probe_host_waits(self):
+        def run(target):
+            panel = EXPORTER.PanelWorker({"name": "node-a"})
+            with tempfile.TemporaryDirectory() as directory, \
+                    mock.patch.object(EXPORTER, "telegram_request") as request, \
+                    mock.patch.object(EXPORTER.TelegramBot, "report_time", return_value="t"):
+                bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, [panel], directory)
+                try:
+                    with bot.db:
+                        bot.db.execute("INSERT INTO subscriptions VALUES (420,'shared')")
+                    def sample(ts, online):
+                        with mock.patch.object(EXPORTER.time, "time", return_value=ts):
+                            panel.metrics = EXPORTER.render_metrics(
+                                "node-a", [], ["alice"] if online else [],
+                                [{"email": "alice", "group": "shared", "traffic": {}}])
+                        bot.process_online()
+                    sample(1000, False)
+                    sample(1030, False)
+                    moment = EXPORTER.datetime.fromtimestamp(1065, EXPORTER.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    with mock.patch.object(EXPORTER.time, "time", return_value=1065):
+                        panel.record_access_entries([{
+                            "DateTime": moment, "FromAddress": "127.0.0.1:40000",
+                            "ToAddress": target, "Inbound": "in-1", "Email": "alice",
+                        }])
+                    for ts in (1060, 1090, 1120):
+                        sample(ts, True)
+                    return request.call_count
+                finally:
+                    bot.db.close()
+        self.assertEqual(run("tcp:www.gstatic.com:80"), 0)
+        self.assertEqual(run("tcp:api.github.com:443"), 1)
+
+    def test_local_source_only_shows_distinct_ip_placeholder(self):
+        worker = EXPORTER.PanelWorker({"name": "node-a"})
+        moment = EXPORTER.datetime.now(EXPORTER.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        worker.record_access_entries([{
+            "DateTime": moment, "FromAddress": "127.0.0.1:46632",
+            "ToAddress": "tcp:example.com:443", "Inbound": "in-30303", "Email": "alice",
+        }])
+        item = {"server": "node-a", "email": "alice", "group": "shared", "online": 1}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request"):
+            bot = EXPORTER.TelegramBot({"token": "bot-token"}, [worker], directory)
+            try:
+                text = bot.online_notification_text(item)
+                self.assertIn("暂无24小时内公网记录（来源为本机/内网转发）", text)
+                self.assertIn("🎯 最近命中入站：in-30303", text)
+            finally:
+                bot.db.close()
+
+    def test_cross_panel_cooldown_and_quick_mute_and_traffic_callbacks(self):
+        panels = [EXPORTER.PanelWorker({"name": name}) for name in ("node-a", "node-b")]
+        clients = [{"email": "alice", "group": "shared", "traffic": {"up": 1024, "down": 2048}}]
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(EXPORTER, "telegram_request") as request, \
+                mock.patch.object(EXPORTER.TelegramBot, "report_time", return_value="t"):
+            bot = EXPORTER.TelegramBot({
+                "token": "bot-token", "allowed_user_ids": [42],
+                "notification_cooldown_seconds": 3600, "cross_panel_cooldown": True,
+            }, panels, directory)
+            try:
+                with bot.db:
+                    bot.db.execute("INSERT INTO subscriptions VALUES (420,'shared')")
+                def set_online(ts, online_a, online_b):
+                    with mock.patch.object(EXPORTER.time, "time", return_value=ts):
+                        for panel, on in zip(panels, (online_a, online_b)):
+                            panel.metrics = EXPORTER.render_metrics(
+                                panel.panel["name"], [], ["alice"] if on else [], clients)
+                    bot.process_online()
+                set_online(1000, False, False)
+                set_online(1030, False, False)
+                for idx in range(20):
+                    set_online(1060 + idx * 30, True, False)
+                self.assertEqual(request.call_count, 1)
+                markup = json.loads(request.call_args.args[2]["reply_markup"])
+                traffic_cb = markup["inline_keyboard"][0][0]["callback_data"]
+                mute_cb = markup["inline_keyboard"][0][1]["callback_data"]
+                # Second panel coming online for same client is suppressed by cross-panel cooldown
+                for idx in range(20):
+                    set_online(2000 + idx * 30, False, True)
+                self.assertEqual(request.call_count, 1)
+                # Quick traffic button
+                bot.handle_callback({"id": "cb1", "from": {"id": 42}, "message": {"chat": {"id": 420}}, "data": traffic_cb})
+                self.assertIn("⬆️ 上行：1.00 KiB", request.call_args.args[2]["text"])
+                # Quick mute button silences for 6h
+                bot.handle_callback({"id": "cb2", "from": {"id": 42}, "message": {"chat": {"id": 420}}, "data": mute_cb})
+                self.assertIn("已静默客户端通知 6 小时", request.call_args.args[2]["text"])
+            finally:
+                bot.db.close()
 
 
 if __name__ == "__main__":

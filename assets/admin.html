@@ -234,6 +234,9 @@
               <div><label>授权用户 ID（逗号分隔）</label><input id="tg-users" required placeholder="123456789"></div>
               <div><label>上线通知冷却（秒，0-86400）</label><input id="tg-cooldown" type="number" min="0" max="86400" value="3600" required></div>
               <div><label>兜底连续确认次数（1-60）</label><input id="tg-confirm" type="number" min="1" max="60" value="20" required></div>
+              <div style="display:flex;align-items:flex-end;padding-bottom:6px;">
+                <label style="margin:0;color:var(--text);cursor:pointer;"><input id="tg-cross-panel" type="checkbox"> 跨面板去重冷却（同客户端多面板不重复通知）</label>
+              </div>
             </div>
             <div class="hint">修改后会自动热重启 Bot 线程，保留 SQLite 中的分组订阅与冷却状态。</div>
             <div class="row" style="margin-top:12px;">
@@ -379,6 +382,7 @@
       document.getElementById("tg-users").value = (data.telegram.allowed_user_ids || []).join(",");
       document.getElementById("tg-cooldown").value = data.telegram.notification_cooldown_seconds ?? 3600;
       document.getElementById("tg-confirm").value = data.telegram.online_confirmation_samples ?? 20;
+      document.getElementById("tg-cross-panel").checked = !!data.telegram.cross_panel_cooldown;
       document.getElementById("ssh-tg-users").value = (data.ssh_telegram.allowed_user_ids || []).join(",");
     }
 
@@ -556,7 +560,8 @@
             token: document.getElementById("tg-token").value.trim(),
             user_ids: document.getElementById("tg-users").value.trim(),
             notification_cooldown_seconds: Number(document.getElementById("tg-cooldown").value),
-            online_confirmation_samples: Number(document.getElementById("tg-confirm").value)
+            online_confirmation_samples: Number(document.getElementById("tg-confirm").value),
+            cross_panel_cooldown: document.getElementById("tg-cross-panel").checked
           })
         });
         document.getElementById("tg-token").value = "";

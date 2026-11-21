@@ -59,6 +59,12 @@ TELEGRAM_ONLINE_FAST_CONFIRMATION_SAMPLES = 3
 TELEGRAM_ONLINE_FAST_CONFIRMATION_MIN_BYTES = 100 * 1024
 LOCAL_SOURCE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7"))
+PROBE_TARGET_HOSTS = frozenset({
+    "www.gstatic.com", "connectivitycheck.gstatic.com", "clients3.google.com",
+    "cp.cloudflare.com", "detectportal.firefox.com", "captive.apple.com",
+    "www.msftconnecttest.com", "www.msftncsi.com",
+})
+CLIENT_MUTE_SECONDS = 6 * 3600
 TIMEOUT = float(os.environ.get("XUI_API_TIMEOUT", "10"))
 SERVER_NAME = os.environ.get("SERVER_NAME", "").strip() or "unknown"
 GEOIP_CITY_DB = os.environ.get("GEOIP_CITY_DB", "/var/lib/gla/geoip/GeoLite2-City.mmdb")
@@ -203,9 +209,11 @@ def telegram_config(path=None):
         config.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS))
     confirmation_samples = validate_online_confirmation_samples(
         config.get("online_confirmation_samples", TELEGRAM_ONLINE_CONFIRMATION_SAMPLES))
+    cross_panel = bool(config.get("cross_panel_cooldown", False))
     return {**config, "allowed_user_ids": user_ids, "allowed_chat_ids": chat_ids,
             "notification_cooldown_seconds": cooldown,
             "online_confirmation_samples": confirmation_samples,
+            "cross_panel_cooldown": cross_panel,
             "token": read_token(token_file)}
 
 
@@ -282,10 +290,13 @@ class TelegramBot:
         self.db.execute("CREATE TABLE IF NOT EXISTS subscriptions (chat_id INTEGER, group_name TEXT, PRIMARY KEY(chat_id,group_name))")
         self.db.execute("CREATE TABLE IF NOT EXISTS online_notify_settings (chat_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1)")
         self.db.execute("CREATE TABLE IF NOT EXISTS notification_cooldowns (chat_id INTEGER, server TEXT, email TEXT, notified_at REAL NOT NULL, PRIMARY KEY(chat_id,server,email))")
-        self.db.execute("CREATE TABLE IF NOT EXISTS online_confirmations (server TEXT, email TEXT, last_sample_at REAL NOT NULL, consecutive_online INTEGER NOT NULL, start_traffic INTEGER, PRIMARY KEY(server,email))")
+        self.db.execute("CREATE TABLE IF NOT EXISTS client_mutes (chat_id INTEGER, server TEXT, email TEXT, until_at REAL NOT NULL, PRIMARY KEY(chat_id,server,email))")
+        self.db.execute("CREATE TABLE IF NOT EXISTS online_confirmations (server TEXT, email TEXT, last_sample_at REAL NOT NULL, consecutive_online INTEGER NOT NULL, start_traffic INTEGER, first_seen_at REAL, PRIMARY KEY(server,email))")
         confirmation_columns = {row[1] for row in self.db.execute("PRAGMA table_info(online_confirmations)")}
         if "start_traffic" not in confirmation_columns:
             self.db.execute("ALTER TABLE online_confirmations ADD COLUMN start_traffic INTEGER")
+        if "first_seen_at" not in confirmation_columns:
+            self.db.execute("ALTER TABLE online_confirmations ADD COLUMN first_seen_at REAL")
         self.db.execute("CREATE TABLE IF NOT EXISTS traffic_notify_settings (chat_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, notify_time TEXT NOT NULL DEFAULT '20:00')")
         self.db.execute("CREATE TABLE IF NOT EXISTS traffic_notify_groups (chat_id INTEGER, group_name TEXT, PRIMARY KEY(chat_id,group_name))")
         self.db.execute("CREATE TABLE IF NOT EXISTS traffic_notify_baselines (chat_id INTEGER, group_name TEXT, server TEXT, up INTEGER NOT NULL, down INTEGER NOT NULL, PRIMARY KEY(chat_id,group_name,server))")
@@ -298,10 +309,12 @@ class TelegramBot:
         self.pending_traffic_groups = {}
         self.pending_traffic_times = set()
         self.pending_traffic_views = {}
+        self.pending_notification_actions = {}
         self.notification_cooldown_seconds = validate_notification_cooldown(
             config.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS))
         self.online_confirmation_samples = validate_online_confirmation_samples(
             config.get("online_confirmation_samples", TELEGRAM_ONLINE_CONFIRMATION_SAMPLES))
+        self.cross_panel_cooldown = bool(config.get("cross_panel_cooldown", False))
 
     def snapshot(self):
         series = {}
@@ -660,6 +673,8 @@ class TelegramBot:
                        f"📍 归属地：{location}\n🏢 {network_label}：{network}")
             if ip_record.get("time"):
                 ip_text += f"\n🕒 IP 记录时间：{ip_record['time']}"
+        elif worker and worker.has_local_source_only(item["email"]):
+            ip_text = "🌐 最近记录 IP：暂无24小时内公网记录（来源为本机/内网转发）"
         else:
             ip_text = "🌐 最近记录 IP：暂无24小时内记录"
         inbounds = self.inbound_names_for_item(item)
@@ -669,26 +684,33 @@ class TelegramBot:
             inbound_text = inbounds[0] if inbounds else "未找到配置关联"
         recent_inbound = worker.last_inbound_for_client(item["email"]) if worker else None
         recent_inbound_line = f"\n🎯 最近命中入站：{recent_inbound}" if recent_inbound else ""
+        detail_lines = []
+        if not test and item.get("first_seen_at"):
+            first_dt = datetime.fromtimestamp(float(item["first_seen_at"]), timezone(timedelta(hours=8)))
+            detail_lines.append(f"⏱ 首次上线：{first_dt.strftime('%Y-%m-%d %H:%M:%S')}（UTC+8）")
+        if not test and item.get("delta_bytes"):
+            detail_lines.append(f"📊 确认期流量：{format_bytes(item['delta_bytes'])}")
+        detail_lines.append(f"🕒 检测时间：{self.report_time()}")
         title = "🧪 上线通知测试" if test else "🟢 客户端上线"
         status = "在线" if item.get("online") else "离线"
         suffix = f"\n\nℹ️ 测试样例，客户端当前状态：{status}。不会记录在线状态或通知冷却。" if test else ""
         return (f"{title}\n\n👥 分组：{item['group']}\n👤 客户端：{item['email']}\n"
                 f"🖥 面板：{item['server']}\n🔗 关联入站：{inbound_text}{recent_inbound_line}\n{ip_text}\n\n"
-                f"🕒 检测时间：{self.report_time()}{suffix}")
+                + "\n".join(detail_lines) + suffix)
 
-    def send_online_notification(self, chat_id, notification):
+    def send_online_notification(self, chat_id, notification, reply_markup=None):
         match = re.search(r"^🌐 最近记录 IP：([^\n]+)$", notification, re.MULTILINE)
         try:
             address = str(ipaddress.ip_address(match[1])) if match else None
         except ValueError:
             address = None
         if address is None:
-            self.send(chat_id, notification)
+            self.send(chat_id, notification, reply_markup=reply_markup)
             return
         # Telegram entity offsets count UTF-16 units, including emoji before the IP.
         entities = [{"type": "code", "offset": len(notification[:match.start(1)].encode("utf-16-le")) // 2,
                      "length": len(match[1].encode("utf-16-le")) // 2}]
-        self.send(chat_id, notification, entities=entities)
+        self.send(chat_id, notification, reply_markup=reply_markup, entities=entities)
 
     def send_online_notify_test(self, chat_id):
         series, servers_up = self.snapshot()
@@ -756,10 +778,11 @@ class TelegramBot:
                     "SELECT server,email,group_name,online FROM state")
             }
             existing_observations = {
-                (server, email): (float(last_sample_at), int(consecutive_online), start_traffic)
-                for server, email, last_sample_at, consecutive_online, start_traffic in self.db.execute(
-                    "SELECT server,email,last_sample_at,consecutive_online,start_traffic FROM online_confirmations")
+                (server, email): (float(last_sample_at), int(consecutive_online), start_traffic, first_seen_at)
+                for server, email, last_sample_at, consecutive_online, start_traffic, first_seen_at in self.db.execute(
+                    "SELECT server,email,last_sample_at,consecutive_online,start_traffic,first_seen_at FROM online_confirmations")
             }
+            worker_map = {worker.panel["name"]: worker for worker in self.workers}
             missing_keys = [
                 key for key in existing_states
                 if key[0] in servers_up and key not in current_keys
@@ -767,7 +790,7 @@ class TelegramBot:
             if missing_keys:
                 self.db.executemany("UPDATE state SET online=0 WHERE server=? AND email=?", missing_keys)
                 self.db.executemany(
-                    "UPDATE online_confirmations SET consecutive_online=0, start_traffic=NULL WHERE server=? AND email=?",
+                    "UPDATE online_confirmations SET consecutive_online=0, start_traffic=NULL, first_seen_at=NULL WHERE server=? AND email=?",
                     missing_keys)
             confirmation_updates = []
             state_updates = []
@@ -786,54 +809,67 @@ class TelegramBot:
                 online = item["online"] == 1
                 total_traffic = item["up"] + item["down"]
                 start_traffic = None
+                first_seen_at = None
                 target_samples = self.online_confirmation_samples
                 if baseline is None:
                     streak = target_samples if online else 0
+                    if online:
+                        first_seen_at = float(sample_at)
                 elif observation is None:
                     # Existing state from before confirmation support is treated
                     # as a baseline when it was already online.
                     if online and old and old[1] == 1:
                         streak = target_samples
+                        first_seen_at = float(sample_at)
                     elif online:
                         streak = 1
                         start_traffic = total_traffic
+                        first_seen_at = float(sample_at)
                     else:
                         streak = 0
                 elif online:
                     prev_streak = observation[1]
                     prev_start_traffic = observation[2]
+                    prev_first_seen = observation[3]
                     if prev_streak == 0:
                         streak = 1
                         start_traffic = total_traffic
+                        first_seen_at = float(sample_at)
                     else:
                         streak = min(prev_streak + 1, target_samples)
+                        first_seen_at = float(prev_first_seen) if prev_first_seen is not None else float(sample_at)
                         if prev_start_traffic is not None and total_traffic < prev_start_traffic:
                             start_traffic = total_traffic
                         else:
                             start_traffic = prev_start_traffic
+                    delta_bytes = (total_traffic - start_traffic) if start_traffic is not None else 0
+                    worker = worker_map.get(key[0])
+                    has_real_activity = (
+                        worker is not None
+                        and worker.has_recent_real_activity(item["email"], since_ts=first_seen_at)
+                    )
                     fast_confirmed = (
                         prev_streak < target_samples
                         and streak >= TELEGRAM_ONLINE_FAST_CONFIRMATION_SAMPLES
-                        and start_traffic is not None
-                        and (total_traffic - start_traffic) >= TELEGRAM_ONLINE_FAST_CONFIRMATION_MIN_BYTES
+                        and (delta_bytes >= TELEGRAM_ONLINE_FAST_CONFIRMATION_MIN_BYTES or has_real_activity)
                     )
                     if prev_streak == target_samples - 1 or fast_confirmed:
                         streak = target_samples
-                        changes.append((key[0], item["email"], item["group"], "online"))
+                        changes.append((key[0], item["email"], item["group"], first_seen_at, max(0, delta_bytes)))
                 else:
                     streak = 0
-                confirmation_updates.append((key[0], item["email"], sample_at, streak, start_traffic))
+                confirmation_updates.append((key[0], item["email"], sample_at, streak, start_traffic, first_seen_at))
                 state_updates.append((*key, item["group"], item["online"]))
             if confirmation_updates:
                 self.db.executemany(
-                    "INSERT OR REPLACE INTO online_confirmations(server,email,last_sample_at,consecutive_online,start_traffic) VALUES (?,?,?,?,?)",
+                    "INSERT OR REPLACE INTO online_confirmations(server,email,last_sample_at,consecutive_online,start_traffic,first_seen_at) VALUES (?,?,?,?,?,?)",
                     confirmation_updates)
             if state_updates:
                 self.db.executemany("INSERT OR REPLACE INTO state VALUES (?,?,?,?)", state_updates)
             if baseline is None:
                 self.db.execute("INSERT INTO metadata VALUES ('baseline','1')")
                 changes.clear()
-        for server, email, group, _ in changes:
+        for server, email, group, first_seen_at, delta_bytes in changes:
             chats = [row[0] for row in self.db.execute(
                 "SELECT subscriptions.chat_id FROM subscriptions "
                 "LEFT JOIN online_notify_settings ON online_notify_settings.chat_id=subscriptions.chat_id "
@@ -841,20 +877,39 @@ class TelegramBot:
             eligible_chats = []
             for chat_id in chats:
                 now = time.time()
-                last = self.db.execute(
-                    "SELECT notified_at FROM notification_cooldowns WHERE chat_id=? AND server=? AND email=?",
+                muted = self.db.execute(
+                    "SELECT until_at FROM client_mutes WHERE chat_id=? AND server=? AND email=?",
                     (chat_id, server, email)).fetchone()
-                if (last is not None
+                if muted is not None and now < float(muted[0]):
+                    continue
+                if self.cross_panel_cooldown:
+                    last = self.db.execute(
+                        "SELECT MAX(notified_at) FROM notification_cooldowns WHERE chat_id=? AND email=?",
+                        (chat_id, email)).fetchone()
+                else:
+                    last = self.db.execute(
+                        "SELECT notified_at FROM notification_cooldowns WHERE chat_id=? AND server=? AND email=?",
+                        (chat_id, server, email)).fetchone()
+                if (last is not None and last[0] is not None
                         and now - float(last[0]) < self.notification_cooldown_seconds):
                     continue
                 eligible_chats.append(chat_id)
             if not eligible_chats:
                 continue
-            item = {"server": server, "email": email, "group": group}
+            item = {"server": server, "email": email, "group": group,
+                    "first_seen_at": first_seen_at, "delta_bytes": delta_bytes}
             notification = self.online_notification_text(item)
             for chat_id in eligible_chats:
+                action_token = hashlib.sha256(f"{chat_id}\n{server}\n{email}".encode()).hexdigest()[:16]
+                self.pending_notification_actions[(chat_id, action_token)] = (server, email, group)
+                while len(self.pending_notification_actions) > 512:
+                    self.pending_notification_actions.pop(next(iter(self.pending_notification_actions)))
+                keyboard = {"inline_keyboard": [[
+                    {"text": "📈 累计流量", "callback_data": f"ntf:traffic:{action_token}"},
+                    {"text": "🔇 静默 6 小时", "callback_data": f"ntf:mute:{action_token}"},
+                ]]}
                 try:
-                    self.send_online_notification(chat_id, notification)
+                    self.send_online_notification(chat_id, notification, reply_markup=keyboard)
                 except ERRORS as error:
                     print(f"Telegram 通知发送失败 ({error_kind(error)})", file=sys.stderr, flush=True)
                 else:
@@ -867,6 +922,7 @@ class TelegramBot:
                         self.db.execute(
                             "DELETE FROM notification_cooldowns WHERE notified_at < ?",
                             (prune_before,))
+                        self.db.execute("DELETE FROM client_mutes WHERE until_at < ?", (recorded_at,))
 
     def handle_message(self, message):
         chat_id = message.get("chat", {}).get("id")
@@ -1098,6 +1154,32 @@ class TelegramBot:
         if data in menu_commands:
             telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
             self.handle_message({"chat": {"id": chat_id}, "from": {"id": user_id}, "text": menu_commands[data]})
+            return
+        match = re.fullmatch(r"ntf:(traffic|mute):([0-9a-f]{16})", data)
+        if match:
+            action, token = match.groups()
+            target = self.pending_notification_actions.get((chat_id, token))
+            if not target:
+                telegram_request(self.config["token"], "answerCallbackQuery", {
+                    "callback_query_id": callback_id, "text": "操作已过期，请使用 /online 或 /traffic 查询。"})
+                return
+            server, email, group = target
+            if action == "mute":
+                until_at = time.time() + CLIENT_MUTE_SECONDS
+                with self.db:
+                    self.db.execute("INSERT OR REPLACE INTO client_mutes VALUES (?,?,?,?)",
+                                    (chat_id, server, email, until_at))
+                telegram_request(self.config["token"], "answerCallbackQuery", {
+                    "callback_query_id": callback_id, "text": f"已静默 {email} 6 小时"})
+                self.send(chat_id, f"🔇 已静默客户端通知 6 小时：{email}（面板：{server}）")
+                return
+            telegram_request(self.config["token"], "answerCallbackQuery", {"callback_query_id": callback_id})
+            series, servers_up = self.snapshot()
+            item = series.get((server, email))
+            if not item or server not in servers_up:
+                self.send(chat_id, f"📈 客户端累计流量\n\n👤 客户端：{email}\n🖥 面板：{server}\n⚠️ 面板当前不可用或客户端已移除")
+                return
+            self.send(chat_id, f"📈 客户端累计流量\n\n{self.online_client_block(item)}\n\n🕒 查询时间：{self.report_time()}")
             return
         match = re.fullmatch(r"trafficview:(groups|panels):(all|[0-9a-f]{16})", data)
         if match:
@@ -1411,6 +1493,18 @@ def recent_ip_record(record, now=None, max_age=IP_RECORD_MAX_AGE_SECONDS):
     age = (current - timestamp).total_seconds()
     # Remote panel clocks may run slightly ahead of the central server.
     return record if -IP_RECORD_MAX_FUTURE_SKEW_SECONDS <= age <= max_age else None
+
+
+def target_host_from_address(value):
+    """Extract normalized target hostname/IP from Xray ToAddress."""
+    text = str(value or "").strip().lower()
+    if text.startswith(("tcp:", "udp:")):
+        text = text[4:]
+    if text.startswith("[") and "]" in text:
+        return text[1:text.index("]")]
+    if text.count(":") == 1:
+        return text.rsplit(":", 1)[0]
+    return text
 
 
 def source_ip_from_address(value):
@@ -1856,7 +1950,7 @@ class PanelWorker:
             return list(self.client_inbounds.get(email, []))
 
     def record_access_entries(self, entries):
-        """Remember each client's newest real source IP and inbound from access logs."""
+        """Remember each client's newest real source IP, inbound and non-probe activity."""
         if not isinstance(entries, list):
             return
         updates = {}
@@ -1870,6 +1964,7 @@ class PanelWorker:
                     continue
                 seconds = timestamp_ns(entry.get("DateTime", "")) / 1e9
                 address = source_ip_from_address(entry.get("FromAddress"))
+                target_host = target_host_from_address(entry.get("ToAddress"))
             except (ValueError, TypeError, AttributeError):
                 continue
             # Loopback, private and unspecified sources (e.g. a local fallback or
@@ -1878,22 +1973,50 @@ class PanelWorker:
                 address.is_loopback or address.is_unspecified or address.is_link_local
                 or address.is_multicast or any(address in net for net in LOCAL_SOURCE_NETWORKS
                                                if net.version == address.version)))
+            is_real_target = bool(target_host) and target_host not in PROBE_TARGET_HOSTS
             current = updates.setdefault(email, {})
             if inbound and seconds >= current.get("inbound_at", float("-inf")):
                 current.update(inbound=inbound, inbound_at=seconds)
             if usable and seconds >= current.get("ip_at", float("-inf")):
                 current.update(ip=str(address), ip_at=seconds)
+            elif address is not None and not usable and seconds >= current.get("local_ip_at", float("-inf")):
+                current["local_ip_at"] = seconds
+            if is_real_target and seconds >= current.get("real_activity_at", float("-inf")):
+                current["real_activity_at"] = seconds
         with self.lock:
             for email, new in updates.items():
                 old = self.access_cache.setdefault(email, {})
                 if "ip" in new and new["ip_at"] >= old.get("ip_at", float("-inf")):
                     old.update(ip=new["ip"], ip_at=new["ip_at"])
+                if "local_ip_at" in new and new["local_ip_at"] >= old.get("local_ip_at", float("-inf")):
+                    old["local_ip_at"] = new["local_ip_at"]
                 if "inbound" in new and new["inbound_at"] >= old.get("inbound_at", float("-inf")):
                     old.update(inbound=new["inbound"], inbound_at=new["inbound_at"])
+                if "real_activity_at" in new and new["real_activity_at"] >= old.get("real_activity_at", float("-inf")):
+                    old["real_activity_at"] = new["real_activity_at"]
             cutoff = time.time() - IP_RECORD_MAX_AGE_SECONDS
             for email in [e for e, v in self.access_cache.items()
-                          if max(v.get("ip_at", 0), v.get("inbound_at", 0)) < cutoff]:
+                          if max(v.get("ip_at", 0), v.get("local_ip_at", 0),
+                                 v.get("inbound_at", 0), v.get("real_activity_at", 0)) < cutoff]:
                 del self.access_cache[email]
+
+    def has_recent_real_activity(self, email, since_ts=None):
+        with self.lock:
+            activity_at = self.access_cache.get(email, {}).get("real_activity_at")
+        if activity_at is None:
+            return False
+        if since_ts is not None:
+            return activity_at >= float(since_ts) - 30
+        return time.time() - activity_at <= 600
+
+    def has_local_source_only(self, email):
+        with self.lock:
+            cached = self.access_cache.get(email, {})
+            local_at = cached.get("local_ip_at")
+            ip_at = cached.get("ip_at")
+        now = time.time()
+        has_recent_public = ip_at is not None and (now - ip_at) <= IP_RECORD_MAX_AGE_SECONDS
+        return not has_recent_public and local_at is not None and (now - local_at) <= IP_RECORD_MAX_AGE_SECONDS
 
     def last_inbound_for_client(self, email):
         with self.lock:
@@ -2656,6 +2779,8 @@ def telegram_cli(argv, config_file=None, token_filename="telegram-bot.token",
     if isinstance(previous, dict) and "online_confirmation_samples" in previous:
         payload["online_confirmation_samples"] = validate_online_confirmation_samples(
             previous["online_confirmation_samples"])
+    if isinstance(previous, dict) and "cross_panel_cooldown" in previous:
+        payload["cross_panel_cooldown"] = bool(previous["cross_panel_cooldown"])
     atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
@@ -2858,6 +2983,7 @@ def admin_overview_payload(admin_config=None):
                 tg_raw.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS)),
             "online_confirmation_samples": validate_online_confirmation_samples(
                 tg_raw.get("online_confirmation_samples", TELEGRAM_ONLINE_CONFIRMATION_SAMPLES)),
+            "cross_panel_cooldown": bool(tg_raw.get("cross_panel_cooldown", False)),
         },
         "ssh_telegram": {
             "configured": Path(SSH_TELEGRAM_CONFIG_FILE).is_file(),
@@ -2948,6 +3074,7 @@ def apply_admin_action(method, path, body, admin_config):
         saved = json.loads(tg_path.read_text(encoding="utf-8"))
         saved["notification_cooldown_seconds"] = cooldown
         saved["online_confirmation_samples"] = confirm
+        saved["cross_panel_cooldown"] = bool(body.get("cross_panel_cooldown", False))
         atomic_write(tg_path, json.dumps(saved, ensure_ascii=False, indent=2) + "\n")
         if RUNTIME is not None:
             RUNTIME.reload_telegram()
