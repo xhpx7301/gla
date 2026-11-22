@@ -723,9 +723,6 @@
     document.querySelectorAll("[data-close]").forEach(btn => {
       btn.onclick = () => closeModal(btn.dataset.close);
     });
-    document.querySelectorAll(".modal-backdrop").forEach(backdrop => {
-      backdrop.onclick = e => { if (e.target === backdrop) closeModal(backdrop.id); };
-    });
     document.addEventListener("keydown", e => {
       if (e.key === "Escape") {
         document.querySelectorAll(".modal-backdrop:not(.hidden)").forEach(m => m.classList.add("hidden"));
