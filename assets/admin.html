@@ -280,7 +280,9 @@
     .modal-head h2 { font-size: 16px; margin: 0; }
     .modal-close {
       background: transparent; color: var(--muted); box-shadow: none;
-      padding: 4px 10px; font-size: 20px; line-height: 1; border-radius: 8px;
+      width: 36px; height: 36px; padding: 0;
+      display: inline-grid; place-items: center;
+      font-size: 26px; font-weight: 500; line-height: 1; border-radius: 10px;
     }
     .modal-close:hover { background: rgba(148,163,184,0.14); color: var(--text); box-shadow: none; }
     .modal-tabs {
@@ -722,9 +724,6 @@
 
     document.querySelectorAll("[data-close]").forEach(btn => {
       btn.onclick = () => closeModal(btn.dataset.close);
-    });
-    document.querySelectorAll(".modal-backdrop").forEach(backdrop => {
-      backdrop.ondblclick = e => { if (e.target === backdrop) closeModal(backdrop.id); };
     });
     document.addEventListener("keydown", e => {
       if (e.key === "Escape") {
