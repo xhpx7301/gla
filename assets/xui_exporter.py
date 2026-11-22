@@ -55,6 +55,7 @@ IP_RECORD_MAX_AGE_SECONDS = 86400
 IP_RECORD_MAX_FUTURE_SKEW_SECONDS = 300
 TELEGRAM_ONLINE_CONFIRMATION_SAMPLES = 20
 MAX_ONLINE_CONFIRMATION_SAMPLES = 60
+TELEGRAM_ONLINE_CONFIRMATION_MIN_BYTES = 50 * 1024
 TELEGRAM_ONLINE_FAST_CONFIRMATION_SAMPLES = 6
 TELEGRAM_ONLINE_FAST_CONFIRMATION_MIN_BYTES = 1024 * 1024
 LOCAL_SOURCE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in (
@@ -226,6 +227,8 @@ def telegram_config(path=None):
         config.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS))
     confirmation_samples = validate_online_confirmation_samples(
         config.get("online_confirmation_samples", TELEGRAM_ONLINE_CONFIRMATION_SAMPLES))
+    confirmation_min_bytes = validate_fast_confirmation_min_bytes(
+        config.get("online_confirmation_min_bytes", TELEGRAM_ONLINE_CONFIRMATION_MIN_BYTES))
     fast_samples = validate_fast_confirmation_samples(
         config.get("fast_confirmation_samples", TELEGRAM_ONLINE_FAST_CONFIRMATION_SAMPLES))
     fast_min_bytes = validate_fast_confirmation_min_bytes(
@@ -234,6 +237,7 @@ def telegram_config(path=None):
     return {**config, "allowed_user_ids": user_ids, "allowed_chat_ids": chat_ids,
             "notification_cooldown_seconds": cooldown,
             "online_confirmation_samples": confirmation_samples,
+            "online_confirmation_min_bytes": confirmation_min_bytes,
             "fast_confirmation_samples": fast_samples,
             "fast_confirmation_min_bytes": fast_min_bytes,
             "cross_panel_cooldown": cross_panel,
@@ -335,6 +339,8 @@ class TelegramBot:
             config.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS))
         self.online_confirmation_samples = validate_online_confirmation_samples(
             config.get("online_confirmation_samples", TELEGRAM_ONLINE_CONFIRMATION_SAMPLES))
+        self.online_confirmation_min_bytes = validate_fast_confirmation_min_bytes(
+            config.get("online_confirmation_min_bytes", TELEGRAM_ONLINE_CONFIRMATION_MIN_BYTES))
         self.fast_confirmation_samples = validate_fast_confirmation_samples(
             config.get("fast_confirmation_samples", TELEGRAM_ONLINE_FAST_CONFIRMATION_SAMPLES))
         self.fast_confirmation_min_bytes = validate_fast_confirmation_min_bytes(
@@ -711,7 +717,7 @@ class TelegramBot:
         if not test and item.get("first_seen_at"):
             first_dt = datetime.fromtimestamp(float(item["first_seen_at"]), timezone(timedelta(hours=8)))
             detail_lines.append(f"⏱ 首次上线：{first_dt.strftime('%Y-%m-%d %H:%M:%S')}（UTC+8）")
-        if not test and item.get("delta_bytes"):
+        if not test and item.get("delta_bytes") is not None:
             detail_lines.append(f"📊 确认期流量：{format_bytes(item['delta_bytes'])}")
         detail_lines.append(f"🕒 检测时间：{self.report_time()}")
         title = "🧪 上线通知测试" if test else "🟢 客户端上线"
@@ -872,9 +878,16 @@ class TelegramBot:
                         and start_traffic is not None
                         and delta_bytes >= self.fast_confirmation_min_bytes
                     )
-                    if prev_streak == target_samples - 1 or fast_confirmed:
+                    fallback_ready = (
+                        prev_streak == target_samples - 1
+                        and (start_traffic is None or delta_bytes >= self.online_confirmation_min_bytes)
+                    )
+                    if fallback_ready or fast_confirmed:
                         streak = target_samples
                         changes.append((key[0], item["email"], item["group"], first_seen_at, max(0, delta_bytes)))
+                    elif prev_streak < target_samples and streak >= target_samples:
+                        # Hold at target_samples - 1 until minimum traffic is observed.
+                        streak = target_samples - 1
                 else:
                     streak = 0
                 confirmation_updates.append((key[0], item["email"], sample_at, streak, start_traffic, first_seen_at))
@@ -2766,6 +2779,9 @@ def telegram_cli(argv, config_file=None, token_filename="telegram-bot.token",
     if isinstance(previous, dict) and "online_confirmation_samples" in previous:
         payload["online_confirmation_samples"] = validate_online_confirmation_samples(
             previous["online_confirmation_samples"])
+    if isinstance(previous, dict) and "online_confirmation_min_bytes" in previous:
+        payload["online_confirmation_min_bytes"] = validate_fast_confirmation_min_bytes(
+            previous["online_confirmation_min_bytes"])
     if isinstance(previous, dict) and "fast_confirmation_samples" in previous:
         payload["fast_confirmation_samples"] = validate_fast_confirmation_samples(
             previous["fast_confirmation_samples"])
@@ -3017,6 +3033,8 @@ def admin_overview_payload(admin_config=None):
                 tg_raw.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS)),
             "online_confirmation_samples": validate_online_confirmation_samples(
                 tg_raw.get("online_confirmation_samples", TELEGRAM_ONLINE_CONFIRMATION_SAMPLES)),
+            "online_confirmation_min_bytes": validate_fast_confirmation_min_bytes(
+                tg_raw.get("online_confirmation_min_bytes", TELEGRAM_ONLINE_CONFIRMATION_MIN_BYTES)),
             "fast_confirmation_samples": validate_fast_confirmation_samples(
                 tg_raw.get("fast_confirmation_samples", TELEGRAM_ONLINE_FAST_CONFIRMATION_SAMPLES)),
             "fast_confirmation_min_bytes": validate_fast_confirmation_min_bytes(
@@ -3110,6 +3128,7 @@ def apply_admin_action(method, path, body, admin_config):
             token = read_token(tg_path.parent / "telegram-bot.token")
         cooldown = validate_notification_cooldown(int(body.get("notification_cooldown_seconds", DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS)))
         confirm = validate_online_confirmation_samples(int(body.get("online_confirmation_samples", TELEGRAM_ONLINE_CONFIRMATION_SAMPLES)))
+        confirm_min_bytes = validate_fast_confirmation_min_bytes(int(body.get("online_confirmation_min_bytes", TELEGRAM_ONLINE_CONFIRMATION_MIN_BYTES)))
         fast_samples = validate_fast_confirmation_samples(int(body.get("fast_confirmation_samples", TELEGRAM_ONLINE_FAST_CONFIRMATION_SAMPLES)))
         fast_min_bytes = validate_fast_confirmation_min_bytes(int(body.get("fast_confirmation_min_bytes", TELEGRAM_ONLINE_FAST_CONFIRMATION_MIN_BYTES)))
         old_stdin = sys.stdin
@@ -3121,6 +3140,7 @@ def apply_admin_action(method, path, body, admin_config):
         saved = json.loads(tg_path.read_text(encoding="utf-8"))
         saved["notification_cooldown_seconds"] = cooldown
         saved["online_confirmation_samples"] = confirm
+        saved["online_confirmation_min_bytes"] = confirm_min_bytes
         saved["fast_confirmation_samples"] = fast_samples
         saved["fast_confirmation_min_bytes"] = fast_min_bytes
         saved["cross_panel_cooldown"] = bool(body.get("cross_panel_cooldown", False))

@@ -262,7 +262,8 @@ class ExporterTest(unittest.TestCase):
                     "ip": "203.0.113.1", "time": recent_time}), \
                 mock.patch.object(EXPORTER, "ip_attribution", return_value=("广东深圳", "中国电信")):
             bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42],
-                                        "notification_cooldown_seconds": 3600}, [panel], directory)
+                                        "notification_cooldown_seconds": 3600,
+                                        "online_confirmation_min_bytes": 0}, [panel], directory)
             try:
                 with bot.db:
                     bot.db.execute("INSERT INTO subscriptions VALUES (?,?)", (420, "shared"))
@@ -673,7 +674,8 @@ class ExporterTest(unittest.TestCase):
             EXPORTER.metric("xui_client_traffic_bytes_total", 2048, server="node-a", email="alice", group="shared", direction="downlink"),
             EXPORTER.metric("xui_metrics_last_success_timestamp_seconds", 1000, server="node-a"),
         ]
-        config = {"token": "bot-token", "allowed_user_ids": [42], "allowed_chat_ids": []}
+        config = {"token": "bot-token", "allowed_user_ids": [42], "allowed_chat_ids": [],
+                  "online_confirmation_min_bytes": 0}
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
             bot = EXPORTER.TelegramBot(config, [worker], directory)
             try:
@@ -950,7 +952,8 @@ class ExporterTest(unittest.TestCase):
     def test_online_notification_toggle_persists_and_only_pauses_selected_chat(self):
         worker = EXPORTER.PanelWorker({"name": "node-a"})
         clients = [{"email": "alice", "group": "shared", "traffic": {}}]
-        config = {"token": "bot-token", "allowed_user_ids": [42], "notification_cooldown_seconds": 0}
+        config = {"token": "bot-token", "allowed_user_ids": [42], "notification_cooldown_seconds": 0,
+                  "online_confirmation_min_bytes": 0}
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
             bot = EXPORTER.TelegramBot(config, [worker], directory)
             try:
@@ -990,7 +993,7 @@ class ExporterTest(unittest.TestCase):
                 bot.db.close()
 
     def test_notification_group_views_and_my_subscriptions_are_separate(self):
-        config = {"token": "bot-token", "allowed_user_ids": [42]}
+        config = {"token": "bot-token", "allowed_user_ids": [42], "online_confirmation_min_bytes": 0}
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
             bot = EXPORTER.TelegramBot(config, [], directory)
             try:
@@ -1081,7 +1084,7 @@ class ExporterTest(unittest.TestCase):
 
     def test_changed_traffic_time_rearms_today_and_survives_restart(self):
         worker = EXPORTER.PanelWorker({"name": "node-a"})
-        config = {"token": "bot-token", "allowed_user_ids": [42]}
+        config = {"token": "bot-token", "allowed_user_ids": [42], "online_confirmation_min_bytes": 0}
         message = {"chat": {"id": 420}, "from": {"id": 42}}
         report_time = EXPORTER.datetime(2026, 10, 14, 20, 0, tzinfo=EXPORTER.timezone(
             EXPORTER.timedelta(hours=8))).timestamp()
@@ -1205,7 +1208,7 @@ class ExporterTest(unittest.TestCase):
                 bot.db.close()
 
     def test_traffic_panel_option_upgrades_old_database_and_persists_per_chat(self):
-        config = {"token": "bot-token", "allowed_user_ids": [42]}
+        config = {"token": "bot-token", "allowed_user_ids": [42], "online_confirmation_min_bytes": 0}
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(EXPORTER, "telegram_request") as request:
             # An existing installation has no table for the new presentation option.
             with EXPORTER.sqlite3.connect(str(pathlib.Path(directory) / "telegram.sqlite")) as legacy:
@@ -1356,7 +1359,7 @@ class ExporterTest(unittest.TestCase):
         panel = EXPORTER.PanelWorker({"name": "node-a"})
         emails = [f"client-{index}" for index in range(6)]
         clients = [{"email": email, "group": "shared", "traffic": {}} for email in emails]
-        config = {"token": "bot-token", "allowed_user_ids": [42]}
+        config = {"token": "bot-token", "allowed_user_ids": [42], "online_confirmation_min_bytes": 0}
         with tempfile.TemporaryDirectory() as directory, \
                 mock.patch.object(EXPORTER, "telegram_request") as request:
             bot = EXPORTER.TelegramBot(config, [panel], directory)
@@ -1410,7 +1413,8 @@ class ExporterTest(unittest.TestCase):
         clients = [{"email": "alice", "group": "shared", "traffic": {}}]
         with tempfile.TemporaryDirectory() as directory, \
                 mock.patch.object(EXPORTER, "telegram_request") as request:
-            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, panels, directory)
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42],
+                                        "online_confirmation_min_bytes": 0}, panels, directory)
             try:
                 # Simulate upgrading a database from before online confirmation support.
                 with bot.db:
@@ -1443,7 +1447,8 @@ class ExporterTest(unittest.TestCase):
             {"email": "alice", "group": "shared", "traffic": {}},
             {"email": "bob", "group": "shared", "traffic": {}},
         ])
-        config = {"token": "bot-token", "allowed_user_ids": [42], "notification_cooldown_seconds": 3600}
+        config = {"token": "bot-token", "allowed_user_ids": [42], "notification_cooldown_seconds": 3600,
+                  "online_confirmation_min_bytes": 0}
         with tempfile.TemporaryDirectory() as directory, \
                 mock.patch.object(EXPORTER, "telegram_request") as request, \
                 mock.patch.object(EXPORTER, "time") as clock, \
@@ -1927,6 +1932,7 @@ class ExporterTest(unittest.TestCase):
             bot = EXPORTER.TelegramBot({
                 "token": "bot-token", "allowed_user_ids": [42],
                 "notification_cooldown_seconds": 3600, "cross_panel_cooldown": True,
+                "online_confirmation_min_bytes": 0,
             }, panels, directory)
             try:
                 with bot.db:
@@ -1947,6 +1953,39 @@ class ExporterTest(unittest.TestCase):
                 for idx in range(20):
                     set_online(2000 + idx * 30, False, True)
                 self.assertEqual(request.call_count, 1)
+            finally:
+                bot.db.close()
+
+    def test_fallback_confirmation_requires_minimum_traffic_and_shows_zero_bytes(self):
+        panel = EXPORTER.PanelWorker({"name": "node-a"})
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(EXPORTER, "telegram_request") as request, \
+                mock.patch.object(EXPORTER.TelegramBot, "report_time", return_value="t"):
+            bot = EXPORTER.TelegramBot({"token": "bot-token", "allowed_user_ids": [42]}, [panel], directory)
+            try:
+                with bot.db:
+                    bot.db.execute("INSERT INTO subscriptions VALUES (420,'shared')")
+                def sample(idx, online, traffic):
+                    with mock.patch.object(EXPORTER.time, "time", return_value=1000 + idx * 30):
+                        panel.metrics = EXPORTER.render_metrics(
+                            "node-a", [], ["alice"] if online else [],
+                            [{"email": "alice", "group": "shared", "traffic": {"up": traffic, "down": 0}}])
+                    bot.process_online()
+                sample(0, False, 0)
+                sample(1, False, 0)
+                # 25 samples with only 4 KiB (< 50 KiB default): still suppressed
+                for idx in range(2, 27):
+                    sample(idx, True, 4 * 1024)
+                self.assertEqual(request.call_count, 0)
+                # Once traffic reaches 60 KiB (>= 50 KiB), fallback confirms immediately
+                sample(27, True, 60 * 1024)
+                self.assertEqual(request.call_count, 1)
+                self.assertIn("确认期流量：56.00 KiB", request.call_args.args[2]["text"])
+                # Zero-byte delta line is shown explicitly when min_bytes=0
+                text_zero = bot.online_notification_text({
+                    "server": "node-a", "email": "alice", "group": "shared",
+                    "first_seen_at": 1000, "delta_bytes": 0})
+                self.assertIn("确认期流量：0 B", text_zero)
             finally:
                 bot.db.close()
 

@@ -517,6 +517,7 @@
               <div><label>快速确认采样次数（1-60，默认 6）</label><input id="tg-fast-samples" type="number" min="1" max="60" value="6" required></div>
               <div><label>快速确认流量阈值（KiB，默认 1024）</label><input id="tg-fast-kib" type="number" min="0" max="102400" value="1024" required></div>
               <div><label>兜底连续确认次数（1-60）</label><input id="tg-confirm" type="number" min="1" max="60" value="20" required></div>
+              <div><label>兜底确认最低流量（KiB，默认 50）</label><input id="tg-confirm-kib" type="number" min="0" max="102400" value="50" required></div>
               <div style="display:flex;align-items:flex-end;padding-bottom:8px;">
                 <label class="check-label"><input id="tg-cross-panel" type="checkbox"> 跨面板去重冷却（同客户端多面板不重复通知）</label>
               </div>
@@ -867,6 +868,7 @@
       document.getElementById("tg-fast-samples").value = data.telegram.fast_confirmation_samples ?? 6;
       document.getElementById("tg-fast-kib").value = Math.round((data.telegram.fast_confirmation_min_bytes ?? 1048576) / 1024);
       document.getElementById("tg-confirm").value = data.telegram.online_confirmation_samples ?? 20;
+      document.getElementById("tg-confirm-kib").value = Math.round((data.telegram.online_confirmation_min_bytes ?? 51200) / 1024);
       document.getElementById("tg-cross-panel").checked = !!data.telegram.cross_panel_cooldown;
       document.getElementById("ssh-tg-users").value = (data.ssh_telegram.allowed_user_ids || []).join(",");
     }
@@ -1167,6 +1169,7 @@
             fast_confirmation_samples: Number(document.getElementById("tg-fast-samples").value),
             fast_confirmation_min_bytes: Number(document.getElementById("tg-fast-kib").value) * 1024,
             online_confirmation_samples: Number(document.getElementById("tg-confirm").value),
+            online_confirmation_min_bytes: Number(document.getElementById("tg-confirm-kib").value) * 1024,
             cross_panel_cooldown: document.getElementById("tg-cross-panel").checked
           })
         });
