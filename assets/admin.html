@@ -11,7 +11,8 @@
                  radial-gradient(circle at 52% -5%, rgba(56, 189, 248, 0.15), transparent 42%),
                  radial-gradient(circle at 88% 8%, rgba(168, 85, 247, 0.16), transparent 40%),
                  radial-gradient(circle at 80% 90%, rgba(245, 158, 11, 0.08), transparent 42%);
-      --surface: rgba(17, 24, 39, 0.88);
+      --surface: rgba(17, 24, 39, 0.90);
+      --surface-solid: #111827;
       --surface-2: #1a2438;
       --input-bg: #0a101d;
       --border: rgba(148, 163, 184, 0.16);
@@ -40,7 +41,8 @@
       --bg-glow: radial-gradient(circle at 12% 0%, rgba(16, 185, 129, 0.12), transparent 42%),
                  radial-gradient(circle at 55% 0%, rgba(14, 165, 233, 0.14), transparent 45%),
                  radial-gradient(circle at 88% 10%, rgba(139, 92, 246, 0.12), transparent 42%);
-      --surface: rgba(255, 255, 255, 0.92);
+      --surface: rgba(255, 255, 255, 0.94);
+      --surface-solid: #ffffff;
       --surface-2: #e2e8f0;
       --input-bg: #ffffff;
       --border: rgba(15, 23, 42, 0.10);
@@ -48,7 +50,7 @@
       --text: #0f172a;
       --text-soft: #334155;
       --muted: #64748b;
-      --shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
+      --shadow: 0 10px 28px rgba(15, 23, 42, 0.10);
     }
     * { box-sizing: border-box; }
     html, body { min-height: 100%; }
@@ -76,7 +78,7 @@
       border-radius: var(--radius);
       box-shadow: var(--shadow);
     }
-    .topbar::before, .login-box::before {
+    .topbar::before, .login-box::before, .modal::before {
       content: ""; position: absolute; inset: 0 0 auto 0; height: 3px;
       background: linear-gradient(90deg, #10b981, #38bdf8, #8b5cf6, #f59e0b);
     }
@@ -113,25 +115,19 @@
       transition: transform 0.15s ease, border-color 0.15s ease;
     }
     .kpi-card:hover { transform: translateY(-2px); border-color: var(--border-strong); }
-    .kpi-card::after {
-      content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
-    }
+    .kpi-card::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; }
     .kpi-card.kpi-panels { background-image: linear-gradient(135deg, rgba(16,185,129,0.10), transparent 60%); }
     .kpi-card.kpi-panels::after { background: linear-gradient(180deg, #10b981, #34d399); }
     .kpi-card.kpi-panels .kpi-value { color: var(--emerald); }
-
     .kpi-card.kpi-ssh { background-image: linear-gradient(135deg, rgba(139,92,246,0.12), transparent 60%); }
     .kpi-card.kpi-ssh::after { background: linear-gradient(180deg, #6366f1, #a78bfa); }
     .kpi-card.kpi-ssh .kpi-value { color: var(--violet); }
-
     .kpi-card.kpi-tg { background-image: linear-gradient(135deg, rgba(56,189,248,0.12), transparent 60%); }
     .kpi-card.kpi-tg::after { background: linear-gradient(180deg, #0ea5e9, #38bdf8); }
     .kpi-card.kpi-tg .kpi-value { color: var(--accent); }
-
     .kpi-card.kpi-ssh-tg { background-image: linear-gradient(135deg, rgba(245,158,11,0.12), transparent 60%); }
     .kpi-card.kpi-ssh-tg::after { background: linear-gradient(180deg, #f59e0b, #fb923c); }
     .kpi-card.kpi-ssh-tg .kpi-value { color: var(--amber); }
-
     .kpi-label { font-size: 12px; color: var(--muted); font-weight: 600; letter-spacing: 0.02em; }
     .kpi-value { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; display: flex; align-items: center; gap: 8px; }
     .kpi-sub { font-size: 12px; color: var(--muted); }
@@ -153,7 +149,7 @@
     .tab {
       background: transparent; color: var(--muted); border: 1px solid transparent;
       padding: 8px 16px; border-radius: 9px; cursor: pointer; font-size: 13.5px; font-weight: 500;
-      transition: all 0.16s ease;
+      box-shadow: none; transition: all 0.16s ease;
     }
     .tab:hover { color: var(--text); background: rgba(148,163,184,0.08); }
     .tab[data-tab="panels"].active {
@@ -179,23 +175,21 @@
       padding: 20px; margin-bottom: 16px; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
     }
     .card-header {
-      display: flex; align-items: center; justify-content: space-between; gap: 12px;
-      margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px;
+      margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--border);
     }
     h2 { font-size: 15.5px; font-weight: 600; margin: 0; display: flex; align-items: center; gap: 8px; }
     h2::before {
       content: ""; width: 8px; height: 8px; border-radius: 50%;
-      background: linear-gradient(135deg, var(--accent), var(--violet));
-      display: inline-block;
+      background: linear-gradient(135deg, var(--accent), var(--violet)); display: inline-block;
     }
     #tab-panels h2::before { background: linear-gradient(135deg, #10b981, #38bdf8); }
     #tab-ssh h2::before { background: linear-gradient(135deg, #6366f1, #c084fc); }
     #tab-telegram h2::before { background: linear-gradient(135deg, #0ea5e9, #22d3ee); }
     #tab-security h2::before { background: linear-gradient(135deg, #f59e0b, #fb7185); }
-    h3 { font-size: 13.5px; font-weight: 600; margin: 18px 0 10px; color: var(--text-soft); }
 
     /* Forms */
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
     label { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 6px; font-weight: 500; }
     input, select, textarea {
       width: 100%; padding: 9px 12px; border-radius: 8px;
@@ -207,10 +201,7 @@
       box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.18);
     }
     input[type="checkbox"] { width: auto; accent-color: var(--accent); margin-right: 8px; cursor: pointer; }
-    .check-label {
-      display: inline-flex; align-items: center; margin: 0;
-      color: var(--text-soft); font-size: 13.5px; cursor: pointer;
-    }
+    .check-label { display: inline-flex; align-items: center; margin: 0; color: var(--text-soft); font-size: 13.5px; cursor: pointer; }
     .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 
     /* Buttons */
@@ -224,15 +215,9 @@
     button:hover:not(:disabled) { opacity: 0.94; box-shadow: 0 6px 16px rgba(99, 102, 241, 0.30); }
     button:active:not(:disabled) { transform: translateY(1px); }
     button:disabled { opacity: 0.55; cursor: not-allowed; }
-    button.secondary {
-      background: var(--surface-2); color: var(--text-soft); box-shadow: none;
-      border: 1px solid var(--border);
-    }
+    button.secondary { background: var(--surface-2); color: var(--text-soft); box-shadow: none; border: 1px solid var(--border); }
     button.secondary:hover:not(:disabled) { border-color: var(--border-strong); opacity: 1; }
-    button.danger {
-      background: var(--err-soft); color: var(--err); box-shadow: none;
-      border: 1px solid rgba(251, 113, 133, 0.35);
-    }
+    button.danger { background: var(--err-soft); color: var(--err); box-shadow: none; border: 1px solid rgba(251, 113, 133, 0.35); }
     button.danger:hover:not(:disabled) { background: rgba(251, 113, 133, 0.26); }
     button.sm { padding: 5px 11px; font-size: 12px; border-radius: 6px; }
 
@@ -249,7 +234,7 @@
     tbody tr:hover { background: rgba(56, 189, 248, 0.04); }
     .url-cell { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-    /* Badges */
+    /* Badges & Chips */
     .badge {
       display: inline-flex; align-items: center; gap: 6px;
       padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap;
@@ -257,7 +242,75 @@
     .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
     .badge.ok { background: var(--ok-soft); color: var(--ok); }
     .badge.err { background: var(--err-soft); color: var(--err); }
-    .badge.muted { background: rgba(148, 163, 184, 0.14); color: var(--muted); }
+    .ip-pills { display: flex; flex-wrap: wrap; gap: 6px; }
+    .ip-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 3px 9px; border-radius: 6px; font-size: 12px;
+      background: rgba(99, 102, 241, 0.14); color: var(--violet);
+      border: 1px solid rgba(167, 139, 250, 0.28);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    body.light .ip-pill { color: #5b21b6; background: rgba(139, 92, 246, 0.10); }
+
+    /* Modal (二级弹窗菜单) */
+    .modal-backdrop {
+      position: fixed; inset: 0; z-index: 80;
+      background: rgba(2, 6, 23, 0.72); backdrop-filter: blur(6px);
+      display: grid; place-items: center; padding: 16px;
+      overflow-y: auto;
+    }
+    .modal {
+      position: relative; overflow: hidden;
+      width: 100%; max-width: 620px;
+      background: var(--surface-solid); border: 1px solid var(--border-strong);
+      border-radius: 16px; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+      animation: modalIn 0.16s ease-out;
+    }
+    @keyframes modalIn {
+      from { opacity: 0; transform: translateY(8px) scale(0.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    .modal-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 20px; border-bottom: 1px solid var(--border);
+    }
+    .modal-head h2 { font-size: 16px; margin: 0; }
+    .modal-close {
+      background: transparent; color: var(--muted); box-shadow: none;
+      padding: 4px 10px; font-size: 20px; line-height: 1; border-radius: 8px;
+    }
+    .modal-close:hover { background: rgba(148,163,184,0.14); color: var(--text); box-shadow: none; }
+    .modal-tabs {
+      display: flex; gap: 18px; padding: 0 20px; border-bottom: 1px solid var(--border);
+    }
+    .modal-tab {
+      background: transparent; color: var(--muted); box-shadow: none;
+      border-radius: 0; padding: 10px 2px; font-size: 13px; font-weight: 500;
+      border-bottom: 2px solid transparent;
+    }
+    .modal-tab:hover { color: var(--text); box-shadow: none; }
+    .modal-tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+    .modal-body { padding: 20px; max-height: 70vh; overflow-y: auto; }
+    .modal-foot {
+      display: flex; justify-content: flex-end; gap: 10px;
+      padding: 14px 20px; border-top: 1px solid var(--border);
+      background: rgba(15, 23, 42, 0.25);
+    }
+    body.light .modal-foot { background: rgba(241, 245, 249, 0.7); }
+
+    /* IP List Editor inside Modal */
+    .ip-list {
+      border: 1px solid var(--border); border-radius: 10px;
+      background: var(--input-bg); max-height: 240px; overflow-y: auto;
+      margin-top: 10px;
+    }
+    .ip-item {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      padding: 9px 12px; border-bottom: 1px solid var(--border);
+    }
+    .ip-item:last-child { border-bottom: none; }
+    .ip-item-val { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+    .ip-empty { padding: 16px; text-align: center; color: var(--muted); font-size: 13px; }
 
     /* Misc */
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; word-break: break-all; }
@@ -270,10 +323,6 @@
       font-size: 13px; color: var(--text-soft); cursor: pointer;
     }
     .checkbox-item:hover { border-color: var(--violet); }
-    .cmd-box {
-      margin-top: 14px; padding: 14px; border-radius: 10px;
-      background: var(--input-bg); border: 1px solid rgba(56, 189, 248, 0.35);
-    }
 
     /* Login */
     .login-wrap { min-height: calc(100vh - 96px); display: grid; place-items: center; }
@@ -284,7 +333,7 @@
     .toast {
       position: fixed; right: 20px; bottom: 20px; padding: 11px 16px; border-radius: 10px;
       background: var(--surface-2); border: 1px solid var(--border-strong); color: var(--text);
-      z-index: 100; box-shadow: var(--shadow); font-size: 13.5px; max-width: 420px;
+      z-index: 120; box-shadow: var(--shadow); font-size: 13.5px; max-width: 420px;
       opacity: 0; transform: translateY(10px); pointer-events: none;
       transition: opacity 0.18s ease, transform 0.18s ease;
     }
@@ -385,7 +434,10 @@
         <div class="card">
           <div class="card-header">
             <h2>已配置面板</h2>
-            <span class="hint" style="margin:0;">保存或删除后自动热重载，无需重启容器</span>
+            <div class="row">
+              <span class="hint" style="margin:0;">保存或删除后自动热重载</span>
+              <button type="button" id="open-add-panel-btn">+ 添加面板</button>
+            </div>
           </div>
           <div class="table-wrap">
             <table>
@@ -393,28 +445,6 @@
               <tbody id="panels-tbody"></tbody>
             </table>
           </div>
-        </div>
-        <div class="card">
-          <div class="card-header">
-            <h2 id="panel-form-title">添加 3x-ui 面板</h2>
-          </div>
-          <form id="panel-form">
-            <input type="hidden" id="panel-orig-name">
-            <div class="grid">
-              <div><label>面板名称</label><input id="panel-name" required placeholder="例如 central-server"></div>
-              <div><label>API 地址（以 /panel/api/inbounds/list 结尾）</label><input id="panel-url" required placeholder="https://example.com/path/panel/api/inbounds/list"></div>
-              <div><label>API Token（修改时留空保留原值）</label><input id="panel-token" type="password" autocomplete="new-password" placeholder="粘贴 3x-ui API Token"></div>
-              <div><label>采集间隔（秒，10-3600）</label><input id="panel-interval" type="number" min="10" max="3600" value="30" required></div>
-              <div><label>日志窗口（条，100-10000）</label><input id="panel-log-count" type="number" min="100" max="10000" value="1000" required></div>
-              <div style="display:flex;align-items:flex-end;padding-bottom:8px;">
-                <label class="check-label"><input id="panel-logs" type="checkbox" checked> 开启 Xray 访问日志采集</label>
-              </div>
-            </div>
-            <div class="row" style="margin-top:16px;">
-              <button type="submit">保存面板</button>
-              <button type="button" class="secondary hidden" id="panel-cancel-btn">取消编辑</button>
-            </div>
-          </form>
         </div>
       </section>
 
@@ -431,54 +461,29 @@
         </div>
 
         <div class="card">
-          <div class="card-header"><h2>可信来源 IP 组</h2></div>
+          <div class="card-header">
+            <h2>可信来源 IP 组</h2>
+            <button type="button" id="open-add-ip-group-btn">+ 新增 IP 组</button>
+          </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>组名</th><th>CIDR 列表</th><th>操作</th></tr></thead>
+              <thead><tr><th>组名</th><th>IP / CIDR 列表</th><th>操作</th></tr></thead>
               <tbody id="ip-groups-tbody"></tbody>
             </table>
           </div>
-          <h3 id="ip-group-form-title">新增或更新 IP 组</h3>
-          <form id="ip-group-form" class="grid">
-            <input type="hidden" id="ip-group-orig-name">
-            <div><label>组名</label><input id="ip-group-name" required placeholder="例如 office"></div>
-            <div><label>CIDR（逗号分隔）</label><input id="ip-group-cidrs" required placeholder="203.0.113.1/32,198.51.100.0/24"></div>
-            <div class="row" style="align-items:flex-end;">
-              <button type="submit">保存 IP 组</button>
-              <button type="button" class="secondary hidden" id="ip-group-cancel-btn">取消编辑</button>
-            </div>
-          </form>
         </div>
 
         <div class="card">
-          <div class="card-header"><h2>受监控服务器</h2></div>
+          <div class="card-header">
+            <h2>受监控服务器</h2>
+            <button type="button" id="open-add-ssh-server-btn">+ 新增服务器</button>
+          </div>
           <div class="table-wrap">
             <table>
               <thead><tr><th>服务器</th><th>可信来源</th><th>操作</th></tr></thead>
               <tbody id="ssh-servers-tbody"></tbody>
             </table>
           </div>
-          <div id="install-cmd-box" class="cmd-box hidden">
-            <div class="row" style="justify-content:space-between;">
-              <strong style="font-size:13px;">子服务器安装命令</strong>
-              <button type="button" class="sm secondary" id="copy-install-cmd">复制命令</button>
-            </div>
-            <pre id="install-cmd-text" class="mono" style="white-space:pre-wrap;margin:10px 0 0;color:var(--accent);"></pre>
-          </div>
-          <h3 id="ssh-server-form-title">新增服务器</h3>
-          <form id="ssh-server-form">
-            <input type="hidden" id="ssh-server-orig-name">
-            <div class="grid">
-              <div><label>服务器名称</label><input id="ssh-server-name" required placeholder="例如 node-hk"></div>
-              <div><label>额外 CIDR（可选，逗号分隔）</label><input id="ssh-server-cidrs" placeholder="留空表示所有非可信 IP 均告警"></div>
-            </div>
-            <label style="margin-top:12px;">复用可信 IP 组</label>
-            <div id="ssh-server-groups" class="checkbox-list"></div>
-            <div class="row">
-              <button type="submit">保存服务器</button>
-              <button type="button" class="secondary hidden" id="ssh-server-cancel-btn">取消编辑</button>
-            </div>
-          </form>
         </div>
 
         <div class="card">
@@ -533,11 +538,146 @@
       </section>
     </div>
   </div>
+
+  <!-- 弹窗 1：3x-ui 面板 -->
+  <div id="modal-panel" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <h2 id="panel-form-title">添加 3x-ui 面板</h2>
+        <button type="button" class="modal-close" data-close="modal-panel">&times;</button>
+      </div>
+      <form id="panel-form">
+        <div class="modal-body">
+          <input type="hidden" id="panel-orig-name">
+          <div class="grid">
+            <div><label>面板名称</label><input id="panel-name" required placeholder="例如 central-server"></div>
+            <div><label>API Token（修改时留空保留原值）</label><input id="panel-token" type="password" autocomplete="new-password" placeholder="粘贴 3x-ui API Token"></div>
+          </div>
+          <div style="margin-top:12px;">
+            <label>API 地址（以 /panel/api/inbounds/list 结尾）</label>
+            <input id="panel-url" required placeholder="https://example.com/path/panel/api/inbounds/list">
+          </div>
+          <div class="grid" style="margin-top:12px;">
+            <div><label>采集间隔（秒，10-3600）</label><input id="panel-interval" type="number" min="10" max="3600" value="30" required></div>
+            <div><label>日志窗口（条，100-10000）</label><input id="panel-log-count" type="number" min="100" max="10000" value="1000" required></div>
+          </div>
+          <div style="margin-top:14px;">
+            <label class="check-label"><input id="panel-logs" type="checkbox" checked> 开启 Xray 访问日志采集</label>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button type="button" class="secondary" data-close="modal-panel">取消</button>
+          <button type="submit">保存面板</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 弹窗 2：可信来源 IP 组（二级操作菜单） -->
+  <div id="modal-ip-group" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <h2 id="ip-group-modal-title">新增 IP 组</h2>
+        <button type="button" class="modal-close" data-close="modal-ip-group">&times;</button>
+      </div>
+      <div class="modal-tabs">
+        <button type="button" class="modal-tab active" data-ip-tab="single">单个添加与列表</button>
+        <button type="button" class="modal-tab" data-ip-tab="batch">批量导入多个 IP</button>
+      </div>
+      <form id="ip-group-form">
+        <div class="modal-body">
+          <input type="hidden" id="ip-group-orig-name">
+          <div>
+            <label>IP 组名称</label>
+            <input id="ip-group-name" required placeholder="例如 office">
+          </div>
+
+          <div id="ip-tab-single" style="margin-top:14px;">
+            <label>添加单个 IP 或 CIDR（单个 IP 自动识别为 /32 或 /128）</label>
+            <div class="row">
+              <div style="flex:1;"><input id="ip-single-input" placeholder="例如 82.152.161.210 或 198.51.100.0/24"></div>
+              <button type="button" class="secondary" id="ip-single-add-btn">+ 添加到列表</button>
+            </div>
+            <div class="ip-list" id="ip-group-list"></div>
+          </div>
+
+          <div id="ip-tab-batch" class="hidden" style="margin-top:14px;">
+            <label>批量粘贴多个 IP / CIDR（每行一个或用逗号分隔）</label>
+            <textarea id="ip-batch-input" rows="5" placeholder="82.152.161.210&#10;203.0.113.0/24&#10;2001:db8::1"></textarea>
+            <div class="row" style="margin-top:10px;">
+              <button type="button" class="secondary" id="ip-batch-append-btn">追加到列表</button>
+              <button type="button" class="secondary" id="ip-batch-replace-btn">覆盖当前列表</button>
+            </div>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button type="button" class="secondary" data-close="modal-ip-group">取消</button>
+          <button type="submit">保存 IP 组</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 弹窗 3：受监控服务器（二级操作菜单） -->
+  <div id="modal-ssh-server" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <h2 id="ssh-server-modal-title">新增服务器</h2>
+        <button type="button" class="modal-close" data-close="modal-ssh-server">&times;</button>
+      </div>
+      <form id="ssh-server-form">
+        <div class="modal-body">
+          <input type="hidden" id="ssh-server-orig-name">
+          <div>
+            <label>服务器名称</label>
+            <input id="ssh-server-name" required placeholder="例如 node-hk">
+          </div>
+          <div style="margin-top:14px;">
+            <label>复用可信 IP 组</label>
+            <div id="ssh-server-groups" class="checkbox-list"></div>
+          </div>
+          <div style="margin-top:12px;">
+            <label>额外可信单个 IP / CIDR（可选，留空且未选组则所有登录均告警）</label>
+            <div class="row">
+              <div style="flex:1;"><input id="ssh-server-ip-input" placeholder="例如 203.0.113.10 或 10.0.0.0/8"></div>
+              <button type="button" class="secondary" id="ssh-server-ip-add-btn">+ 添加</button>
+            </div>
+            <div class="ip-list" id="ssh-server-ip-list"></div>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button type="button" class="secondary" data-close="modal-ssh-server">取消</button>
+          <button type="submit">保存服务器</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 弹窗 4：安装命令 -->
+  <div id="modal-install-cmd" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <h2 id="install-cmd-title">子服务器安装命令</h2>
+        <button type="button" class="modal-close" data-close="modal-install-cmd">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="hint" style="margin-top:0;margin-bottom:10px;">请在对应子服务器上以 <code>root</code> 执行以下命令：</div>
+        <pre id="install-cmd-text" class="mono" style="white-space:pre-wrap;padding:14px;background:var(--input-bg);border:1px solid var(--border-strong);border-radius:10px;color:var(--accent);margin:0;"></pre>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="secondary" data-close="modal-install-cmd">关闭</button>
+        <button type="button" id="copy-install-cmd">复制命令</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast"></div>
 
   <script>
     let csrfToken = "";
     let state = null;
+    let editingGroupIps = [];
+    let editingServerIps = [];
 
     function toast(msg, isErr = false) {
       const el = document.getElementById("toast");
@@ -572,6 +712,45 @@
     function showApp() {
       document.getElementById("login-view").classList.add("hidden");
       document.getElementById("app-view").classList.remove("hidden");
+    }
+
+    function openModal(id) { document.getElementById(id).classList.remove("hidden"); }
+    function closeModal(id) { document.getElementById(id).classList.add("hidden"); }
+
+    document.querySelectorAll("[data-close]").forEach(btn => {
+      btn.onclick = () => closeModal(btn.dataset.close);
+    });
+    document.querySelectorAll(".modal-backdrop").forEach(backdrop => {
+      backdrop.onclick = e => { if (e.target === backdrop) closeModal(backdrop.id); };
+    });
+    document.addEventListener("keydown", e => {
+      if (e.key === "Escape") {
+        document.querySelectorAll(".modal-backdrop:not(.hidden)").forEach(m => m.classList.add("hidden"));
+      }
+    });
+
+    function normalizeIpOrCidr(raw) {
+      const text = String(raw || "").trim();
+      if (!text) return "";
+      if (text.includes("/")) return text;
+      return text.includes(":") ? `${text}/128` : `${text}/32`;
+    }
+
+    function renderIpList(containerId, items, onRemove) {
+      const box = document.getElementById(containerId);
+      box.replaceChildren();
+      if (!items.length) {
+        box.appendChild(el("div", { className: "ip-empty", text: "暂无条目，请在上方输入单个 IP 或 CIDR 后点击添加" }));
+        return;
+      }
+      items.forEach((item, idx) => {
+        const delBtn = el("button", { type: "button", className: "sm danger", text: "删除" });
+        delBtn.onclick = () => onRemove(idx);
+        box.appendChild(el("div", { className: "ip-item" }, [
+          el("span", { className: "ip-item-val", text: item }),
+          delBtn
+        ]));
+      });
     }
 
     function el(tag, attrs = {}, children = []) {
@@ -625,16 +804,15 @@
       for (const p of data.panels) {
         const badge = el("span", { className: "badge " + (p.up ? "ok" : "err"), text: p.up ? "正常" : (p.last_error || "不可用") });
         const editBtn = el("button", { className: "sm secondary", type: "button", text: "编辑" });
-        editBtn.onclick = () => editPanel(p);
+        editBtn.onclick = () => openPanelModal(p);
         const delBtn = el("button", { className: "sm danger", type: "button", text: "删除" });
         delBtn.onclick = () => deletePanel(p.name);
-        const ops = el("div", { className: "row" }, [editBtn, delBtn]);
         panelsTbody.appendChild(el("tr", {}, [
           el("td", { style: "font-weight:600;", text: p.name }),
           el("td", {}, [badge]),
           el("td", { className: "mono url-cell", title: p.url, text: p.url }),
           el("td", { text: `${p.logs ? "开启" : "关闭"} / ${p.interval}s / ${p.log_count}` }),
-          el("td", {}, [ops])
+          el("td", {}, [el("div", { className: "row" }, [editBtn, delBtn])])
         ]));
       }
       if (!data.panels.length) {
@@ -644,20 +822,17 @@
       document.getElementById("ssh-ingest-url").value = data.ssh_login.ingest_url || "";
       const groupsTbody = document.getElementById("ip-groups-tbody");
       groupsTbody.replaceChildren();
-      const groupChecks = document.getElementById("ssh-server-groups");
-      groupChecks.replaceChildren();
       for (const [gname, cidrs] of Object.entries(data.ssh_login.ip_groups)) {
-        const fillBtn = el("button", { className: "sm secondary", type: "button", text: "编辑" });
-        fillBtn.onclick = () => editIpGroup(gname, cidrs);
+        const pills = el("div", { className: "ip-pills" }, cidrs.map(c => el("span", { className: "ip-pill", text: c })));
+        const editBtn = el("button", { className: "sm secondary", type: "button", text: "管理 / 编辑" });
+        editBtn.onclick = () => openIpGroupModal(gname, cidrs);
         const delBtn = el("button", { className: "sm danger", type: "button", text: "删除" });
         delBtn.onclick = () => deleteIpGroup(gname);
         groupsTbody.appendChild(el("tr", {}, [
           el("td", { style: "font-weight:600;", text: gname }),
-          el("td", { className: "mono", text: cidrs.join(", ") }),
-          el("td", {}, [el("div", { className: "row" }, [fillBtn, delBtn])])
+          el("td", {}, [pills]),
+          el("td", {}, [el("div", { className: "row" }, [editBtn, delBtn])])
         ]));
-        const cb = el("input", { type: "checkbox", value: gname });
-        groupChecks.appendChild(el("label", { className: "checkbox-item" }, [cb, document.createTextNode(gname)]));
       }
       if (!Object.keys(data.ssh_login.ip_groups).length) {
         groupsTbody.appendChild(el("tr", {}, [el("td", { colspan: "3", className: "hint", text: "尚未添加可信来源 IP 组" })]));
@@ -670,7 +845,7 @@
         if ((sinfo.allowed_ip_groups || []).length) parts.push("组: " + sinfo.allowed_ip_groups.join(", "));
         if ((sinfo.allowed_cidrs || []).length) parts.push("CIDR: " + sinfo.allowed_cidrs.join(", "));
         const editBtn = el("button", { className: "sm secondary", type: "button", text: "编辑" });
-        editBtn.onclick = () => editSshServer(sname, sinfo);
+        editBtn.onclick = () => openSshServerModal(sname, sinfo);
         const cmdBtn = el("button", { className: "sm secondary", type: "button", text: "安装命令" });
         cmdBtn.onclick = () => fetchInstallCommand(sname);
         const delBtn = el("button", { className: "sm danger", type: "button", text: "删除" });
@@ -699,63 +874,76 @@
       renderOverview(data);
     }
 
-    function editPanel(p) {
-      document.getElementById("panel-form-title").textContent = "编辑面板：" + p.name;
-      document.getElementById("panel-orig-name").value = p.name;
-      document.getElementById("panel-name").value = p.name;
-      document.getElementById("panel-url").value = p.url;
-      document.getElementById("panel-token").value = "";
-      document.getElementById("panel-interval").value = p.interval;
-      document.getElementById("panel-log-count").value = p.log_count;
-      document.getElementById("panel-logs").checked = !!p.logs;
-      document.getElementById("panel-cancel-btn").classList.remove("hidden");
-      document.getElementById("panel-form").scrollIntoView({ behavior: "smooth", block: "nearest" });
-    }
-
-    function resetPanelForm() {
-      document.getElementById("panel-form-title").textContent = "添加 3x-ui 面板";
+    function openPanelModal(p = null) {
       document.getElementById("panel-form").reset();
-      document.getElementById("panel-orig-name").value = "";
-      document.getElementById("panel-interval").value = 30;
-      document.getElementById("panel-log-count").value = 1000;
-      document.getElementById("panel-logs").checked = true;
-      document.getElementById("panel-cancel-btn").classList.add("hidden");
+      if (p) {
+        document.getElementById("panel-form-title").textContent = "编辑面板：" + p.name;
+        document.getElementById("panel-orig-name").value = p.name;
+        document.getElementById("panel-name").value = p.name;
+        document.getElementById("panel-url").value = p.url;
+        document.getElementById("panel-interval").value = p.interval;
+        document.getElementById("panel-log-count").value = p.log_count;
+        document.getElementById("panel-logs").checked = !!p.logs;
+      } else {
+        document.getElementById("panel-form-title").textContent = "添加 3x-ui 面板";
+        document.getElementById("panel-orig-name").value = "";
+        document.getElementById("panel-interval").value = 30;
+        document.getElementById("panel-log-count").value = 1000;
+        document.getElementById("panel-logs").checked = true;
+      }
+      openModal("modal-panel");
     }
 
-    function editIpGroup(name, cidrs) {
-      document.getElementById("ip-group-form-title").textContent = "编辑 IP 组：" + name;
+    function switchIpModalTab(tab) {
+      document.querySelectorAll("[data-ip-tab]").forEach(b => b.classList.toggle("active", b.dataset.ipTab === tab));
+      document.getElementById("ip-tab-single").classList.toggle("hidden", tab !== "single");
+      document.getElementById("ip-tab-batch").classList.toggle("hidden", tab !== "batch");
+    }
+
+    function openIpGroupModal(name = "", cidrs = []) {
+      document.getElementById("ip-group-form").reset();
+      document.getElementById("ip-group-modal-title").textContent = name ? ("管理 IP 组：" + name) : "新增 IP 组";
       document.getElementById("ip-group-orig-name").value = name;
       document.getElementById("ip-group-name").value = name;
-      document.getElementById("ip-group-cidrs").value = cidrs.join(",");
-      document.getElementById("ip-group-cancel-btn").classList.remove("hidden");
-      document.getElementById("ip-group-form").scrollIntoView({ behavior: "smooth", block: "nearest" });
+      editingGroupIps = [...cidrs];
+      renderGroupIpList();
+      switchIpModalTab("single");
+      openModal("modal-ip-group");
     }
 
-    function resetIpGroupForm() {
-      document.getElementById("ip-group-form-title").textContent = "新增或更新 IP 组";
-      document.getElementById("ip-group-form").reset();
-      document.getElementById("ip-group-orig-name").value = "";
-      document.getElementById("ip-group-cancel-btn").classList.add("hidden");
+    function renderGroupIpList() {
+      renderIpList("ip-group-list", editingGroupIps, idx => {
+        editingGroupIps.splice(idx, 1);
+        renderGroupIpList();
+      });
     }
 
-    function editSshServer(name, info) {
-      document.getElementById("ssh-server-form-title").textContent = "编辑服务器：" + name;
+    function openSshServerModal(name = "", info = null) {
+      document.getElementById("ssh-server-form").reset();
+      document.getElementById("ssh-server-modal-title").textContent = name ? ("编辑服务器：" + name) : "新增服务器";
       document.getElementById("ssh-server-orig-name").value = name;
       document.getElementById("ssh-server-name").value = name;
-      document.getElementById("ssh-server-cidrs").value = (info.allowed_cidrs || []).join(",");
-      const selected = new Set(info.allowed_ip_groups || []);
-      document.querySelectorAll("#ssh-server-groups input[type='checkbox']").forEach(cb => {
-        cb.checked = selected.has(cb.value);
-      });
-      document.getElementById("ssh-server-cancel-btn").classList.remove("hidden");
-      document.getElementById("ssh-server-form").scrollIntoView({ behavior: "smooth", block: "nearest" });
+      const groupChecks = document.getElementById("ssh-server-groups");
+      groupChecks.replaceChildren();
+      const selected = new Set((info && info.allowed_ip_groups) || []);
+      for (const gname of Object.keys(state?.ssh_login?.ip_groups || {})) {
+        const cb = el("input", { type: "checkbox", value: gname });
+        cb.checked = selected.has(gname);
+        groupChecks.appendChild(el("label", { className: "checkbox-item" }, [cb, document.createTextNode(gname)]));
+      }
+      if (!groupChecks.children.length) {
+        groupChecks.appendChild(el("span", { className: "hint", text: "暂无可信 IP 组，可先在上方新增" }));
+      }
+      editingServerIps = [...((info && info.allowed_cidrs) || [])];
+      renderServerIpList();
+      openModal("modal-ssh-server");
     }
 
-    function resetSshServerForm() {
-      document.getElementById("ssh-server-form-title").textContent = "新增服务器";
-      document.getElementById("ssh-server-form").reset();
-      document.getElementById("ssh-server-orig-name").value = "";
-      document.getElementById("ssh-server-cancel-btn").classList.add("hidden");
+    function renderServerIpList() {
+      renderIpList("ssh-server-ip-list", editingServerIps, idx => {
+        editingServerIps.splice(idx, 1);
+        renderServerIpList();
+      });
     }
 
     async function deletePanel(name) {
@@ -788,8 +976,9 @@
     async function fetchInstallCommand(name) {
       try {
         const res = await api("/api/admin/ssh-login/install-command", { method: "POST", body: JSON.stringify({ name }) });
+        document.getElementById("install-cmd-title").textContent = "子服务器安装命令：" + name;
         document.getElementById("install-cmd-text").textContent = res.command;
-        document.getElementById("install-cmd-box").classList.remove("hidden");
+        openModal("modal-install-cmd");
       } catch (e) { toast(e.message, true); }
     }
 
@@ -802,6 +991,55 @@
         });
       };
     });
+    document.querySelectorAll("[data-ip-tab]").forEach(btn => {
+      btn.onclick = () => switchIpModalTab(btn.dataset.ipTab);
+    });
+
+    document.getElementById("open-add-panel-btn").onclick = () => openPanelModal();
+    document.getElementById("open-add-ip-group-btn").onclick = () => openIpGroupModal();
+    document.getElementById("open-add-ssh-server-btn").onclick = () => openSshServerModal();
+
+    document.getElementById("ip-single-add-btn").onclick = () => {
+      const input = document.getElementById("ip-single-input");
+      const val = normalizeIpOrCidr(input.value);
+      if (!val) return;
+      if (!editingGroupIps.includes(val)) editingGroupIps.push(val);
+      input.value = "";
+      renderGroupIpList();
+    };
+    document.getElementById("ip-single-input").onkeydown = e => {
+      if (e.key === "Enter") { e.preventDefault(); document.getElementById("ip-single-add-btn").click(); }
+    };
+
+    function parseBatchIps(text) {
+      return String(text || "").split(/[\s,，]+/).map(normalizeIpOrCidr).filter(Boolean);
+    }
+    document.getElementById("ip-batch-append-btn").onclick = () => {
+      const items = parseBatchIps(document.getElementById("ip-batch-input").value);
+      items.forEach(item => { if (!editingGroupIps.includes(item)) editingGroupIps.push(item); });
+      document.getElementById("ip-batch-input").value = "";
+      renderGroupIpList();
+      switchIpModalTab("single");
+    };
+    document.getElementById("ip-batch-replace-btn").onclick = () => {
+      const items = parseBatchIps(document.getElementById("ip-batch-input").value);
+      editingGroupIps = Array.from(new Set(items));
+      document.getElementById("ip-batch-input").value = "";
+      renderGroupIpList();
+      switchIpModalTab("single");
+    };
+
+    document.getElementById("ssh-server-ip-add-btn").onclick = () => {
+      const input = document.getElementById("ssh-server-ip-input");
+      const val = normalizeIpOrCidr(input.value);
+      if (!val) return;
+      if (!editingServerIps.includes(val)) editingServerIps.push(val);
+      input.value = "";
+      renderServerIpList();
+    };
+    document.getElementById("ssh-server-ip-input").onkeydown = e => {
+      if (e.key === "Enter") { e.preventDefault(); document.getElementById("ssh-server-ip-add-btn").click(); }
+    };
 
     document.getElementById("login-form").onsubmit = async e => {
       e.preventDefault();
@@ -835,9 +1073,6 @@
         catch (e) { toast(e.message, true); }
       });
     };
-    document.getElementById("panel-cancel-btn").onclick = resetPanelForm;
-    document.getElementById("ip-group-cancel-btn").onclick = resetIpGroupForm;
-    document.getElementById("ssh-server-cancel-btn").onclick = resetSshServerForm;
 
     document.getElementById("panel-form").onsubmit = async e => {
       e.preventDefault();
@@ -856,8 +1091,8 @@
         };
         try {
           await api("/api/admin/panels", { method: "POST", body: JSON.stringify(payload) });
+          closeModal("modal-panel");
           toast("面板配置已保存并热重载");
-          resetPanelForm();
           await loadOverview();
         } catch (err) { toast(err.message, true); }
       });
@@ -873,23 +1108,27 @@
 
     document.getElementById("ip-group-form").onsubmit = async e => {
       e.preventDefault();
+      const pending = normalizeIpOrCidr(document.getElementById("ip-single-input").value);
+      if (pending && !editingGroupIps.includes(pending)) editingGroupIps.push(pending);
       try {
         await api("/api/admin/ssh-login/groups", {
           method: "POST",
           body: JSON.stringify({
             orig_name: document.getElementById("ip-group-orig-name").value.trim(),
             name: document.getElementById("ip-group-name").value.trim(),
-            cidrs: document.getElementById("ip-group-cidrs").value.trim()
+            cidrs: editingGroupIps.join(",")
           })
         });
+        closeModal("modal-ip-group");
         toast("IP 组已保存");
-        resetIpGroupForm();
         await loadOverview();
       } catch (err) { toast(err.message, true); }
     };
 
     document.getElementById("ssh-server-form").onsubmit = async e => {
       e.preventDefault();
+      const pending = normalizeIpOrCidr(document.getElementById("ssh-server-ip-input").value);
+      if (pending && !editingServerIps.includes(pending)) editingServerIps.push(pending);
       const orig = document.getElementById("ssh-server-orig-name").value.trim();
       const name = document.getElementById("ssh-server-name").value.trim();
       const groups = Array.from(document.querySelectorAll("#ssh-server-groups input:checked")).map(el => el.value);
@@ -899,12 +1138,12 @@
           body: JSON.stringify({
             orig_name: orig,
             name: name,
-            cidrs: document.getElementById("ssh-server-cidrs").value.trim(),
+            cidrs: editingServerIps.join(","),
             groups: groups.join(",")
           })
         });
+        closeModal("modal-ssh-server");
         toast(orig && orig !== name ? "服务器已改名，请重新执行安装命令以更新子服务器名称" : (orig ? "服务器配置已更新" : "服务器已添加"));
-        resetSshServerForm();
         await loadOverview();
       } catch (err) { toast(err.message, true); }
     };
