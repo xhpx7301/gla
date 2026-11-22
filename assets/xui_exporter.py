@@ -71,6 +71,12 @@ GEOIP_ASN_DB = os.environ.get("GEOIP_ASN_DB", "/var/lib/gla/geoip/GeoLite2-ASN.m
 _MMDB_READERS = {}
 _MMDB_LOCK = threading.Lock()
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}\Z")
+
+
+def valid_ip_group_name(name):
+    return (isinstance(name, str) and 1 <= len(name) <= 63
+            and not name.startswith("-")
+            and not any(ch.isspace() or ch == "," or ord(ch) < 32 for ch in name))
 ERRORS = (OSError, RuntimeError, ValueError, TypeError, KeyError, sqlite3.Error)
 METRICS = {
     "xui_exporter_up": ("gauge", "3x-ui traffic and online API health"),
@@ -2835,8 +2841,8 @@ def ssh_login_cli(argv):
             print("尚未添加可信来源 IP 组")
         return
     if args.operation in ("add-group", "set-group"):
-        if not args.name or not NAME_RE.fullmatch(args.name):
-            raise ValueError("IP 组名称只能使用字母、数字、点、下划线和连字符")
+        if not valid_ip_group_name(args.name):
+            raise ValueError("IP 组名称长度需为 1-63 字符，且不能包含空格、逗号或控制字符")
         if args.operation == "add-group" and args.name in groups:
             raise ValueError("IP 组名称已存在")
         if args.operation == "set-group" and args.name not in groups:
@@ -2852,8 +2858,8 @@ def ssh_login_cli(argv):
     if args.operation == "rename-group":
         if not args.name or args.name not in groups:
             raise ValueError("IP 组不存在")
-        if not args.new_name or not NAME_RE.fullmatch(args.new_name):
-            raise ValueError("新 IP 组名称只能使用字母、数字、点、下划线和连字符")
+        if not valid_ip_group_name(args.new_name):
+            raise ValueError("新 IP 组名称长度需为 1-63 字符，且不能包含空格、逗号或控制字符")
         if args.new_name != args.name and args.new_name in groups:
             raise ValueError("目标 IP 组名称已存在")
         cidrs = [value.strip() for value in args.cidrs.split(",") if value.strip()]

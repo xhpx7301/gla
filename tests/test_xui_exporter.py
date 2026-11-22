@@ -1840,14 +1840,14 @@ class ExporterTest(unittest.TestCase):
                     call("POST", "/api/admin/ssh-login/servers", {"name": "vm-1", "cidrs": "", "groups": "office"})
                     orig_key = json.loads(ssh_cfg.read_text(encoding="utf-8"))["servers"]["vm-1"]["key"]
                     call("POST", "/api/admin/ssh-login/groups", {
-                        "orig_name": "office", "name": "hq", "cidrs": "203.0.113.0/24,198.51.100.1/32"})
+                        "orig_name": "office", "name": "独享IP", "cidrs": "203.0.113.0/24,2001:db8::1/128"})
                     call("POST", "/api/admin/ssh-login/servers", {
-                        "orig_name": "vm-1", "name": "vm-1-hk", "cidrs": "192.0.2.1/32", "groups": "hq"})
+                        "orig_name": "vm-1", "name": "vm-1-hk", "cidrs": "192.0.2.1/32", "groups": "独享IP"})
                     ssh_saved = json.loads(ssh_cfg.read_text(encoding="utf-8"))
                     self.assertNotIn("office", ssh_saved["ip_groups"])
-                    self.assertEqual(ssh_saved["ip_groups"]["hq"], ["203.0.113.0/24", "198.51.100.1/32"])
+                    self.assertEqual(ssh_saved["ip_groups"]["独享IP"], ["203.0.113.0/24", "2001:db8::1/128"])
                     self.assertEqual(ssh_saved["servers"]["vm-1-hk"]["key"], orig_key)
-                    self.assertEqual(ssh_saved["servers"]["vm-1-hk"]["allowed_ip_groups"], ["hq"])
+                    self.assertEqual(ssh_saved["servers"]["vm-1-hk"]["allowed_ip_groups"], ["独享IP"])
                     self.assertEqual(ssh_saved["servers"]["vm-1-hk"]["allowed_cidrs"], ["192.0.2.1/32"])
                     call("POST", "/api/admin/telegram", {
                         "token": "123:tg-secret", "user_ids": "42",
