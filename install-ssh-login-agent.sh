@@ -27,6 +27,11 @@ reload_sshd() {
   fi
 }
 
+sshd_has_option() {
+  local opt="$1"
+  { sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || sshd -T 2>/dev/null; } | grep -Fqx "$opt"
+}
+
 restore_ssh_auth_config() {
   if [ -e "$SSH_AUTH_INFO_FILE.gla-backup" ]; then
     mv -f "$SSH_AUTH_INFO_FILE.gla-backup" "$SSH_AUTH_INFO_FILE"
@@ -58,7 +63,7 @@ case "$ACTION" in
     command -v sshd >/dev/null 2>&1 || die "未找到 sshd。"
 
     install -d -o root -g root -m 0700 "$CONFIG_DIR"
-    if ! sshd -T 2>/dev/null | grep -Fqx 'usepam yes'; then
+    if ! sshd_has_option 'usepam yes'; then
       [ -e "$SSHD_CONFIG_FILE.gla-backup" ] || cp -a "$SSHD_CONFIG_FILE" "$SSHD_CONFIG_FILE.gla-backup"
       tmp_pam_cfg="$(mktemp "${SSHD_CONFIG_FILE}.gla.XXXXXX")"
       if grep -Eq '^[#[:space:]]*UsePAM([[:space:]]|$)' "$SSHD_CONFIG_FILE"; then
@@ -68,14 +73,14 @@ case "$ACTION" in
       fi
       cat "$tmp_pam_cfg" >"$SSHD_CONFIG_FILE"
       rm -f "$tmp_pam_cfg"
-      if sshd -t 2>/dev/null && sshd -T 2>/dev/null | grep -Fqx 'usepam yes'; then
+      if sshd -t 2>/dev/null && sshd_has_option 'usepam yes'; then
         reload_sshd
       else
         cp -a "$SSHD_CONFIG_FILE.gla-backup" "$SSHD_CONFIG_FILE"
         printf '警告：自动启用 UsePAM yes 失败，已恢复原 sshd 配置；请手动检查 %s。\n' "$SSHD_CONFIG_FILE" >&2
       fi
     fi
-    if ! sshd -T 2>/dev/null | grep -Fqx 'exposeauthinfo yes'; then
+    if ! sshd_has_option 'exposeauthinfo yes'; then
       install -d -o root -g root -m 0755 "${SSH_AUTH_INFO_FILE%/*}"
       if ! grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf([[:space:]]|$)' "$SSHD_CONFIG_FILE"; then
         tmp_config="$(mktemp "${SSHD_CONFIG_FILE}.gla.XXXXXX")"
@@ -91,7 +96,7 @@ case "$ACTION" in
       printf 'ExposeAuthInfo yes\n' >"$SSH_AUTH_INFO_FILE"
       chmod 0644 "$SSH_AUTH_INFO_FILE"
       if sshd_check="$(sshd -t 2>&1)"; then
-        if sshd -T 2>/dev/null | grep -Fqx 'exposeauthinfo yes'; then
+        if sshd_has_option 'exposeauthinfo yes'; then
           : >"$SSH_AUTH_INFO_MARKER"
           chmod 0600 "$SSH_AUTH_INFO_MARKER"
           reload_sshd
@@ -201,7 +206,7 @@ AGENT
       cp -a "$PAM_FILE" "$PAM_FILE.gla-backup"
       printf '\n# GLA SSH successful login event\n%s\n' "$PAM_LINE" >>"$PAM_FILE"
     fi
-    if ! sshd -T 2>/dev/null | grep -Fqx 'usepam yes'; then
+    if ! sshd_has_option 'usepam yes'; then
       printf '警告：sshd 当前未启用 UsePAM yes，PAM 登录告警不会触发；请在 /etc/ssh/sshd_config 中启用 UsePAM yes 后重载 sshd。\n' >&2
     fi
     if ! curl --silent --connect-timeout 3 --max-time 6 -o /dev/null "$SSH_LOGIN_URL"; then
