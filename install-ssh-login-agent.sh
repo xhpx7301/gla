@@ -17,6 +17,16 @@ PAM_LINE='session optional pam_exec.so quiet type=open_session /usr/local/sbin/g
 
 die() { printf '错误：%s\n' "$*" >&2; exit 1; }
 
+reload_sshd() {
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+  elif command -v rc-service >/dev/null 2>&1; then
+    rc-service sshd reload 2>/dev/null || true
+  elif command -v service >/dev/null 2>&1; then
+    service ssh reload 2>/dev/null || service sshd reload 2>/dev/null || true
+  fi
+}
+
 restore_ssh_auth_config() {
   if [ -e "$SSH_AUTH_INFO_FILE.gla-backup" ]; then
     mv -f "$SSH_AUTH_INFO_FILE.gla-backup" "$SSH_AUTH_INFO_FILE"
@@ -40,8 +50,12 @@ case "$ACTION" in
     [[ "$SSH_LOGIN_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/api/ssh-login$ ]] || die "SSH_LOGIN_URL 必须是 HTTPS 地址，并以 /api/ssh-login 结尾。"
     [[ "$SSH_LOGIN_KEY" =~ ^[A-Fa-f0-9]{64}$ ]] || die "SSH_LOGIN_KEY 必须是 64 位十六进制密钥。"
     command -v curl >/dev/null 2>&1 || die "需要 curl。"
-    command -v systemd-run >/dev/null 2>&1 || die "需要 systemd-run。"
-    [ -f "$PAM_FILE" ] || die "未找到 $PAM_FILE。"
+    if [ ! -f "$PAM_FILE" ]; then
+      if command -v apk >/dev/null 2>&1; then
+        die "未找到 $PAM_FILE；Alpine 请先执行：apk add --no-cache openssh-server-pam，并在 /etc/ssh/sshd_config 中启用 UsePAM yes 后重载 sshd。"
+      fi
+      die "未找到 $PAM_FILE。"
+    fi
     command -v sshd >/dev/null 2>&1 || die "未找到 sshd。"
 
     install -d -o root -g root -m 0700 "$CONFIG_DIR"
@@ -64,9 +78,7 @@ case "$ACTION" in
         if sshd -T 2>/dev/null | grep -Fqx 'exposeauthinfo yes'; then
           : >"$SSH_AUTH_INFO_MARKER"
           chmod 0600 "$SSH_AUTH_INFO_MARKER"
-          if command -v systemctl >/dev/null 2>&1; then
-            systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
-          fi
+          reload_sshd
         else
           restore_ssh_auth_config
           printf '警告：sshd 未启用 ExposeAuthInfo，继续安装登录告警；认证方式可能显示“未知”。\n' >&2
@@ -145,11 +157,19 @@ case "$auth_methods" in
   *password*) auth_method='密码及多重认证' ;;
   *) [ -z "$auth_methods" ] || auth_method="$auth_methods" ;;
 esac
-unit="gla-ssh-login-${$}-${RANDOM}"
-systemd-run --quiet --no-block --collect --unit="$unit" \
-  /usr/local/sbin/gla-ssh-login --send \
-  "$username" "$source_ip" "$source_port" "$ssh_port" "$event_time" "$auth_method" \
-  >/dev/null 2>&1 || true
+if command -v systemd-run >/dev/null 2>&1; then
+  unit="gla-ssh-login-${$}-${RANDOM}"
+  systemd-run --quiet --no-block --collect --unit="$unit" \
+    /usr/local/sbin/gla-ssh-login --send \
+    "$username" "$source_ip" "$source_port" "$ssh_port" "$event_time" "$auth_method" \
+    >/dev/null 2>&1 || true
+else
+  (
+    nohup /usr/local/sbin/gla-ssh-login --send \
+      "$username" "$source_ip" "$source_port" "$ssh_port" "$event_time" "$auth_method" \
+      >/dev/null 2>&1 </dev/null &
+  ) || true
+fi
 exit 0
 AGENT
     chmod 0750 "$AGENT_FILE"
@@ -167,8 +187,8 @@ AGENT
     if [ -e "$SSH_AUTH_INFO_MARKER" ] || [ -e "$SSH_INCLUDE_MARKER" ]; then
       restore_ssh_auth_config
     fi
-    if command -v sshd >/dev/null 2>&1 && sshd -t 2>/dev/null && command -v systemctl >/dev/null 2>&1; then
-      systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+    if command -v sshd >/dev/null 2>&1 && sshd -t 2>/dev/null; then
+      reload_sshd
     fi
     rm -f "$AGENT_FILE" "$CONFIG_FILE"
     printf 'GLA SSH 登录事件采集已移除。原 PAM 配置备份保留在 %s.gla-backup（如存在）。\n' "$PAM_FILE"
