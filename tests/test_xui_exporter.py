@@ -1865,6 +1865,15 @@ class ExporterTest(unittest.TestCase):
                     self.assertNotIn("panel-secret", raw)
                     self.assertNotIn("tg-secret", raw)
                     self.assertNotIn("key", overview["ssh_login"]["servers"]["vm-1-hk"])
+                    self.assertEqual(overview["ssh_login"]["servers"]["vm-1-hk"]["last_event_at"], 0.0)
+                    with mock.patch.object(EXPORTER, "STATE_DIR", str(root)):
+                        EXPORTER.record_ssh_login_server_status({
+                            "server": "vm-1-hk", "user": "root", "source_ip": "203.0.113.9"}, True)
+                        with urllib.request.urlopen(urllib.request.Request(
+                                f"{base}/api/admin/overview", headers={"Cookie": cookie}), timeout=3) as resp:
+                            overview2 = json.loads(resp.read().decode())
+                    self.assertGreater(overview2["ssh_login"]["servers"]["vm-1-hk"]["last_event_at"], 0)
+                    self.assertEqual(overview2["ssh_login"]["servers"]["vm-1-hk"]["last_user"], "root")
                     self.assertEqual(overview["telegram"]["online_confirmation_samples"], 5)
                     self.assertEqual(len(overview["panels"]), 1)
 

@@ -242,6 +242,7 @@
     .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
     .badge.ok { background: var(--ok-soft); color: var(--ok); }
     .badge.err { background: var(--err-soft); color: var(--err); }
+    .badge.muted { background: rgba(148, 163, 184, 0.14); color: var(--muted); }
     .ip-pills { display: flex; flex-wrap: wrap; gap: 6px; }
     .ip-pill {
       display: inline-flex; align-items: center; gap: 6px;
@@ -485,7 +486,7 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>服务器</th><th>可信来源</th><th>操作</th></tr></thead>
+              <thead><tr><th>服务器</th><th>状态 / 最近上报</th><th>可信来源</th><th>操作</th></tr></thead>
               <tbody id="ssh-servers-tbody"></tbody>
             </table>
           </div>
@@ -791,8 +792,9 @@
       document.getElementById("kpi-panels").textContent = `${upPanels} / ${totalPanels}`;
       document.getElementById("kpi-panels-sub").textContent =
         totalPanels === 0 ? "尚未添加面板" : (upPanels === totalPanels ? "全部采集正常" : `${totalPanels - upPanels} 个面板异常`);
+      const reportedSsh = Object.values(data.ssh_login.servers).filter(s => s.last_event_at > 0).length;
       document.getElementById("kpi-ssh").textContent = `${sshCount} 台`;
-      document.getElementById("kpi-ssh-sub").textContent = `可信 IP 组：${ipGroupCount} 个`;
+      document.getElementById("kpi-ssh-sub").textContent = `已上报 ${reportedSsh} 台 · 可信 IP 组：${ipGroupCount} 个`;
       document.getElementById("kpi-tg").textContent = data.telegram.configured ? "已配置" : "未配置";
       document.getElementById("kpi-tg-sub").textContent = data.telegram.configured
         ? `冷却 ${data.telegram.notification_cooldown_seconds}s · 确认 ${data.telegram.online_confirmation_samples} 次`
@@ -841,12 +843,30 @@
         groupsTbody.appendChild(el("tr", {}, [el("td", { colspan: "3", className: "hint", text: "尚未添加可信来源 IP 组" })]));
       }
 
+      const fmtUtc8 = ts => {
+        const d = new Date(ts * 1000 + 8 * 3600 * 1000);
+        return d.toISOString().slice(0, 19).replace("T", " ") + " UTC+8";
+      };
       const serversTbody = document.getElementById("ssh-servers-tbody");
       serversTbody.replaceChildren();
       for (const [sname, sinfo] of Object.entries(data.ssh_login.servers)) {
         const parts = [];
         if ((sinfo.allowed_ip_groups || []).length) parts.push("组: " + sinfo.allowed_ip_groups.join(", "));
         if ((sinfo.allowed_cidrs || []).length) parts.push("CIDR: " + sinfo.allowed_cidrs.join(", "));
+        const statusCell = el("td");
+        if (sinfo.last_event_at > 0) {
+          statusCell.appendChild(el("span", {
+            className: "badge " + (sinfo.loki_ok ? "ok" : "err"),
+            text: sinfo.loki_ok ? "已接入" : "Loki 异常"
+          }));
+          statusCell.appendChild(el("div", {
+            className: "hint",
+            style: "margin-top:4px;",
+            text: `${fmtUtc8(sinfo.last_event_at)} · ${sinfo.last_user}@${sinfo.last_source_ip}`
+          }));
+        } else {
+          statusCell.appendChild(el("span", { className: "badge muted", text: "待首次上报" }));
+        }
         const editBtn = el("button", { className: "sm secondary", type: "button", text: "编辑" });
         editBtn.onclick = () => openSshServerModal(sname, sinfo);
         const cmdBtn = el("button", { className: "sm secondary", type: "button", text: "安装命令" });
@@ -855,12 +875,13 @@
         delBtn.onclick = () => deleteSshServer(sname);
         serversTbody.appendChild(el("tr", {}, [
           el("td", { style: "font-weight:600;", text: sname }),
+          statusCell,
           el("td", { className: "mono", text: parts.join(" ; ") || "无（所有登录均告警）" }),
           el("td", {}, [el("div", { className: "row" }, [editBtn, cmdBtn, delBtn])])
         ]));
       }
       if (!Object.keys(data.ssh_login.servers).length) {
-        serversTbody.appendChild(el("tr", {}, [el("td", { colspan: "3", className: "hint", text: "尚未添加受监控服务器" })]));
+        serversTbody.appendChild(el("tr", {}, [el("td", { colspan: "4", className: "hint", text: "尚未添加受监控服务器" })]));
       }
 
       document.getElementById("tg-users").value = (data.telegram.allowed_user_ids || []).join(",");

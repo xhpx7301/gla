@@ -2448,6 +2448,10 @@ class MetricsHandler(BaseHTTPRequestHandler):
                 allowed_cidrs.extend(group_cidrs)
         if not ssh_login_ip_allowed(address, allowed_cidrs):
             notify_ssh_login(record)
+        try:
+            record_ssh_login_server_status(record, loki_ok)
+        except ERRORS as error:
+            print(f"SSH 登录状态记录失败 ({error_kind(error)})", file=sys.stderr, flush=True)
         self.send_response(204 if loki_ok else 503)
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -2618,6 +2622,46 @@ def _record_ssh_login_notification_locked(record):
 def record_ssh_login_notification(record):
     with _SSH_LOGIN_NOTIFY_LOCK:
         _record_ssh_login_notification_locked(record)
+
+
+def record_ssh_login_server_status(record, loki_ok):
+    path = Path(STATE_DIR) / "ssh-login.sqlite"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _SSH_LOGIN_NOTIFY_LOCK:
+        db = sqlite3.connect(str(path), timeout=10)
+        try:
+            with db:
+                db.execute("CREATE TABLE IF NOT EXISTS server_status ("
+                           "server TEXT PRIMARY KEY, last_event_at REAL NOT NULL, "
+                           "last_user TEXT NOT NULL, last_source_ip TEXT NOT NULL, loki_ok INTEGER NOT NULL)")
+                db.execute("INSERT OR REPLACE INTO server_status VALUES (?,?,?,?,?)",
+                           (record["server"], time.time(), record["user"], record["source_ip"], int(bool(loki_ok))))
+        finally:
+            db.close()
+
+
+def load_ssh_login_server_statuses():
+    path = Path(STATE_DIR) / "ssh-login.sqlite"
+    if not path.is_file():
+        return {}
+    with _SSH_LOGIN_NOTIFY_LOCK:
+        db = sqlite3.connect(str(path), timeout=10)
+        try:
+            exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='server_status'").fetchone()
+            if not exists:
+                return {}
+            return {
+                server: {
+                    "last_event_at": float(last_event_at),
+                    "last_user": last_user,
+                    "last_source_ip": last_source_ip,
+                    "loki_ok": bool(loki_ok),
+                }
+                for server, last_event_at, last_user, last_source_ip, loki_ok in db.execute(
+                    "SELECT server,last_event_at,last_user,last_source_ip,loki_ok FROM server_status")
+            }
+        finally:
+            db.close()
 
 
 def notify_ssh_login(record):
@@ -3005,12 +3049,18 @@ def admin_overview_payload(admin_config=None):
                 "last_success": last_success,
             })
     ssh_raw = json.loads(Path(SSH_LOGIN_CONFIG_FILE).read_text(encoding="utf-8")) if Path(SSH_LOGIN_CONFIG_FILE).is_file() else {}
+    ssh_statuses = load_ssh_login_server_statuses()
     ssh_servers = {}
     for name, info in sorted((ssh_raw.get("servers") or {}).items()):
         if isinstance(info, dict):
+            status = ssh_statuses.get(name, {})
             ssh_servers[name] = {
                 "allowed_cidrs": info.get("allowed_cidrs", []),
                 "allowed_ip_groups": info.get("allowed_ip_groups", []),
+                "last_event_at": status.get("last_event_at", 0.0),
+                "last_user": status.get("last_user", ""),
+                "last_source_ip": status.get("last_source_ip", ""),
+                "loki_ok": status.get("loki_ok", True),
             }
     tg_raw = json.loads(Path(TELEGRAM_CONFIG_FILE).read_text(encoding="utf-8")) if Path(TELEGRAM_CONFIG_FILE).is_file() else {}
     ssh_tg_raw = json.loads(Path(SSH_TELEGRAM_CONFIG_FILE).read_text(encoding="utf-8")) if Path(SSH_TELEGRAM_CONFIG_FILE).is_file() else {}
