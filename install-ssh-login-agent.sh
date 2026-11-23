@@ -28,8 +28,9 @@ reload_sshd() {
 }
 
 sshd_has_option() {
-  local opt="$1"
-  { sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || sshd -T 2>/dev/null; } | grep -Fqx "$opt"
+  local opt="$1" output=""
+  output="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || sshd -T 2>/dev/null || true)"
+  grep -Fqx "$opt" <<<"$output"
 }
 
 restore_ssh_auth_config() {
