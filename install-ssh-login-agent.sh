@@ -177,8 +177,17 @@ auth_methods=""
 if [ -n "${SSH_USER_AUTH:-}" ] && [ -r "$SSH_USER_AUTH" ]; then
   auth_methods="$(awk 'NF { print $1 }' "$SSH_USER_AUTH" | sort -u | paste -sd, -)"
 fi
-if [ -z "$auth_methods" ] && command -v journalctl >/dev/null 2>&1; then
-  auth_log="$(journalctl --since '2 minutes ago' -t sshd --no-pager -o cat 2>/dev/null || true)"
+if [ -z "$auth_methods" ]; then
+  if command -v journalctl >/dev/null 2>&1; then
+    auth_log="$(journalctl --since '2 minutes ago' -t sshd -t sshd-session --no-pager -o cat 2>/dev/null || true)"
+  else
+    auth_log=""
+    for log_file in /var/log/auth.log /var/log/messages /var/log/secure; do
+      if [ -r "$log_file" ]; then
+        auth_log="$auth_log"$'\n'"$(tail -n 80 "$log_file" 2>/dev/null || true)"
+      fi
+    done
+  fi
   for method in publickey password keyboard-interactive hostbased; do
     if grep -Fq "Accepted $method for $username from $source_ip " <<<"$auth_log"; then
       auth_methods="$method"
