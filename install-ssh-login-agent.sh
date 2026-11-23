@@ -110,9 +110,13 @@ if [ "${1:-}" = "--send" ]; then
   event_time="$6"
   auth_method="$7"
   curl_bin="$(command -v curl || printf '/usr/bin/curl')"
+  ip_flag=()
+  case "${GLA_CURL_IP_FAMILY:-}" in
+    -4|-6) ip_flag=("$GLA_CURL_IP_FAMILY") ;;
+  esac
   escaped_key="$(printf '%s' "$GLA_SSH_LOGIN_KEY" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
   printf 'header = "X-GLA-Key: %s"\n' "$escaped_key" | \
-    "$curl_bin" --config - --silent --show-error --fail --retry 3 --retry-delay 2 \
+    "$curl_bin" "${ip_flag[@]}" --config - --silent --show-error --fail --retry 3 --retry-delay 2 \
       --connect-timeout 3 --max-time 10 \
       --data-urlencode "server=$GLA_SERVER_NAME" \
       --data-urlencode "user=$username" \
@@ -163,11 +167,15 @@ if command -v systemd-run >/dev/null 2>&1; then
     /usr/local/sbin/gla-ssh-login --send \
     "$username" "$source_ip" "$source_port" "$ssh_port" "$event_time" "$auth_method" \
     >/dev/null 2>&1 || true
+elif command -v setsid >/dev/null 2>&1; then
+  setsid /usr/local/sbin/gla-ssh-login --send \
+    "$username" "$source_ip" "$source_port" "$ssh_port" "$event_time" "$auth_method" \
+    </dev/null >/dev/null 2>&1 &
 else
   (
     nohup /usr/local/sbin/gla-ssh-login --send \
       "$username" "$source_ip" "$source_port" "$ssh_port" "$event_time" "$auth_method" \
-      >/dev/null 2>&1 </dev/null &
+      </dev/null >/dev/null 2>&1 &
   ) || true
 fi
 exit 0
@@ -176,6 +184,12 @@ AGENT
     if ! grep -Fqx "$PAM_LINE" "$PAM_FILE"; then
       cp -a "$PAM_FILE" "$PAM_FILE.gla-backup"
       printf '\n# GLA SSH successful login event\n%s\n' "$PAM_LINE" >>"$PAM_FILE"
+    fi
+    if ! sshd -T 2>/dev/null | grep -Fqx 'usepam yes'; then
+      printf '警告：sshd 当前未启用 UsePAM yes，PAM 登录告警不会触发；请在 /etc/ssh/sshd_config 中启用 UsePAM yes 后重载 sshd。\n' >&2
+    fi
+    if ! curl --silent --connect-timeout 3 --max-time 6 -o /dev/null "$SSH_LOGIN_URL"; then
+      printf '警告：当前无法连通接收地址 %s，请检查出站网络或 DNS（IPv4/IPv6）。\n' "$SSH_LOGIN_URL" >&2
     fi
     printf 'GLA SSH 登录事件采集已启用：%s\n' "$SERVER_NAME"
     printf 'SSH 登录不依赖中心端可用性；事件异步发送，发送失败不会影响登录。\n'
