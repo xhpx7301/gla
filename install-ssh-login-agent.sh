@@ -21,15 +21,28 @@ reload_sshd() {
   if command -v systemctl >/dev/null 2>&1; then
     systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
   elif command -v rc-service >/dev/null 2>&1; then
-    rc-service sshd reload 2>/dev/null || true
+    if [ "${1:-}" = "restart" ]; then
+      rc-service sshd restart 2>/dev/null || true
+    else
+      rc-service sshd reload 2>/dev/null || rc-service sshd restart 2>/dev/null || true
+    fi
   elif command -v service >/dev/null 2>&1; then
     service ssh reload 2>/dev/null || service sshd reload 2>/dev/null || true
   fi
 }
 
+sshd_bin() {
+  if [ -x /usr/sbin/sshd.pam ]; then
+    printf '/usr/sbin/sshd.pam\n'
+  else
+    command -v sshd
+  fi
+}
+
 sshd_has_option() {
-  local opt="$1" output=""
-  output="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || sshd -T 2>/dev/null || true)"
+  local opt="$1" bin="" output=""
+  bin="$(sshd_bin)"
+  output="$("$bin" -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || "$bin" -T 2>/dev/null || true)"
   grep -Fqx "$opt" <<<"$output"
 }
 
@@ -74,8 +87,8 @@ case "$ACTION" in
       fi
       cat "$tmp_pam_cfg" >"$SSHD_CONFIG_FILE"
       rm -f "$tmp_pam_cfg"
-      if pam_check="$(sshd -t 2>&1)" && sshd_has_option 'usepam yes'; then
-        reload_sshd
+      if pam_check="$("$(sshd_bin)" -t 2>&1)" && sshd_has_option 'usepam yes'; then
+        reload_sshd restart
       else
         cp -a "$SSHD_CONFIG_FILE.gla-backup" "$SSHD_CONFIG_FILE"
         printf '警告：自动启用 UsePAM yes 失败，已恢复原 sshd 配置；请手动检查 %s。\n' "$SSHD_CONFIG_FILE" >&2
@@ -97,7 +110,7 @@ case "$ACTION" in
       fi
       printf 'ExposeAuthInfo yes\n' >"$SSH_AUTH_INFO_FILE"
       chmod 0644 "$SSH_AUTH_INFO_FILE"
-      if sshd_check="$(sshd -t 2>&1)"; then
+      if sshd_check="$("$(sshd_bin)" -t 2>&1)"; then
         if sshd_has_option 'exposeauthinfo yes'; then
           : >"$SSH_AUTH_INFO_MARKER"
           chmod 0600 "$SSH_AUTH_INFO_MARKER"
@@ -224,7 +237,7 @@ AGENT
     if [ -e "$SSH_AUTH_INFO_MARKER" ] || [ -e "$SSH_INCLUDE_MARKER" ]; then
       restore_ssh_auth_config
     fi
-    if command -v sshd >/dev/null 2>&1 && sshd -t 2>/dev/null; then
+    if command -v sshd >/dev/null 2>&1 && "$(sshd_bin)" -t 2>/dev/null; then
       reload_sshd
     fi
     rm -f "$AGENT_FILE" "$CONFIG_FILE"
