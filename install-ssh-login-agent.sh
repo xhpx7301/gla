@@ -50,15 +50,31 @@ case "$ACTION" in
     [[ "$SSH_LOGIN_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/api/ssh-login$ ]] || die "SSH_LOGIN_URL 必须是 HTTPS 地址，并以 /api/ssh-login 结尾。"
     [[ "$SSH_LOGIN_KEY" =~ ^[A-Fa-f0-9]{64}$ ]] || die "SSH_LOGIN_KEY 必须是 64 位十六进制密钥。"
     command -v curl >/dev/null 2>&1 || die "需要 curl。"
-    if [ ! -f "$PAM_FILE" ]; then
-      if command -v apk >/dev/null 2>&1; then
-        die "未找到 $PAM_FILE；Alpine 请先执行：apk add --no-cache openssh-server-pam，并在 /etc/ssh/sshd_config 中启用 UsePAM yes 后重载 sshd。"
-      fi
-      die "未找到 $PAM_FILE。"
+    if [ ! -f "$PAM_FILE" ] && command -v apk >/dev/null 2>&1; then
+      printf '检测到 Alpine 且缺少 PAM 支持，正在安装 openssh-server-pam...\n'
+      apk add --no-cache openssh-server-pam >/dev/null || die "安装 openssh-server-pam 失败。"
     fi
+    [ -f "$PAM_FILE" ] || die "未找到 $PAM_FILE。"
     command -v sshd >/dev/null 2>&1 || die "未找到 sshd。"
 
     install -d -o root -g root -m 0700 "$CONFIG_DIR"
+    if ! sshd -T 2>/dev/null | grep -Fqx 'usepam yes'; then
+      [ -e "$SSHD_CONFIG_FILE.gla-backup" ] || cp -a "$SSHD_CONFIG_FILE" "$SSHD_CONFIG_FILE.gla-backup"
+      tmp_pam_cfg="$(mktemp "${SSHD_CONFIG_FILE}.gla.XXXXXX")"
+      if grep -Eq '^[#[:space:]]*UsePAM([[:space:]]|$)' "$SSHD_CONFIG_FILE"; then
+        sed 's/^[#[:space:]]*UsePAM.*/UsePAM yes/' "$SSHD_CONFIG_FILE" >"$tmp_pam_cfg"
+      else
+        { printf 'UsePAM yes\n'; cat "$SSHD_CONFIG_FILE"; } >"$tmp_pam_cfg"
+      fi
+      cat "$tmp_pam_cfg" >"$SSHD_CONFIG_FILE"
+      rm -f "$tmp_pam_cfg"
+      if sshd -t 2>/dev/null && sshd -T 2>/dev/null | grep -Fqx 'usepam yes'; then
+        reload_sshd
+      else
+        cp -a "$SSHD_CONFIG_FILE.gla-backup" "$SSHD_CONFIG_FILE"
+        printf '警告：自动启用 UsePAM yes 失败，已恢复原 sshd 配置；请手动检查 %s。\n' "$SSHD_CONFIG_FILE" >&2
+      fi
+    fi
     if ! sshd -T 2>/dev/null | grep -Fqx 'exposeauthinfo yes'; then
       install -d -o root -g root -m 0755 "${SSH_AUTH_INFO_FILE%/*}"
       if ! grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf([[:space:]]|$)' "$SSHD_CONFIG_FILE"; then
