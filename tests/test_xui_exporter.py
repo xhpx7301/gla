@@ -2140,7 +2140,7 @@ class ExporterTest(unittest.TestCase):
             ddos_cfg = root / "ddos-alert-config.json"
             admin_html = pathlib.Path(__file__).parents[1] / "assets" / "admin.html"
             html_text = admin_html.read_text(encoding="utf-8")
-            for marker in ('data-tab="ddos"', "ddos-config-form", "ddos-servers-tbody", "modal-ddos-server"):
+            for marker in ('data-tab="ddos"', "ddos-config-form", "ddos-servers-tbody", "modal-ddos-server", "auto-refresh-btn"):
                 self.assertIn(marker, html_text)
 
             server = EXPORTER.ThreadingHTTPServer(("127.0.0.1", 0), EXPORTER.MetricsHandler)

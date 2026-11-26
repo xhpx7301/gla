@@ -406,6 +406,7 @@
         </div>
         <div class="row">
           <button class="secondary" id="theme-btn" type="button">浅色主题</button>
+          <button class="secondary" id="auto-refresh-btn" type="button">自动刷新：关</button>
           <button class="secondary" id="refresh-btn">刷新状态</button>
           <button class="secondary" id="logout-btn">退出登录</button>
         </div>
@@ -915,7 +916,7 @@
       finally { btn.disabled = false; btn.textContent = orig; }
     }
 
-    function renderOverview(data) {
+    function renderOverview(data, { liveOnly = false } = {}) {
       state = data;
       const totalPanels = data.panels.length;
       const upPanels = data.panels.filter(p => p.up).length;
@@ -925,7 +926,7 @@
       document.getElementById("server-summary").textContent =
         `中心节点：${data.server_name}  ·  当前账户：${data.admin?.username || "-"}`;
       document.getElementById("default-pwd-warn").classList.toggle("hidden", !data.admin?.default_password);
-      document.getElementById("pwd-username").value = data.admin?.username || "";
+      if (!liveOnly) document.getElementById("pwd-username").value = data.admin?.username || "";
 
       document.getElementById("kpi-panels").textContent = `${upPanels} / ${totalPanels}`;
       document.getElementById("kpi-panels-sub").textContent =
@@ -970,7 +971,7 @@
         panelsTbody.appendChild(el("tr", {}, [el("td", { colspan: "5", className: "hint", text: "尚未添加 3x-ui 面板" })]));
       }
 
-      document.getElementById("ssh-ingest-url").value = data.ssh_login.ingest_url || "";
+      if (!liveOnly) document.getElementById("ssh-ingest-url").value = data.ssh_login.ingest_url || "";
       const groupsTbody = document.getElementById("ip-groups-tbody");
       groupsTbody.replaceChildren();
       for (const [gname, cidrs] of Object.entries(data.ssh_login.ip_groups)) {
@@ -1030,32 +1031,36 @@
         serversTbody.appendChild(el("tr", {}, [el("td", { colspan: "4", className: "hint", text: "尚未添加受监控服务器" })]));
       }
 
-      document.getElementById("tg-users").value = (data.telegram.allowed_user_ids || []).join(",");
-      document.getElementById("tg-cooldown").value = data.telegram.notification_cooldown_seconds ?? 3600;
-      document.getElementById("tg-fast-samples").value = data.telegram.fast_confirmation_samples ?? 6;
-      document.getElementById("tg-fast-kib").value = Math.round((data.telegram.fast_confirmation_min_bytes ?? 1048576) / 1024);
-      document.getElementById("tg-confirm").value = data.telegram.online_confirmation_samples ?? 20;
-      document.getElementById("tg-confirm-kib").value = Math.round((data.telegram.online_confirmation_min_bytes ?? 51200) / 1024);
-      document.getElementById("tg-cross-panel").checked = !!data.telegram.cross_panel_cooldown;
-      document.getElementById("ssh-tg-users").value = (data.ssh_telegram.allowed_user_ids || []).join(",");
+      if (!liveOnly) {
+        document.getElementById("tg-users").value = (data.telegram.allowed_user_ids || []).join(",");
+        document.getElementById("tg-cooldown").value = data.telegram.notification_cooldown_seconds ?? 3600;
+        document.getElementById("tg-fast-samples").value = data.telegram.fast_confirmation_samples ?? 6;
+        document.getElementById("tg-fast-kib").value = Math.round((data.telegram.fast_confirmation_min_bytes ?? 1048576) / 1024);
+        document.getElementById("tg-confirm").value = data.telegram.online_confirmation_samples ?? 20;
+        document.getElementById("tg-confirm-kib").value = Math.round((data.telegram.online_confirmation_min_bytes ?? 51200) / 1024);
+        document.getElementById("tg-cross-panel").checked = !!data.telegram.cross_panel_cooldown;
+        document.getElementById("ssh-tg-users").value = (data.ssh_telegram.allowed_user_ids || []).join(",");
+      }
 
-      renderDdosSection(data);
+      renderDdosSection(data, { liveOnly });
     }
 
-    function renderDdosSection(data) {
+    function renderDdosSection(data, { liveOnly = false } = {}) {
       const ddos = data.ddos || {};
       const defaults = ddos.defaults || {};
       document.getElementById("ddos-bot-warn").classList.toggle("hidden", !!data.ssh_telegram?.configured);
-      document.getElementById("ddos-enabled").checked = !!ddos.enabled;
-      document.getElementById("ddos-notify-recovery").checked = ddos.notify_recovery !== false;
-      document.getElementById("ddos-interval").value = ddos.check_interval_seconds ?? 30;
-      document.getElementById("ddos-cooldown").value = ddos.cooldown_seconds ?? 600;
-      document.getElementById("ddos-confirm").value = ddos.confirm_samples ?? 2;
-      document.getElementById("ddos-rx-mbps").value = defaults.rx_mbps_threshold ?? 300;
-      document.getElementById("ddos-rx-pps").value = defaults.rx_pps_threshold ?? 30000;
-      document.getElementById("ddos-softirq").value = defaults.softirq_pct_threshold ?? 50;
-      document.getElementById("ddos-ufw-mbps").value = defaults.ufw_denied_mbps_threshold ?? 20;
-      document.getElementById("ddos-offline").value = defaults.offline_seconds_threshold ?? 180;
+      if (!liveOnly) {
+        document.getElementById("ddos-enabled").checked = !!ddos.enabled;
+        document.getElementById("ddos-notify-recovery").checked = ddos.notify_recovery !== false;
+        document.getElementById("ddos-interval").value = ddos.check_interval_seconds ?? 30;
+        document.getElementById("ddos-cooldown").value = ddos.cooldown_seconds ?? 600;
+        document.getElementById("ddos-confirm").value = ddos.confirm_samples ?? 2;
+        document.getElementById("ddos-rx-mbps").value = defaults.rx_mbps_threshold ?? 300;
+        document.getElementById("ddos-rx-pps").value = defaults.rx_pps_threshold ?? 30000;
+        document.getElementById("ddos-softirq").value = defaults.softirq_pct_threshold ?? 50;
+        document.getElementById("ddos-ufw-mbps").value = defaults.ufw_denied_mbps_threshold ?? 20;
+        document.getElementById("ddos-offline").value = defaults.offline_seconds_threshold ?? 180;
+      }
 
       const vmBadge = document.getElementById("ddos-vm-badge");
       if (ddos.vm_ok === true) {
@@ -1186,9 +1191,9 @@
       } catch (e) { toast(e.message, true); }
     }
 
-    async function loadOverview() {
+    async function loadOverview(opts = {}) {
       const data = await api("/api/admin/overview");
-      renderOverview(data);
+      renderOverview(data, opts);
     }
 
     function openPanelModal(p = null) {
@@ -1628,6 +1633,43 @@
           apply(next);
         };
       }
+    })();
+
+    (function initAutoRefresh() {
+      const btn = document.getElementById("auto-refresh-btn");
+      let timer = null;
+      let enabled = localStorage.getItem("gla_admin_auto_refresh") === "1";
+      const renderBtn = () => {
+        if (!btn) return;
+        btn.textContent = enabled ? "自动刷新：开 (30s)" : "自动刷新：关";
+        btn.classList.toggle("secondary", !enabled);
+      };
+      const tick = () => {
+        if (!enabled || document.hidden) return;
+        const appView = document.getElementById("app-view");
+        if (!appView || appView.classList.contains("hidden")) return;
+        if (document.querySelector(".modal-backdrop:not(.hidden)")) return;
+        loadOverview({ liveOnly: true }).catch(() => {});
+      };
+      const syncTimer = () => {
+        if (timer) { clearInterval(timer); timer = null; }
+        if (enabled) timer = setInterval(tick, 30000);
+        renderBtn();
+      };
+      if (btn) {
+        btn.onclick = () => {
+          enabled = !enabled;
+          localStorage.setItem("gla_admin_auto_refresh", enabled ? "1" : "0");
+          syncTimer();
+          if (enabled) {
+            loadOverview({ liveOnly: true }).catch(() => {});
+            toast("已开启每 30 秒自动刷新");
+          } else {
+            toast("已关闭自动刷新");
+          }
+        };
+      }
+      syncTimer();
     })();
 
     (async () => {
