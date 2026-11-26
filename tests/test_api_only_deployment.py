@@ -168,6 +168,8 @@ chmod() { :; }
             self.assertIn('prometheus.scrape "host"', alloy)
             self.assertIn('loki.source.journal "ssh"', alloy)
             self.assertIn("XUI_PANELS_FILE: /run/secrets/xui-panels.json", compose)
+            self.assertIn("XUI_VICTORIAMETRICS_URL: http://victoriametrics:8428", compose)
+            self.assertIn("XUI_DDOS_ALERT_CONFIG_FILE: /run/secrets/ddos-alert-config.json", compose)
             self.assertIn("XUI_TELEGRAM_CONFIG_FILE: /run/secrets/telegram-config.json", compose)
             self.assertIn("XUI_WEB_ADMIN_CONFIG_FILE: /run/secrets/web-admin.json", compose)
             self.assertIn("./secrets:/run/secrets", compose)

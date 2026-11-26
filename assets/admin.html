@@ -128,6 +128,9 @@
     .kpi-card.kpi-ssh-tg { background-image: linear-gradient(135deg, rgba(245,158,11,0.12), transparent 60%); }
     .kpi-card.kpi-ssh-tg::after { background: linear-gradient(180deg, #f59e0b, #fb923c); }
     .kpi-card.kpi-ssh-tg .kpi-value { color: var(--amber); }
+    .kpi-card.kpi-ddos { background-image: linear-gradient(135deg, rgba(244,63,94,0.12), transparent 60%); }
+    .kpi-card.kpi-ddos::after { background: linear-gradient(180deg, #f43f5e, #fb7185); }
+    .kpi-card.kpi-ddos .kpi-value { color: var(--rose); }
     .kpi-label { font-size: 12px; color: var(--muted); font-weight: 600; letter-spacing: 0.02em; }
     .kpi-value { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; display: flex; align-items: center; gap: 8px; }
     .kpi-sub { font-size: 12px; color: var(--muted); }
@@ -160,6 +163,10 @@
       background: linear-gradient(135deg, rgba(99,102,241,0.24), rgba(168,85,247,0.22));
       color: var(--violet); border-color: rgba(167,139,250,0.4); font-weight: 600;
     }
+    .tab[data-tab="ddos"].active {
+      background: linear-gradient(135deg, rgba(244,63,94,0.24), rgba(251,146,60,0.20));
+      color: var(--rose); border-color: rgba(251,113,133,0.42); font-weight: 600;
+    }
     .tab[data-tab="telegram"].active {
       background: linear-gradient(135deg, rgba(14,165,233,0.24), rgba(34,211,238,0.20));
       color: var(--accent); border-color: rgba(56,189,248,0.4); font-weight: 600;
@@ -185,6 +192,7 @@
     }
     #tab-panels h2::before { background: linear-gradient(135deg, #10b981, #38bdf8); }
     #tab-ssh h2::before { background: linear-gradient(135deg, #6366f1, #c084fc); }
+    #tab-ddos h2::before { background: linear-gradient(135deg, #f43f5e, #fb923c); }
     #tab-telegram h2::before { background: linear-gradient(135deg, #0ea5e9, #22d3ee); }
     #tab-security h2::before { background: linear-gradient(135deg, #f59e0b, #fb7185); }
 
@@ -242,6 +250,7 @@
     .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
     .badge.ok { background: var(--ok-soft); color: var(--ok); }
     .badge.err { background: var(--err-soft); color: var(--err); }
+    .badge.warn { background: var(--warn-soft); color: var(--warn); }
     .badge.muted { background: rgba(148, 163, 184, 0.14); color: var(--muted); }
     .ip-pills { display: flex; flex-wrap: wrap; gap: 6px; }
     .ip-pill {
@@ -423,15 +432,21 @@
           <span class="kpi-sub" id="kpi-tg-sub">等待加载</span>
         </div>
         <div class="kpi-card kpi-ssh-tg">
-          <span class="kpi-label">SSH 告警 Bot</span>
+          <span class="kpi-label">安全告警 Bot（SSH / DDoS）</span>
           <div class="kpi-value" id="kpi-ssh-tg">-</div>
           <span class="kpi-sub" id="kpi-ssh-tg-sub">等待加载</span>
+        </div>
+        <div class="kpi-card kpi-ddos">
+          <span class="kpi-label">DDoS 异常告警</span>
+          <div class="kpi-value" id="kpi-ddos">-</div>
+          <span class="kpi-sub" id="kpi-ddos-sub">等待加载</span>
         </div>
       </div>
 
       <div class="tabs">
         <button class="tab active" data-tab="panels">3x-ui 面板</button>
         <button class="tab" data-tab="ssh">SSH 登录告警</button>
+        <button class="tab" data-tab="ddos">DDoS 告警</button>
         <button class="tab" data-tab="telegram">Telegram Bot</button>
         <button class="tab" data-tab="security">安全设置</button>
       </div>
@@ -493,17 +508,76 @@
         </div>
 
         <div class="card">
-          <div class="card-header"><h2>SSH 告警专用 Telegram Bot</h2></div>
+          <div class="card-header"><h2>安全告警专用 Telegram Bot（SSH 登录与 DDoS 共用）</h2></div>
           <form id="ssh-tg-form">
             <div class="grid">
               <div><label>Bot Token（留空保留原值）</label><input id="ssh-tg-token" type="password" autocomplete="new-password"></div>
               <div><label>允许接收告警的用户 ID（逗号分隔）</label><input id="ssh-tg-users" required placeholder="123456789"></div>
             </div>
+            <div class="hint">SSH 陌生登录告警与 DDoS / 节点失联告警均通过此 Bot 推送，互不影响「监控与上线通知」Bot。</div>
             <div class="row" style="margin-top:14px;">
               <button type="submit">保存配置</button>
               <button type="button" class="secondary" id="ssh-tg-test">发送测试消息</button>
             </div>
           </form>
+        </div>
+      </section>
+
+      <section id="tab-ddos" class="hidden">
+        <div id="ddos-bot-warn" class="alert-warn hidden">
+          <span>⚠️ 尚未配置安全告警 Telegram Bot，DDoS 告警触发后将无法推送通知，请先前往「SSH 登录告警」页配置 Bot。</span>
+          <button type="button" class="sm secondary" id="goto-ssh-bot-btn">去配置 Bot</button>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>全局检测策略与默认阈值</h2>
+            <span class="badge muted" id="ddos-vm-badge">等待检查 VictoriaMetrics</span>
+          </div>
+          <form id="ddos-config-form">
+            <div class="row" style="margin-bottom:14px;gap:20px;">
+              <label class="check-label"><input id="ddos-enabled" type="checkbox"> 启用 DDoS 与节点失联告警</label>
+              <label class="check-label"><input id="ddos-notify-recovery" type="checkbox" checked> 异常或失联恢复后发送恢复通知</label>
+            </div>
+            <div class="grid">
+              <div><label>检测间隔（秒，15-300）</label><input id="ddos-interval" type="number" min="15" max="300" value="30" required></div>
+              <div><label>告警冷却（秒，0-86400）</label><input id="ddos-cooldown" type="number" min="0" max="86400" value="600" required></div>
+              <div><label>连续确认次数（1-10）</label><input id="ddos-confirm" type="number" min="1" max="10" value="2" required></div>
+              <div><label>入站带宽阈值（Mbps，0 关闭）</label><input id="ddos-rx-mbps" type="number" min="0" max="100000" step="0.1" value="300" required></div>
+              <div><label>入站包速率阈值（PPS，0 关闭）</label><input id="ddos-rx-pps" type="number" min="0" max="50000000" step="1" value="30000" required></div>
+              <div><label>CPU 软中断阈值（softirq %，0 关闭）</label><input id="ddos-softirq" type="number" min="0" max="100" step="0.1" value="50" required></div>
+              <div><label>UFW 拒绝流量阈值（Mbps，0 关闭）</label><input id="ddos-ufw-mbps" type="number" min="0" max="100000" step="0.1" value="20" required></div>
+              <div><label>节点失联超时（秒，0 关闭）</label><input id="ddos-offline" type="number" min="0" max="86400" value="180" required></div>
+            </div>
+            <div class="hint">中心端直接查询 VictoriaMetrics 主机指标，采集端无需额外进程。低配小鸡建议重点关注 PPS、softirq 与失联超时；高配中心节点可在下方单独调高阈值。</div>
+            <div class="row" style="margin-top:14px;">
+              <button type="submit">保存 DDoS 配置</button>
+              <button type="button" class="secondary" id="ddos-test">发送测试告警</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>节点实时状态与独立阈值</h2>
+            <button type="button" id="open-add-ddos-server-btn">+ 添加节点覆盖</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>节点名称</th><th>状态</th><th>实时指标（入站 / PPS / softirq / UFW 拒绝）</th><th>阈值策略</th><th>操作</th></tr></thead>
+              <tbody id="ddos-servers-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h2>最近告警记录</h2></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>时间（UTC+8）</th><th>节点</th><th>事件</th><th>详情</th><th>Telegram</th></tr></thead>
+              <tbody id="ddos-history-tbody"></tbody>
+            </table>
+          </div>
         </div>
       </section>
 
@@ -678,6 +752,40 @@
     </div>
   </div>
 
+  <!-- 弹窗 5：节点 DDoS 阈值覆盖 -->
+  <div id="modal-ddos-server" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <h2 id="ddos-server-modal-title">节点 DDoS 阈值设置</h2>
+        <button type="button" class="modal-close" data-close="modal-ddos-server">&times;</button>
+      </div>
+      <form id="ddos-server-form">
+        <div class="modal-body">
+          <input type="hidden" id="ddos-server-orig-name">
+          <div class="grid">
+            <div><label>节点名称（与 SERVER_NAME 一致）</label><input id="ddos-server-name" required placeholder="例如 node-hk"></div>
+            <div><label>备注（可选）</label><input id="ddos-server-note" placeholder="例如 1C1G 采集节点"></div>
+          </div>
+          <div style="margin-top:12px;">
+            <label class="check-label"><input id="ddos-server-enabled" type="checkbox" checked> 启用该节点 DDoS 与失联告警</label>
+          </div>
+          <div class="grid" style="margin-top:12px;">
+            <div><label>入站带宽 (Mbps，留空继承默认)</label><input id="ddos-server-rx-mbps" type="number" min="0" max="100000" step="0.1" placeholder="继承默认"></div>
+            <div><label>入站包速率 (PPS，留空继承默认)</label><input id="ddos-server-rx-pps" type="number" min="0" max="50000000" step="1" placeholder="继承默认"></div>
+            <div><label>CPU 软中断 (%，留空继承默认)</label><input id="ddos-server-softirq" type="number" min="0" max="100" step="0.1" placeholder="继承默认"></div>
+            <div><label>UFW 拒绝 (Mbps，留空继承默认)</label><input id="ddos-server-ufw-mbps" type="number" min="0" max="100000" step="0.1" placeholder="继承默认"></div>
+            <div><label>失联超时 (秒，留空继承默认)</label><input id="ddos-server-offline" type="number" min="0" max="86400" placeholder="继承默认"></div>
+          </div>
+          <div class="hint">填写 <code>0</code> 表示关闭该项检测；留空则继承全局默认阈值。</div>
+        </div>
+        <div class="modal-foot">
+          <button type="button" class="secondary" data-close="modal-ddos-server">取消</button>
+          <button type="submit">保存节点配置</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div id="toast" class="toast"></div>
 
   <script>
@@ -801,8 +909,16 @@
         : "前往 Telegram Bot 页配置";
       document.getElementById("kpi-ssh-tg").textContent = data.ssh_telegram.configured ? "已配置" : "未配置";
       document.getElementById("kpi-ssh-tg-sub").textContent = data.ssh_telegram.configured
-        ? `接收用户：${(data.ssh_telegram.allowed_user_ids || []).length} 人`
+        ? `接收用户：${(data.ssh_telegram.allowed_user_ids || []).length} 人（SSH / DDoS 共用）`
         : "前往 SSH 登录告警页配置";
+
+      const ddos = data.ddos || {};
+      const ddosServers = ddos.servers || [];
+      const activeDdosAlerts = ddosServers.filter(s => s.state === "alerting" || s.state === "offline").length;
+      document.getElementById("kpi-ddos").textContent = ddos.enabled ? (activeDdosAlerts ? `${activeDdosAlerts} 台告警` : "监控中") : "未启用";
+      document.getElementById("kpi-ddos-sub").textContent = ddos.enabled
+        ? `已发现 ${ddosServers.length} 台节点 · ${data.ssh_telegram.configured ? "Bot 就绪" : "待配置 Bot"}`
+        : "前往 DDoS 告警页开启";
 
       const panelsTbody = document.getElementById("panels-tbody");
       panelsTbody.replaceChildren();
@@ -892,6 +1008,152 @@
       document.getElementById("tg-confirm-kib").value = Math.round((data.telegram.online_confirmation_min_bytes ?? 51200) / 1024);
       document.getElementById("tg-cross-panel").checked = !!data.telegram.cross_panel_cooldown;
       document.getElementById("ssh-tg-users").value = (data.ssh_telegram.allowed_user_ids || []).join(",");
+
+      renderDdosSection(data);
+    }
+
+    function renderDdosSection(data) {
+      const ddos = data.ddos || {};
+      const defaults = ddos.defaults || {};
+      document.getElementById("ddos-bot-warn").classList.toggle("hidden", !!data.ssh_telegram?.configured);
+      document.getElementById("ddos-enabled").checked = !!ddos.enabled;
+      document.getElementById("ddos-notify-recovery").checked = ddos.notify_recovery !== false;
+      document.getElementById("ddos-interval").value = ddos.check_interval_seconds ?? 30;
+      document.getElementById("ddos-cooldown").value = ddos.cooldown_seconds ?? 600;
+      document.getElementById("ddos-confirm").value = ddos.confirm_samples ?? 2;
+      document.getElementById("ddos-rx-mbps").value = defaults.rx_mbps_threshold ?? 300;
+      document.getElementById("ddos-rx-pps").value = defaults.rx_pps_threshold ?? 30000;
+      document.getElementById("ddos-softirq").value = defaults.softirq_pct_threshold ?? 50;
+      document.getElementById("ddos-ufw-mbps").value = defaults.ufw_denied_mbps_threshold ?? 20;
+      document.getElementById("ddos-offline").value = defaults.offline_seconds_threshold ?? 180;
+
+      const vmBadge = document.getElementById("ddos-vm-badge");
+      if (ddos.vm_ok === true) {
+        vmBadge.className = "badge ok";
+        vmBadge.textContent = "VictoriaMetrics 正常";
+      } else if (ddos.vm_ok === false) {
+        vmBadge.className = "badge err";
+        vmBadge.textContent = "VictoriaMetrics 异常：" + (ddos.vm_error || "不可用");
+      } else {
+        vmBadge.className = "badge muted";
+        vmBadge.textContent = "等待首次检测";
+      }
+
+      const stateMeta = {
+        normal: ["ok", "正常"],
+        pending: ["warn", "待确认"],
+        alerting: ["err", "异常告警中"],
+        offline: ["err", "疑似失联/黑洞"],
+        ignored: ["muted", "已忽略"],
+        waiting: ["muted", "待上报"]
+      };
+      const serversTbody = document.getElementById("ddos-servers-tbody");
+      serversTbody.replaceChildren();
+      const servers = ddos.servers || [];
+      for (const s of servers) {
+        const [badgeCls, badgeTxt] = stateMeta[s.state] || ["muted", s.state || "未知"];
+        const statusCell = el("td");
+        statusCell.appendChild(el("span", { className: "badge " + badgeCls, text: badgeTxt }));
+        if (s.sample_age_seconds !== null && s.sample_age_seconds !== undefined) {
+          statusCell.appendChild(el("div", {
+            className: "hint",
+            style: "margin-top:4px;",
+            text: `最近样本 ${Math.round(s.sample_age_seconds)}s 前`
+          }));
+        }
+        const metricsText = (s.rx_mbps === null && s.rx_pps === null && s.softirq_pct === null)
+          ? "暂无实时主机指标"
+          : `${s.rx_mbps ?? "-"} Mbps · ${s.rx_pps !== null && s.rx_pps !== undefined ? Math.round(s.rx_pps).toLocaleString() : "-"} PPS · softirq ${s.softirq_pct ?? "-"}%` +
+            (s.ufw_denied_mbps !== null && s.ufw_denied_mbps !== undefined ? ` · UFW ${s.ufw_denied_mbps} Mbps` : "");
+        const pol = s.policy || {};
+        const policyText = (pol.enabled === false)
+          ? "已停用该节点"
+          : `${pol.customized ? "自定义" : "默认"}（${pol.rx_mbps_threshold} Mbps / ${Math.round(pol.rx_pps_threshold || 0)} PPS / ${pol.softirq_pct_threshold}% / 失联 ${pol.offline_seconds_threshold}s）` +
+            (pol.note ? ` · ${pol.note}` : "");
+
+        const editBtn = el("button", { className: "sm secondary", type: "button", text: "自定义阈值" });
+        editBtn.onclick = () => openDdosServerModal(s.server, pol);
+        const actions = [editBtn];
+        if (pol.customized) {
+          const resetBtn = el("button", { className: "sm secondary", type: "button", text: "恢复默认" });
+          resetBtn.onclick = () => deleteDdosServer(s.server, false);
+          actions.push(resetBtn);
+        }
+        if (s.state === "offline" || s.state === "waiting") {
+          const forgetBtn = el("button", { className: "sm danger", type: "button", text: "移除记录" });
+          forgetBtn.onclick = () => deleteDdosServer(s.server, true);
+          actions.push(forgetBtn);
+        }
+
+        serversTbody.appendChild(el("tr", {}, [
+          el("td", { style: "font-weight:600;", text: s.server }),
+          statusCell,
+          el("td", { className: "mono", text: metricsText }),
+          el("td", { className: "hint", style: "margin:0;", text: policyText }),
+          el("td", {}, [el("div", { className: "row" }, actions)])
+        ]));
+      }
+      if (!servers.length) {
+        serversTbody.appendChild(el("tr", {}, [el("td", { colspan: "5", className: "hint", text: "暂未发现上报主机指标的节点（请确认采集端已开启主机指标）" })]));
+      }
+
+      const fmtUtc8 = ts => {
+        const d = new Date(ts * 1000 + 8 * 3600 * 1000);
+        return d.toISOString().slice(0, 19).replace("T", " ");
+      };
+      const kindMeta = {
+        attack: ["err", "流量/协议栈异常"],
+        attack_recovered: ["ok", "异常已恢复"],
+        offline: ["err", "疑似失联/黑洞"],
+        offline_recovered: ["ok", "节点已恢复"]
+      };
+      const histTbody = document.getElementById("ddos-history-tbody");
+      histTbody.replaceChildren();
+      const history = ddos.history || [];
+      for (const h of history) {
+        const [kCls, kTxt] = kindMeta[h.kind] || ["muted", h.kind];
+        histTbody.appendChild(el("tr", {}, [
+          el("td", { className: "mono", text: fmtUtc8(h.created_at) }),
+          el("td", { style: "font-weight:600;", text: h.server }),
+          el("td", {}, [el("span", { className: "badge " + kCls, text: kTxt })]),
+          el("td", { text: h.summary }),
+          el("td", {}, [el("span", { className: "badge " + (h.delivered ? "ok" : "muted"), text: h.delivered ? "已送达" : "未发送" })])
+        ]));
+      }
+      if (!history.length) {
+        histTbody.appendChild(el("tr", {}, [el("td", { colspan: "5", className: "hint", text: "暂无 DDoS 或节点失联告警记录" })]));
+      }
+    }
+
+    function openDdosServerModal(name = "", policy = null) {
+      const form = document.getElementById("ddos-server-form");
+      form.reset();
+      const rawOverride = (state?.ddos?.server_overrides || {})[name] || {};
+      const isEdit = !!name;
+      document.getElementById("ddos-server-modal-title").textContent = isEdit ? ("节点阈值设置：" + name) : "添加节点 DDoS 阈值覆盖";
+      document.getElementById("ddos-server-orig-name").value = name;
+      document.getElementById("ddos-server-name").value = name;
+      document.getElementById("ddos-server-enabled").checked = rawOverride.enabled !== false && (policy ? policy.enabled !== false : true);
+      document.getElementById("ddos-server-note").value = rawOverride.note || "";
+      document.getElementById("ddos-server-rx-mbps").value = rawOverride.rx_mbps_threshold ?? "";
+      document.getElementById("ddos-server-rx-pps").value = rawOverride.rx_pps_threshold ?? "";
+      document.getElementById("ddos-server-softirq").value = rawOverride.softirq_pct_threshold ?? "";
+      document.getElementById("ddos-server-ufw-mbps").value = rawOverride.ufw_denied_mbps_threshold ?? "";
+      document.getElementById("ddos-server-offline").value = rawOverride.offline_seconds_threshold ?? "";
+      openModal("modal-ddos-server");
+    }
+
+    async function deleteDdosServer(name, forget) {
+      const msg = forget ? `确定移除节点 ${name} 的历史状态与自定义配置？` : `确定恢复节点 ${name} 为全局默认阈值？`;
+      if (!confirm(msg)) return;
+      try {
+        await api("/api/admin/ddos/servers", {
+          method: "DELETE",
+          body: JSON.stringify({ name, forget: !!forget })
+        });
+        toast(forget ? "节点记录已移除" : "已恢复默认阈值");
+        await loadOverview();
+      } catch (e) { toast(e.message, true); }
     }
 
     async function loadOverview() {
@@ -1007,15 +1269,17 @@
       } catch (e) { toast(e.message, true); }
     }
 
+    function switchTab(tabId) {
+      document.querySelectorAll(".tab").forEach(b => b.classList.toggle("active", b.dataset.tab === tabId));
+      ["panels", "ssh", "ddos", "telegram", "security"].forEach(id => {
+        document.getElementById("tab-" + id).classList.toggle("hidden", tabId !== id);
+      });
+    }
     document.querySelectorAll(".tab").forEach(btn => {
-      btn.onclick = () => {
-        document.querySelectorAll(".tab").forEach(b => b.classList.remove("active"));
-        btn.classList.add("active");
-        ["panels", "ssh", "telegram", "security"].forEach(id => {
-          document.getElementById("tab-" + id).classList.toggle("hidden", btn.dataset.tab !== id);
-        });
-      };
+      btn.onclick = () => switchTab(btn.dataset.tab);
     });
+    document.getElementById("goto-ssh-bot-btn").onclick = () => switchTab("ssh");
+    document.getElementById("open-add-ddos-server-btn").onclick = () => openDdosServerModal();
     document.querySelectorAll("[data-ip-tab]").forEach(btn => {
       btn.onclick = () => switchIpModalTab(btn.dataset.ipTab);
     });
@@ -1221,6 +1485,61 @@
 
     document.getElementById("ssh-tg-test").onclick = () =>
       api("/api/admin/ssh-login/telegram/test", { method: "POST", body: "{}" }).then(() => toast("测试消息已发送")).catch(e => toast(e.message, true));
+
+    document.getElementById("ddos-config-form").onsubmit = async e => {
+      e.preventDefault();
+      try {
+        await api("/api/admin/ddos", {
+          method: "POST",
+          body: JSON.stringify({
+            enabled: document.getElementById("ddos-enabled").checked,
+            notify_recovery: document.getElementById("ddos-notify-recovery").checked,
+            check_interval_seconds: Number(document.getElementById("ddos-interval").value),
+            cooldown_seconds: Number(document.getElementById("ddos-cooldown").value),
+            confirm_samples: Number(document.getElementById("ddos-confirm").value),
+            defaults: {
+              rx_mbps_threshold: Number(document.getElementById("ddos-rx-mbps").value),
+              rx_pps_threshold: Number(document.getElementById("ddos-rx-pps").value),
+              softirq_pct_threshold: Number(document.getElementById("ddos-softirq").value),
+              ufw_denied_mbps_threshold: Number(document.getElementById("ddos-ufw-mbps").value),
+              offline_seconds_threshold: Number(document.getElementById("ddos-offline").value)
+            }
+          })
+        });
+        toast("DDoS 告警配置已保存并热重载");
+        await loadOverview();
+      } catch (err) { toast(err.message, true); }
+    };
+
+    document.getElementById("ddos-test").onclick = () =>
+      api("/api/admin/ddos/test", { method: "POST", body: "{}" }).then(() => toast("DDoS 测试告警已发送")).catch(e => toast(e.message, true));
+
+    document.getElementById("ddos-server-form").onsubmit = async e => {
+      e.preventDefault();
+      const optNum = id => {
+        const raw = document.getElementById(id).value.trim();
+        return raw === "" ? null : Number(raw);
+      };
+      try {
+        await api("/api/admin/ddos/servers", {
+          method: "POST",
+          body: JSON.stringify({
+            orig_name: document.getElementById("ddos-server-orig-name").value.trim(),
+            name: document.getElementById("ddos-server-name").value.trim(),
+            enabled: document.getElementById("ddos-server-enabled").checked,
+            note: document.getElementById("ddos-server-note").value.trim(),
+            rx_mbps_threshold: optNum("ddos-server-rx-mbps"),
+            rx_pps_threshold: optNum("ddos-server-rx-pps"),
+            softirq_pct_threshold: optNum("ddos-server-softirq"),
+            ufw_denied_mbps_threshold: optNum("ddos-server-ufw-mbps"),
+            offline_seconds_threshold: optNum("ddos-server-offline")
+          })
+        });
+        closeModal("modal-ddos-server");
+        toast("节点 DDoS 配置已保存并热重载");
+        await loadOverview();
+      } catch (err) { toast(err.message, true); }
+    };
 
     document.getElementById("pwd-form").onsubmit = async e => {
       e.preventDefault();

@@ -595,9 +595,11 @@ ${SECURITY_TRAFFIC_VOLUME_LINE}
       XUI_PANELS_FILE: /run/secrets/xui-panels.json
       XUI_STATE_DIR: /var/lib/xui
       XUI_LOKI_URL: http://alloy:3500/loki/api/v1/push
+      XUI_VICTORIAMETRICS_URL: http://victoriametrics:8428
       XUI_TELEGRAM_CONFIG_FILE: /run/secrets/telegram-config.json
       XUI_SSH_TELEGRAM_CONFIG_FILE: /run/secrets/ssh-telegram-config.json
       XUI_SSH_LOGIN_CONFIG_FILE: /run/secrets/ssh-login-config.json
+      XUI_DDOS_ALERT_CONFIG_FILE: /run/secrets/ddos-alert-config.json
       XUI_WEB_ADMIN_CONFIG_FILE: /run/secrets/web-admin.json
       XUI_ADMIN_HTML_FILE: /app/admin.html
       GEOIP_CITY_DB: /var/lib/gla/geoip/GeoLite2-City.mmdb
@@ -1138,6 +1140,7 @@ show_header() {
   printf '3x-ui API 流量与日志采集  %s\n' "$(xui_state)"
   printf 'SSH 登录告警             %s\n' "$(ssh_login_state)"
   printf 'SSH 告警 Telegram Bot    %s\n' "$(ssh_telegram_state)"
+  printf 'DDoS 异常告警            %s\n' "$(ddos_alert_state)"
   if grep -Eq '^ENABLE_GEOIP=true$' "$STACK_DIR/.install.env" 2>/dev/null; then
     printf 'GeoIP 归属解析            [已启用]\n'
   else
@@ -1686,6 +1689,49 @@ web_admin_command() {
     python:3.12-alpine python3 /app/xui_exporter.py web-admin "$@"
 }
 
+ddos_alert_command() {
+  docker run --rm -i --network none \
+    -e XUI_DDOS_ALERT_CONFIG_FILE=/run/secrets/ddos-alert-config.json \
+    -e XUI_SSH_TELEGRAM_CONFIG_FILE=/run/secrets/ssh-telegram-config.json \
+    -v "$STACK_DIR/secrets:/run/secrets" \
+    -v "$STACK_DIR/assets/xui_exporter.py:/app/xui_exporter.py:ro" \
+    python:3.12-alpine python3 /app/xui_exporter.py ddos-alert "$@"
+}
+
+ddos_alert_state() {
+  local cfg="$STACK_DIR/secrets/ddos-alert-config.json"
+  if [ ! -f "$cfg" ]; then
+    printf '[未启用]'
+  elif grep -Eq '"enabled"[[:space:]]*:[[:space:]]*true' "$cfg" 2>/dev/null; then
+    printf '[已启用]'
+  else
+    printf '[未启用]'
+  fi
+}
+
+configure_ddos_alert() {
+  while true; do
+    clear
+    printf 'DDoS 与节点失联告警管理（与 SSH 告警共用 Telegram Bot）\n\n'
+    ddos_alert_command status || true
+    printf '\n详细阈值与单节点独立配置请通过 Web 配置台（/admin -> DDoS 告警）修改。\n'
+    printf '\n1. 启用 DDoS 告警\n2. 关闭 DDoS 告警\n3. 发送 DDoS 测试告警\n0. 返回\n'
+    read -rp "请输入操作编号 [0-3]: " choice
+    case "$choice" in
+      0) return ;;
+      1) ddos_alert_command enable && compose restart xui-exporter || true; pause ;;
+      2) ddos_alert_command disable && compose restart xui-exporter || true; pause ;;
+      3)
+        if ! docker exec gla-xui-exporter python3 /app/xui_exporter.py ddos-alert test; then
+          printf '测试失败：请先在“SSH 登录告警 -> 管理 SSH 告警 Telegram Bot”配置安全告警 Bot。\n'
+        fi
+        pause
+        ;;
+      *) printf '无效选择。\n'; pause ;;
+    esac
+  done
+}
+
 configure_web_admin() {
   while true; do
     clear
@@ -2210,8 +2256,9 @@ while true; do
 10. 卸载并删除全部数据
 11. 数据备份与导入导出
 12. 管理 Web 配置台（启用/改密/关闭）
+13. 管理 DDoS 告警（启用/停用/测试）
 MENU
-  read -rp "请输入操作编号 [0-12]: " choice
+  read -rp "请输入操作编号 [0-13]: " choice
   case "$choice" in
     0) exit 0 ;;
     1) update_script_and_deploy; exit $? ;;
@@ -2226,6 +2273,7 @@ MENU
     10) uninstall_everything ;;
     11) backup_menu ;;
     12) configure_web_admin ;;
+    13) configure_ddos_alert ;;
     *) printf '无效选择。\n'; pause ;;
   esac
 done

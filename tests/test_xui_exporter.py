@@ -1998,6 +1998,231 @@ class ExporterTest(unittest.TestCase):
             finally:
                 bot.db.close()
 
+    def test_ddos_monitor_confirms_alerts_cools_down_recovers_and_uses_ssh_bot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            ssh_tg_cfg = root / "ssh-telegram-config.json"
+            with mock.patch.object(sys, "stdin", io.StringIO("987:ssh-token")):
+                EXPORTER.telegram_cli(["set", "--user-ids", "42"], ssh_tg_cfg, "ssh-telegram-bot.token")
+            cfg = EXPORTER.normalize_ddos_config({
+                "enabled": True,
+                "cooldown_seconds": 600,
+                "confirm_samples": 2,
+                "notify_recovery": True,
+                "defaults": {
+                    "rx_mbps_threshold": 300,
+                    "rx_pps_threshold": 20000,
+                    "softirq_pct_threshold": 50,
+                    "ufw_denied_mbps_threshold": 20,
+                    "offline_seconds_threshold": 180,
+                },
+            })
+            monitor = EXPORTER.DdosMonitor(cfg, root, vm_url="http://vm.local:8428")
+            monitor.started_at = 900.0
+            with mock.patch.object(EXPORTER, "SSH_TELEGRAM_CONFIG_FILE", str(ssh_tg_cfg)), \
+                    mock.patch.object(EXPORTER, "read_token", return_value="987:ssh-token"), \
+                    mock.patch.object(EXPORTER, "telegram_request") as send:
+                # 1. Normal baseline
+                with mock.patch.object(monitor, "_fetch_metrics", return_value=(
+                    {"node-low": 1000.0}, {"node-low": 12.0}, {"node-low": 1500.0}, {"node-low": 3.0}, {"node-low": 0.1}
+                )):
+                    monitor.evaluate_once(now=1005.0)
+                self.assertEqual(send.call_count, 0)
+
+                # 2. First spike sample -> pending (confirm_samples=2)
+                with mock.patch.object(monitor, "_fetch_metrics", return_value=(
+                    {"node-low": 1030.0}, {"node-low": 40.0}, {"node-low": 45000.0}, {"node-low": 72.5}, {"node-low": 25.0}
+                )):
+                    monitor.evaluate_once(now=1035.0)
+                self.assertEqual(send.call_count, 0)
+                self.assertEqual(monitor.snapshot()["servers"][0]["state"], "pending")
+
+                # 3. Second spike sample -> triggers alert via shared SSH Bot
+                with mock.patch.object(monitor, "_fetch_metrics", return_value=(
+                    {"node-low": 1060.0}, {"node-low": 42.0}, {"node-low": 50000.0}, {"node-low": 78.0}, {"node-low": 28.0}
+                )):
+                    monitor.evaluate_once(now=1065.0)
+                self.assertEqual(send.call_count, 1)
+                self.assertEqual(send.call_args.args[0], "987:ssh-token")
+                alert_text = send.call_args.args[2]["text"]
+                self.assertIn("DDoS / 流量异常告警", alert_text)
+                self.assertIn("node-low", alert_text)
+                self.assertIn("入站包速率(PPS)", alert_text)
+                self.assertIn("平均包长", alert_text)
+
+                # 4. Third spike within cooldown -> suppressed
+                with mock.patch.object(monitor, "_fetch_metrics", return_value=(
+                    {"node-low": 1090.0}, {"node-low": 45.0}, {"node-low": 55000.0}, {"node-low": 80.0}, {"node-low": 30.0}
+                )):
+                    monitor.evaluate_once(now=1095.0)
+                self.assertEqual(send.call_count, 1)
+
+                # 5. Return to normal -> recovery message with peak stats
+                with mock.patch.object(monitor, "_fetch_metrics", return_value=(
+                    {"node-low": 1120.0}, {"node-low": 8.0}, {"node-low": 900.0}, {"node-low": 2.0}, {"node-low": 0.0}
+                )):
+                    monitor.evaluate_once(now=1125.0)
+                self.assertEqual(send.call_count, 2)
+                rec_text = send.call_args.args[2]["text"]
+                self.assertIn("DDoS / 流量异常已恢复", rec_text)
+                self.assertIn("55,000 PPS", rec_text)
+                snap = monitor.snapshot()
+                self.assertEqual(snap["servers"][0]["state"], "normal")
+                self.assertEqual([h["kind"] for h in snap["history"]], ["attack_recovered", "attack"])
+
+    def test_ddos_monitor_detects_offline_blackhole_and_skips_when_vm_down(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            ssh_tg_cfg = root / "ssh-telegram-config.json"
+            with mock.patch.object(sys, "stdin", io.StringIO("987:ssh-token")):
+                EXPORTER.telegram_cli(["set", "--user-ids", "42"], ssh_tg_cfg, "ssh-telegram-bot.token")
+            cfg = EXPORTER.normalize_ddos_config({
+                "enabled": True,
+                "cooldown_seconds": 600,
+                "confirm_samples": 1,
+                "notify_recovery": True,
+                "defaults": {"rx_mbps_threshold": 300, "offline_seconds_threshold": 180},
+                "servers": {
+                    "oracle-sjc": {"enabled": True, "rx_mbps_threshold": 900},
+                },
+            })
+            monitor = EXPORTER.DdosMonitor(cfg, root, vm_url="http://vm.local:8428")
+            monitor.started_at = 800.0
+            with mock.patch.object(EXPORTER, "SSH_TELEGRAM_CONFIG_FILE", str(ssh_tg_cfg)), \
+                    mock.patch.object(EXPORTER, "read_token", return_value="987:ssh-token"), \
+                    mock.patch.object(EXPORTER, "telegram_request") as send:
+                # Both servers report normally at t=1000; oracle-sjc at 400 Mbps is below its 900 Mbps override
+                with mock.patch.object(monitor, "_fetch_metrics", return_value=(
+                    {"node-low": 1000.0, "oracle-sjc": 1000.0},
+                    {"node-low": 10.0, "oracle-sjc": 400.0},
+                    {}, {}, {},
+                )):
+                    monitor.evaluate_once(now=1005.0)
+                self.assertEqual(send.call_count, 0)
+
+                # If VictoriaMetrics itself errors out, no false offline alerts fire
+                with mock.patch.object(monitor, "_fetch_metrics", side_effect=urllib.error.URLError("down")):
+                    monitor.evaluate_once(now=1300.0)
+                self.assertEqual(send.call_count, 0)
+                self.assertFalse(monitor.snapshot()["vm_ok"])
+
+                # VM recovers, oracle-sjc reports at t=1310, node-low is missing (stale 315s >= 180s)
+                with mock.patch.object(monitor, "_fetch_metrics", return_value=(
+                    {"oracle-sjc": 1310.0},
+                    {"oracle-sjc": 15.0},
+                    {}, {}, {},
+                )):
+                    monitor.evaluate_once(now=1315.0)
+                self.assertEqual(send.call_count, 1)
+                self.assertIn("节点失联 / 疑似被黑洞", send.call_args.args[2]["text"])
+                self.assertIn("node-low", send.call_args.args[2]["text"])
+
+                # node-low comes back online -> recovery notice
+                with mock.patch.object(monitor, "_fetch_metrics", return_value=(
+                    {"oracle-sjc": 1340.0, "node-low": 1340.0},
+                    {"oracle-sjc": 15.0, "node-low": 5.0},
+                    {}, {}, {},
+                )):
+                    monitor.evaluate_once(now=1345.0)
+                self.assertEqual(send.call_count, 2)
+                self.assertIn("节点已恢复上报", send.call_args.args[2]["text"])
+
+    def test_ddos_admin_api_cli_and_html_integration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            web_cfg = root / "web-admin.json"
+            panels_cfg = root / "xui-panels.json"
+            panels_cfg.write_text("[]\n", encoding="utf-8")
+            ssh_cfg = root / "ssh-login-config.json"
+            ssh_cfg.write_text('{"servers":{}}\n', encoding="utf-8")
+            tg_cfg = root / "telegram-config.json"
+            ssh_tg_cfg = root / "ssh-telegram-config.json"
+            ddos_cfg = root / "ddos-alert-config.json"
+            admin_html = pathlib.Path(__file__).parents[1] / "assets" / "admin.html"
+            html_text = admin_html.read_text(encoding="utf-8")
+            for marker in ('data-tab="ddos"', "ddos-config-form", "ddos-servers-tbody", "modal-ddos-server"):
+                self.assertIn(marker, html_text)
+
+            server = EXPORTER.ThreadingHTTPServer(("127.0.0.1", 0), EXPORTER.MetricsHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            try:
+                with mock.patch.object(EXPORTER, "WEB_ADMIN_CONFIG_FILE", str(web_cfg)), \
+                        mock.patch.object(EXPORTER, "ADMIN_HTML_FILE", str(admin_html)), \
+                        mock.patch.object(EXPORTER, "PANELS_FILE", str(panels_cfg)), \
+                        mock.patch.object(EXPORTER, "SSH_LOGIN_CONFIG_FILE", str(ssh_cfg)), \
+                        mock.patch.object(EXPORTER, "TELEGRAM_CONFIG_FILE", str(tg_cfg)), \
+                        mock.patch.object(EXPORTER, "SSH_TELEGRAM_CONFIG_FILE", str(ssh_tg_cfg)), \
+                        mock.patch.object(EXPORTER, "DDOS_ALERT_CONFIG_FILE", str(ddos_cfg)), \
+                        mock.patch.object(EXPORTER, "STATE_DIR", str(root)), \
+                        mock.patch.object(EXPORTER, "_ADMIN_LOGIN_FAILURES", {}):
+                    with mock.patch.object(sys, "stdin", io.StringIO("987:ssh-token")):
+                        EXPORTER.telegram_cli(["set", "--user-ids", "42"], ssh_tg_cfg, "ssh-telegram-bot.token")
+                    req_login = urllib.request.Request(
+                        f"{base}/api/admin/login",
+                        data=json.dumps({"username": "gla", "password": "gla12345"}).encode(),
+                        headers={"Content-Type": "application/json", "X-Real-IP": "198.51.100.9"},
+                        method="POST")
+                    with urllib.request.urlopen(req_login, timeout=3) as resp:
+                        cookie = resp.headers.get("Set-Cookie").split(";", 1)[0]
+                        csrf = json.loads(resp.read().decode())["csrf_token"]
+
+                    def call(method, path, payload):
+                        r = urllib.request.Request(
+                            base + path,
+                            data=json.dumps(payload).encode(),
+                            headers={"Content-Type": "application/json", "Cookie": cookie, "X-CSRF-Token": csrf},
+                            method=method)
+                        with urllib.request.urlopen(r, timeout=3) as resp:
+                            return json.loads(resp.read().decode())
+
+                    call("POST", "/api/admin/ddos", {
+                        "enabled": True,
+                        "check_interval_seconds": 20,
+                        "cooldown_seconds": 300,
+                        "confirm_samples": 3,
+                        "notify_recovery": True,
+                        "defaults": {
+                            "rx_mbps_threshold": 200,
+                            "rx_pps_threshold": 15000,
+                            "softirq_pct_threshold": 40,
+                            "ufw_denied_mbps_threshold": 10,
+                            "offline_seconds_threshold": 120,
+                        },
+                    })
+                    call("POST", "/api/admin/ddos/servers", {
+                        "name": "oracle-sjc",
+                        "enabled": True,
+                        "note": "中心节点",
+                        "rx_mbps_threshold": 1000,
+                    })
+                    with urllib.request.urlopen(urllib.request.Request(
+                            f"{base}/api/admin/overview", headers={"Cookie": cookie}), timeout=3) as resp:
+                        overview = json.loads(resp.read().decode())
+                    self.assertTrue(overview["ddos"]["enabled"])
+                    self.assertEqual(overview["ddos"]["defaults"]["rx_pps_threshold"], 15000.0)
+                    self.assertEqual(overview["ddos"]["server_overrides"]["oracle-sjc"]["rx_mbps_threshold"], 1000.0)
+
+                    with mock.patch.object(EXPORTER, "read_token", return_value="987:ssh-token"), \
+                            mock.patch.object(EXPORTER, "telegram_request") as send:
+                        call("POST", "/api/admin/ddos/test", {})
+                    self.assertEqual(send.call_count, 1)
+                    self.assertIn("DDoS 告警测试消息", send.call_args.args[2]["text"])
+
+                    call("DELETE", "/api/admin/ddos/servers", {"name": "oracle-sjc", "forget": True})
+                    saved = EXPORTER.load_ddos_config()
+                    self.assertEqual(saved["servers"], {})
+
+                    EXPORTER.ddos_alert_cli(["disable"])
+                    self.assertFalse(EXPORTER.load_ddos_config()["enabled"])
+                    EXPORTER.ddos_alert_cli(["enable"])
+                    self.assertTrue(EXPORTER.load_ddos_config()["enabled"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
 
 if __name__ == "__main__":
     unittest.main()

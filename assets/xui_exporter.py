@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -43,9 +44,11 @@ TOKEN_FILE = os.environ.get("XUI_API_TOKEN_FILE", "/run/secrets/xui_api_token")
 PANELS_FILE = os.environ.get("XUI_PANELS_FILE", "")
 STATE_DIR = os.environ.get("XUI_STATE_DIR", "/var/lib/xui")
 LOKI_URL = os.environ.get("XUI_LOKI_URL", "http://alloy:3500/loki/api/v1/push")
+VICTORIAMETRICS_URL = os.environ.get("XUI_VICTORIAMETRICS_URL", "http://victoriametrics:8428").rstrip("/")
 TELEGRAM_CONFIG_FILE = os.environ.get("XUI_TELEGRAM_CONFIG_FILE", "/run/secrets/telegram-config.json")
 SSH_TELEGRAM_CONFIG_FILE = os.environ.get("XUI_SSH_TELEGRAM_CONFIG_FILE", "/run/secrets/ssh-telegram-config.json")
 SSH_LOGIN_CONFIG_FILE = os.environ.get("XUI_SSH_LOGIN_CONFIG_FILE", "/run/secrets/ssh-login-config.json")
+DDOS_ALERT_CONFIG_FILE = os.environ.get("XUI_DDOS_ALERT_CONFIG_FILE", "/run/secrets/ddos-alert-config.json")
 WEB_ADMIN_CONFIG_FILE = os.environ.get("XUI_WEB_ADMIN_CONFIG_FILE", "/run/secrets/web-admin.json")
 ADMIN_HTML_FILE = os.environ.get("XUI_ADMIN_HTML_FILE", str(Path(__file__).with_name("admin.html")))
 DEFAULT_TELEGRAM_NOTIFICATION_COOLDOWN_SECONDS = 3600
@@ -2050,7 +2053,7 @@ WORKERS = []
 
 
 class RuntimeManager:
-    """Coordinate hot-reloading of PanelWorker and TelegramBot threads."""
+    """Coordinate hot-reloading of PanelWorker, TelegramBot, and DdosMonitor threads."""
 
     def __init__(self, root_stop=None):
         self.root_stop = root_stop or threading.Event()
@@ -2059,6 +2062,9 @@ class RuntimeManager:
         self.bot_stop = None
         self.bot_thread = None
         self.bot_instance = None
+        self.ddos_stop = None
+        self.ddos_thread = None
+        self.ddos_monitor = None
 
     def reload_panels(self):
         if not PANELS_FILE:
@@ -2119,18 +2125,48 @@ class RuntimeManager:
         except ERRORS as error:
             print(f"Telegram 配置无效，Bot 未启动 ({error_kind(error)})", file=sys.stderr, flush=True)
 
+    def reload_ddos_monitor(self):
+        with self.lock:
+            old_stop = self.ddos_stop
+            old_thread = self.ddos_thread
+            self.ddos_stop = None
+            self.ddos_thread = None
+            self.ddos_monitor = None
+        if old_stop is not None:
+            old_stop.set()
+        if old_thread is not None and old_thread.is_alive():
+            old_thread.join(timeout=5)
+        try:
+            config = load_ddos_config()
+            ddos_stop = threading.Event()
+            monitor = DdosMonitor(config, STATE_DIR)
+            thread = threading.Thread(target=monitor.run, args=(ddos_stop,), daemon=True, name="ddos-monitor")
+            thread.start()
+            with self.lock:
+                self.ddos_stop = ddos_stop
+                self.ddos_thread = thread
+                self.ddos_monitor = monitor
+        except ERRORS as error:
+            print(f"DDoS 告警配置无效，监控未启动 ({error_kind(error)})", file=sys.stderr, flush=True)
+
     def stop_all(self):
         self.root_stop.set()
         with self.lock:
             entries = list(self.worker_entries)
             bot_stop = self.bot_stop
             bot_thread = self.bot_thread
+            ddos_stop = self.ddos_stop
+            ddos_thread = self.ddos_thread
         if bot_stop is not None:
             bot_stop.set()
+        if ddos_stop is not None:
+            ddos_stop.set()
         for _, _, stop_event, _ in entries:
             stop_event.set()
         if bot_thread is not None and bot_thread.is_alive():
             bot_thread.join(timeout=3)
+        if ddos_thread is not None and ddos_thread.is_alive():
+            ddos_thread.join(timeout=3)
         for _, _, _, thread in entries:
             thread.join(timeout=3)
 
@@ -2664,6 +2700,28 @@ def load_ssh_login_server_statuses():
             db.close()
 
 
+def send_security_telegram_message(text):
+    """Send an alert message via the shared SSH/security Telegram Bot."""
+    try:
+        config = telegram_config(SSH_TELEGRAM_CONFIG_FILE)
+    except ERRORS as error:
+        print(f"读取安全告警 Bot 配置失败 ({error_kind(error)})", file=sys.stderr, flush=True)
+        return False
+    if not config:
+        return False
+    chats = sorted(set(config.get("allowed_chat_ids", []) + config.get("allowed_user_ids", [])))
+    if not chats:
+        return False
+    delivered = False
+    for chat_id in chats:
+        try:
+            telegram_request(config["token"], "sendMessage", {"chat_id": chat_id, "text": text}, timeout=10)
+            delivered = True
+        except ERRORS as error:
+            print(f"安全告警 Telegram 通知失败 ({error_kind(error)})", file=sys.stderr, flush=True)
+    return delivered
+
+
 def notify_ssh_login(record):
     config = telegram_config(SSH_TELEGRAM_CONFIG_FILE)
     if not config:
@@ -2688,12 +2746,7 @@ def notify_ssh_login(record):
                 f"🏢 网络：{record['network']}\n"
                 f"🔐 认证方式：{record['auth_method']}\n"
                 f"🕒 时间：{datetime.now(timezone(timedelta(hours=8))):%Y-%m-%d %H:%M:%S}（UTC+8）")
-        for chat_id in chats:
-            try:
-                telegram_request(config["token"], "sendMessage", {"chat_id": chat_id, "text": text}, timeout=10)
-                delivered = True
-            except ERRORS as error:
-                print(f"SSH 登录 Telegram 通知失败 ({error_kind(error)})", file=sys.stderr, flush=True)
+        delivered = send_security_telegram_message(text)
     finally:
         with _SSH_LOGIN_NOTIFY_LOCK:
             if delivered:
@@ -2702,6 +2755,597 @@ def notify_ssh_login(record):
                 except ERRORS as error:
                     print(f"SSH 登录通知冷却记录失败 ({error_kind(error)})", file=sys.stderr, flush=True)
             _SSH_LOGIN_IN_FLIGHT.discard(key)
+
+
+DDOS_DEFAULT_THRESHOLDS = {
+    "rx_mbps_threshold": 300.0,
+    "rx_pps_threshold": 30000.0,
+    "softirq_pct_threshold": 50.0,
+    "ufw_denied_mbps_threshold": 20.0,
+    "offline_seconds_threshold": 180,
+}
+
+
+def _validate_nonneg_float(value, label, maximum=1_000_000_000.0):
+    if isinstance(value, bool):
+        raise ValueError(f"{label} 必须是数字")
+    try:
+        num = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{label} 必须是数字") from error
+    if not math.isfinite(num) or num < 0 or num > maximum:
+        raise ValueError(f"{label} 必须在 0 到 {int(maximum)} 之间")
+    return round(num, 2)
+
+
+def _validate_int_range(value, label, minimum, maximum):
+    if isinstance(value, bool):
+        raise ValueError(f"{label} 必须是整数")
+    try:
+        num = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{label} 必须是整数") from error
+    if num < minimum or num > maximum:
+        raise ValueError(f"{label} 必须在 {minimum} 到 {maximum} 之间")
+    return num
+
+
+def _normalize_ddos_thresholds(raw, base=None):
+    source = dict(base or DDOS_DEFAULT_THRESHOLDS)
+    if not isinstance(raw, dict):
+        raise ValueError("DDoS 阈值配置格式无效")
+    if "rx_mbps_threshold" in raw and raw["rx_mbps_threshold"] is not None:
+        source["rx_mbps_threshold"] = _validate_nonneg_float(raw["rx_mbps_threshold"], "入站带宽阈值 (Mbps)", 100000)
+    if "rx_pps_threshold" in raw and raw["rx_pps_threshold"] is not None:
+        source["rx_pps_threshold"] = _validate_nonneg_float(raw["rx_pps_threshold"], "入站包速率阈值 (PPS)", 50000000)
+    if "softirq_pct_threshold" in raw and raw["softirq_pct_threshold"] is not None:
+        source["softirq_pct_threshold"] = _validate_nonneg_float(raw["softirq_pct_threshold"], "CPU 软中断阈值 (%)", 100)
+    if "ufw_denied_mbps_threshold" in raw and raw["ufw_denied_mbps_threshold"] is not None:
+        source["ufw_denied_mbps_threshold"] = _validate_nonneg_float(raw["ufw_denied_mbps_threshold"], "UFW 拒绝流量阈值 (Mbps)", 100000)
+    if "offline_seconds_threshold" in raw and raw["offline_seconds_threshold"] is not None:
+        source["offline_seconds_threshold"] = _validate_int_range(raw["offline_seconds_threshold"], "节点失联超时 (秒)", 0, 86400)
+    return source
+
+
+def normalize_ddos_config(raw):
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError("DDoS 告警配置必须是 JSON 对象")
+    defaults = _normalize_ddos_thresholds(raw.get("defaults") or {})
+    servers = {}
+    raw_servers = raw.get("servers") or {}
+    if not isinstance(raw_servers, dict):
+        raise ValueError("DDoS 节点配置格式无效")
+    for name, entry in raw_servers.items():
+        if not NAME_RE.fullmatch(str(name)):
+            raise ValueError("节点名称只能使用字母、数字、点、下划线和连字符")
+        if not isinstance(entry, dict):
+            raise ValueError(f"节点 {name} 配置格式无效")
+        override = {"enabled": bool(entry.get("enabled", True))}
+        note = str(entry.get("note", "") or "").strip()[:120]
+        if note:
+            override["note"] = note
+        for key in DDOS_DEFAULT_THRESHOLDS:
+            if key in entry and entry[key] not in (None, ""):
+                override[key] = _normalize_ddos_thresholds({key: entry[key]}, defaults)[key]
+        servers[name] = override
+    return {
+        "enabled": bool(raw.get("enabled", False)),
+        "check_interval_seconds": _validate_int_range(raw.get("check_interval_seconds", 30), "检测间隔", 15, 300),
+        "cooldown_seconds": _validate_int_range(raw.get("cooldown_seconds", 600), "告警冷却时间", 0, 86400),
+        "confirm_samples": _validate_int_range(raw.get("confirm_samples", 2), "连续确认次数", 1, 10),
+        "notify_recovery": bool(raw.get("notify_recovery", True)),
+        "defaults": defaults,
+        "servers": servers,
+    }
+
+
+def load_ddos_config(path=None):
+    target = Path(path or DDOS_ALERT_CONFIG_FILE)
+    if not target.is_file():
+        return normalize_ddos_config({})
+    raw = json.loads(target.read_text(encoding="utf-8"))
+    return normalize_ddos_config(raw)
+
+
+def save_ddos_config(config, path=None):
+    normalized = normalize_ddos_config(config)
+    target = Path(path or DDOS_ALERT_CONFIG_FILE)
+    atomic_write(target, json.dumps(normalized, ensure_ascii=False, indent=2) + "\n")
+    return normalized
+
+
+def query_victoriametrics(expr, base_url=None, timeout=3):
+    url = f"{(base_url or VICTORIAMETRICS_URL).rstrip('/')}/api/v1/query?query={quote(expr, safe='')}"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    if not isinstance(payload, dict) or payload.get("status") != "success":
+        raise RuntimeError("VictoriaMetrics 查询返回失败")
+    results = {}
+    for item in (payload.get("data") or {}).get("result") or []:
+        if not isinstance(item, dict):
+            continue
+        server = str((item.get("metric") or {}).get("server", "")).strip()
+        val_pair = item.get("value")
+        if not server or not isinstance(val_pair, (list, tuple)) or len(val_pair) < 2:
+            continue
+        try:
+            num = float(val_pair[1])
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(num):
+            results[server] = num
+    return results
+
+
+def _format_duration_cn(seconds):
+    total = max(0, int(round(seconds)))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours} 小时")
+    if minutes:
+        parts.append(f"{minutes} 分")
+    if secs or not parts:
+        parts.append(f"{secs} 秒")
+    return " ".join(parts)
+
+
+def _format_utc8(ts):
+    return f"{datetime.fromtimestamp(ts, timezone(timedelta(hours=8))):%Y-%m-%d %H:%M:%S}（UTC+8）"
+
+
+class DdosMonitor:
+    """Evaluate host network/CPU/firewall metrics in VictoriaMetrics for DDoS & blackhole alerts."""
+
+    def __init__(self, config, state_dir, vm_url=None):
+        self.config = normalize_ddos_config(config)
+        self.state_dir = Path(state_dir)
+        self.vm_url = (vm_url or VICTORIAMETRICS_URL).rstrip("/")
+        self.lock = threading.Lock()
+        self.started_at = time.time()
+        self.vm_ok = None
+        self.vm_error = ""
+        self.last_check_at = 0.0
+        self.live_servers = {}
+        self._init_db()
+
+    def _connect(self):
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(str(self.state_dir / "ddos-alert.sqlite"), timeout=10)
+        return db
+
+    def _init_db(self):
+        db = self._connect()
+        try:
+            with db:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS ddos_server_state ("
+                    "server TEXT PRIMARY KEY,"
+                    "last_seen_ts REAL NOT NULL DEFAULT 0,"
+                    "pending_count INTEGER NOT NULL DEFAULT 0,"
+                    "attack_active INTEGER NOT NULL DEFAULT 0,"
+                    "attack_started_at REAL NOT NULL DEFAULT 0,"
+                    "last_attack_notified_at REAL NOT NULL DEFAULT 0,"
+                    "peak_rx_mbps REAL NOT NULL DEFAULT 0,"
+                    "peak_rx_pps REAL NOT NULL DEFAULT 0,"
+                    "peak_softirq_pct REAL NOT NULL DEFAULT 0,"
+                    "peak_ufw_denied_mbps REAL NOT NULL DEFAULT 0,"
+                    "last_triggers TEXT NOT NULL DEFAULT '',"
+                    "offline_active INTEGER NOT NULL DEFAULT 0,"
+                    "offline_started_at REAL NOT NULL DEFAULT 0,"
+                    "last_offline_notified_at REAL NOT NULL DEFAULT 0)"
+                )
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS ddos_alert_history ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    "created_at REAL NOT NULL,"
+                    "server TEXT NOT NULL,"
+                    "kind TEXT NOT NULL,"
+                    "summary TEXT NOT NULL,"
+                    "delivered INTEGER NOT NULL DEFAULT 0)"
+                )
+        finally:
+            db.close()
+
+    def _load_states(self, db):
+        rows = db.execute(
+            "SELECT server, last_seen_ts, pending_count, attack_active, attack_started_at, "
+            "last_attack_notified_at, peak_rx_mbps, peak_rx_pps, peak_softirq_pct, "
+            "peak_ufw_denied_mbps, last_triggers, offline_active, offline_started_at, "
+            "last_offline_notified_at FROM ddos_server_state"
+        ).fetchall()
+        states = {}
+        for row in rows:
+            states[row[0]] = {
+                "last_seen_ts": float(row[1]),
+                "pending_count": int(row[2]),
+                "attack_active": bool(row[3]),
+                "attack_started_at": float(row[4]),
+                "last_attack_notified_at": float(row[5]),
+                "peak_rx_mbps": float(row[6]),
+                "peak_rx_pps": float(row[7]),
+                "peak_softirq_pct": float(row[8]),
+                "peak_ufw_denied_mbps": float(row[9]),
+                "last_triggers": row[10] or "",
+                "offline_active": bool(row[11]),
+                "offline_started_at": float(row[12]),
+                "last_offline_notified_at": float(row[13]),
+            }
+        return states
+
+    def _save_state(self, db, server, st):
+        db.execute(
+            "INSERT OR REPLACE INTO ddos_server_state VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                server,
+                float(st["last_seen_ts"]),
+                int(st["pending_count"]),
+                int(bool(st["attack_active"])),
+                float(st["attack_started_at"]),
+                float(st["last_attack_notified_at"]),
+                float(st["peak_rx_mbps"]),
+                float(st["peak_rx_pps"]),
+                float(st["peak_softirq_pct"]),
+                float(st["peak_ufw_denied_mbps"]),
+                str(st["last_triggers"]),
+                int(bool(st["offline_active"])),
+                float(st["offline_started_at"]),
+                float(st["last_offline_notified_at"]),
+            ),
+        )
+
+    def _append_history(self, db, now, server, kind, summary, delivered):
+        db.execute(
+            "INSERT INTO ddos_alert_history (created_at, server, kind, summary, delivered) VALUES (?,?,?,?,?)",
+            (float(now), server, kind, summary, int(bool(delivered))),
+        )
+        db.execute(
+            "DELETE FROM ddos_alert_history WHERE id NOT IN "
+            "(SELECT id FROM ddos_alert_history ORDER BY id DESC LIMIT 100)"
+        )
+
+    def effective_policy(self, server):
+        defaults = self.config["defaults"]
+        override = self.config["servers"].get(server) or {}
+        policy = dict(defaults)
+        for key in DDOS_DEFAULT_THRESHOLDS:
+            if key in override:
+                policy[key] = override[key]
+        policy["enabled"] = bool(override.get("enabled", True))
+        policy["customized"] = server in self.config["servers"]
+        policy["note"] = override.get("note", "")
+        return policy
+
+    def forget_server(self, server):
+        with self.lock:
+            self.live_servers.pop(server, None)
+            db = self._connect()
+            try:
+                with db:
+                    db.execute("DELETE FROM ddos_server_state WHERE server=?", (server,))
+            finally:
+                db.close()
+
+    def _fetch_metrics(self):
+        last_seen = query_victoriametrics("max by (server) (timestamp(node_time_seconds))", self.vm_url)
+        rx_mbps = query_victoriametrics(
+            'sum by (server) (rate(node_network_receive_bytes_total{device!~"lo|docker.*|veth.*"}[2m])) * 8 / 1000000',
+            self.vm_url,
+        )
+        rx_pps = query_victoriametrics(
+            'sum by (server) (rate(node_network_receive_packets_total{device!~"lo|docker.*|veth.*"}[2m]))',
+            self.vm_url,
+        )
+        softirq_pct = query_victoriametrics(
+            'avg by (server) (rate(node_cpu_seconds_total{mode="softirq"}[2m])) * 100',
+            self.vm_url,
+        )
+        ufw_denied_mbps = query_victoriametrics(
+            "sum by (server) (rate(gla_ufw_default_denied_bytes_total[2m])) * 8 / 1000000",
+            self.vm_url,
+        )
+        return last_seen, rx_mbps, rx_pps, softirq_pct, ufw_denied_mbps
+
+    def evaluate_once(self, now=None):
+        now = time.time() if now is None else float(now)
+        try:
+            last_seen, rx_mbps_map, rx_pps_map, softirq_map, ufw_map = self._fetch_metrics()
+        except ERRORS as error:
+            with self.lock:
+                self.vm_ok = False
+                self.vm_error = error_kind(error)
+                self.last_check_at = now
+            return
+
+        notifications = []
+        live = {}
+        with self.lock:
+            self.vm_ok = True
+            self.vm_error = ""
+            self.last_check_at = now
+            db = self._connect()
+            try:
+                states = self._load_states(db)
+                all_servers = sorted(set(states) | set(last_seen) | set(self.config["servers"]))
+                enabled_global = self.config["enabled"]
+                cooldown = self.config["cooldown_seconds"]
+                confirm_samples = self.config["confirm_samples"]
+                notify_recovery = self.config["notify_recovery"]
+
+                with db:
+                    for server in all_servers:
+                        st = states.get(server, {
+                            "last_seen_ts": 0.0,
+                            "pending_count": 0,
+                            "attack_active": False,
+                            "attack_started_at": 0.0,
+                            "last_attack_notified_at": 0.0,
+                            "peak_rx_mbps": 0.0,
+                            "peak_rx_pps": 0.0,
+                            "peak_softirq_pct": 0.0,
+                            "peak_ufw_denied_mbps": 0.0,
+                            "last_triggers": "",
+                            "offline_active": False,
+                            "offline_started_at": 0.0,
+                            "last_offline_notified_at": 0.0,
+                        })
+                        policy = self.effective_policy(server)
+                        reported_ts = last_seen.get(server)
+                        if reported_ts is not None and reported_ts > st["last_seen_ts"]:
+                            st["last_seen_ts"] = reported_ts
+
+                        rx_mbps = rx_mbps_map.get(server)
+                        rx_pps = rx_pps_map.get(server)
+                        softirq = softirq_map.get(server)
+                        ufw_mbps = ufw_map.get(server)
+                        sample_age = (now - st["last_seen_ts"]) if st["last_seen_ts"] > 0 else None
+                        offline_limit = policy["offline_seconds_threshold"]
+                        is_fresh = reported_ts is not None and (sample_age is not None) and (offline_limit <= 0 or sample_age < offline_limit)
+
+                        if not enabled_global or not policy["enabled"]:
+                            st["pending_count"] = 0
+                            st["attack_active"] = False
+                            st["offline_active"] = False
+                            if st["last_seen_ts"] > 0:
+                                self._save_state(db, server, st)
+                            live[server] = {
+                                "server": server,
+                                "state": "ignored" if (enabled_global and not policy["enabled"]) else "normal",
+                                "last_seen_ts": st["last_seen_ts"],
+                                "sample_age_seconds": round(sample_age, 1) if sample_age is not None else None,
+                                "rx_mbps": round(rx_mbps, 2) if rx_mbps is not None else None,
+                                "rx_pps": round(rx_pps, 1) if rx_pps is not None else None,
+                                "softirq_pct": round(softirq, 2) if softirq is not None else None,
+                                "ufw_denied_mbps": round(ufw_mbps, 2) if ufw_mbps is not None else None,
+                                "triggers": [],
+                                "policy": policy,
+                            }
+                            continue
+
+                        # 1) Offline / blackhole check
+                        if st["last_seen_ts"] > 0 and offline_limit > 0:
+                            grace_ok = (now - self.started_at) >= min(offline_limit, 60)
+                            if sample_age >= offline_limit and grace_ok:
+                                st["pending_count"] = 0
+                                if not st["offline_active"]:
+                                    st["offline_active"] = True
+                                    st["offline_started_at"] = st["last_seen_ts"]
+                                if cooldown == 0 or (now - st["last_offline_notified_at"]) >= cooldown:
+                                    text = (
+                                        "🚨 节点失联 / 疑似被黑洞\n\n"
+                                        f"🖥 服务器：{server}\n"
+                                        f"⏳ 已断更：{int(sample_age)} 秒（阈值 {offline_limit} 秒）\n"
+                                        f"📡 最后上报：{_format_utc8(st['last_seen_ts'])}\n"
+                                        "💡 提示：若该节点未主动关机，可能带宽已打满或 IP 已被机房黑洞。\n"
+                                        f"🕒 告警时间：{_format_utc8(now)}"
+                                    )
+                                    notifications.append((server, "offline", f"断更 {int(sample_age)} 秒", text, "last_offline_notified_at"))
+                            elif is_fresh and st["offline_active"]:
+                                outage = now - (st["offline_started_at"] or st["last_seen_ts"])
+                                st["offline_active"] = False
+                                st["offline_started_at"] = 0.0
+                                if notify_recovery:
+                                    text = (
+                                        "✅ 节点已恢复上报\n\n"
+                                        f"🖥 服务器：{server}\n"
+                                        f"⏱ 失联时长：{_format_duration_cn(outage)}\n"
+                                        f"🕒 恢复时间：{_format_utc8(now)}"
+                                    )
+                                    notifications.append((server, "offline_recovered", f"失联 {_format_duration_cn(outage)} 后恢复", text, None))
+
+                        # 2) Attack / spike check (only on fresh data)
+                        triggers = []
+                        if is_fresh:
+                            if policy["rx_mbps_threshold"] > 0 and rx_mbps is not None and rx_mbps >= policy["rx_mbps_threshold"]:
+                                triggers.append("入站带宽")
+                            if policy["rx_pps_threshold"] > 0 and rx_pps is not None and rx_pps >= policy["rx_pps_threshold"]:
+                                triggers.append("入站包速率(PPS)")
+                            if policy["softirq_pct_threshold"] > 0 and softirq is not None and softirq >= policy["softirq_pct_threshold"]:
+                                triggers.append("CPU 软中断(softirq)")
+                            if policy["ufw_denied_mbps_threshold"] > 0 and ufw_mbps is not None and ufw_mbps >= policy["ufw_denied_mbps_threshold"]:
+                                triggers.append("UFW 拒绝流量")
+
+                            if triggers:
+                                st["pending_count"] += 1
+                                st["peak_rx_mbps"] = max(st["peak_rx_mbps"], rx_mbps or 0.0)
+                                st["peak_rx_pps"] = max(st["peak_rx_pps"], rx_pps or 0.0)
+                                st["peak_softirq_pct"] = max(st["peak_softirq_pct"], softirq or 0.0)
+                                st["peak_ufw_denied_mbps"] = max(st["peak_ufw_denied_mbps"], ufw_mbps or 0.0)
+                                st["last_triggers"] = "、".join(triggers)
+                                if st["pending_count"] >= confirm_samples:
+                                    if not st["attack_active"]:
+                                        st["attack_active"] = True
+                                        st["attack_started_at"] = now
+                                    if cooldown == 0 or (now - st["last_attack_notified_at"]) >= cooldown:
+                                        avg_pkt = ""
+                                        if rx_mbps is not None and rx_pps is not None and rx_pps > 0:
+                                            pkt_bytes = (rx_mbps * 1_000_000 / 8.0) / rx_pps
+                                            avg_pkt = f"（平均包长 {pkt_bytes:.0f} B）"
+                                        lines = [
+                                            "🚨 DDoS / 流量异常告警\n",
+                                            f"🖥 服务器：{server}",
+                                            f"⚠️ 触发项：{'、'.join(triggers)}",
+                                            f"📥 入站带宽：{rx_mbps:.2f} Mbps" if rx_mbps is not None else "📥 入站带宽：无数据",
+                                            f"📦 入站包速率：{rx_pps:,.0f} PPS{avg_pkt}" if rx_pps is not None else "📦 入站包速率：无数据",
+                                            f"🔥 CPU 软中断：{softirq:.1f}%" if softirq is not None else "🔥 CPU 软中断：无数据",
+                                        ]
+                                        if ufw_mbps is not None:
+                                            lines.append(f"🛡 UFW 拒绝流量：{ufw_mbps:.2f} Mbps")
+                                        lines.append(f"🕒 时间：{_format_utc8(now)}")
+                                        summary = f"{'、'.join(triggers)}（带宽 {rx_mbps or 0:.1f} Mbps / {rx_pps or 0:,.0f} PPS）"
+                                        notifications.append((server, "attack", summary, "\n".join(lines), "last_attack_notified_at"))
+                            else:
+                                st["pending_count"] = 0
+                                if st["attack_active"]:
+                                    duration = now - (st["attack_started_at"] or now)
+                                    peak_summary = (
+                                        f"带宽 {st['peak_rx_mbps']:.2f} Mbps | "
+                                        f"{st['peak_rx_pps']:,.0f} PPS | "
+                                        f"软中断 {st['peak_softirq_pct']:.1f}%"
+                                    )
+                                    st["attack_active"] = False
+                                    st["attack_started_at"] = 0.0
+                                    st["peak_rx_mbps"] = 0.0
+                                    st["peak_rx_pps"] = 0.0
+                                    st["peak_softirq_pct"] = 0.0
+                                    st["peak_ufw_denied_mbps"] = 0.0
+                                    st["last_triggers"] = ""
+                                    if notify_recovery:
+                                        text = (
+                                            "✅ DDoS / 流量异常已恢复\n\n"
+                                            f"🖥 服务器：{server}\n"
+                                            f"⏱ 持续时长：{_format_duration_cn(duration)}\n"
+                                            f"📊 期间峰值：{peak_summary}\n"
+                                            f"🕒 时间：{_format_utc8(now)}"
+                                        )
+                                        notifications.append((server, "attack_recovered", f"持续 {_format_duration_cn(duration)} 后恢复（峰值 {peak_summary}）", text, None))
+
+                        if st["last_seen_ts"] > 0 or reported_ts is not None:
+                            self._save_state(db, server, st)
+
+                        state_label = "normal"
+                        if st["offline_active"]:
+                            state_label = "offline"
+                        elif st["attack_active"]:
+                            state_label = "alerting"
+                        elif st["pending_count"] > 0:
+                            state_label = "pending"
+                        elif st["last_seen_ts"] <= 0:
+                            state_label = "waiting"
+
+                        live[server] = {
+                            "server": server,
+                            "state": state_label,
+                            "last_seen_ts": st["last_seen_ts"],
+                            "sample_age_seconds": round(sample_age, 1) if sample_age is not None else None,
+                            "rx_mbps": round(rx_mbps, 2) if rx_mbps is not None else None,
+                            "rx_pps": round(rx_pps, 1) if rx_pps is not None else None,
+                            "softirq_pct": round(softirq, 2) if softirq is not None else None,
+                            "ufw_denied_mbps": round(ufw_mbps, 2) if ufw_mbps is not None else None,
+                            "triggers": triggers,
+                            "policy": policy,
+                        }
+                self.live_servers = live
+            finally:
+                db.close()
+
+        for server, kind, summary, text, cooldown_col in notifications:
+            delivered = send_security_telegram_message(text)
+            with self.lock:
+                db = self._connect()
+                try:
+                    with db:
+                        if delivered and cooldown_col:
+                            db.execute(
+                                f"UPDATE ddos_server_state SET {cooldown_col}=? WHERE server=?",
+                                (float(now), server),
+                            )
+                        self._append_history(db, now, server, kind, summary, delivered)
+                finally:
+                    db.close()
+
+    def snapshot(self):
+        with self.lock:
+            servers = [dict(v) for _, v in sorted(self.live_servers.items())]
+            history = []
+            db_path = self.state_dir / "ddos-alert.sqlite"
+            if db_path.is_file():
+                db = sqlite3.connect(str(db_path), timeout=5)
+                try:
+                    exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ddos_alert_history'").fetchone()
+                    if exists:
+                        history = [
+                            {
+                                "created_at": float(created_at),
+                                "server": server,
+                                "kind": kind,
+                                "summary": summary,
+                                "delivered": bool(delivered),
+                            }
+                            for created_at, server, kind, summary, delivered in db.execute(
+                                "SELECT created_at, server, kind, summary, delivered "
+                                "FROM ddos_alert_history ORDER BY id DESC LIMIT 30"
+                            )
+                        ]
+                finally:
+                    db.close()
+            return {
+                "vm_ok": self.vm_ok,
+                "vm_error": self.vm_error,
+                "last_check_at": self.last_check_at,
+                "servers": servers,
+                "history": history,
+            }
+
+    def run(self, stop_event):
+        while not stop_event.is_set():
+            try:
+                self.evaluate_once()
+            except ERRORS as error:
+                print(f"DDoS 监控评估失败 ({error_kind(error)})", file=sys.stderr, flush=True)
+            stop_event.wait(self.config["check_interval_seconds"])
+
+
+def ddos_alert_cli(argv):
+    parser = argparse.ArgumentParser(description="管理 DDoS 告警配置")
+    parser.add_argument("operation", choices=("status", "enable", "disable", "test"))
+    args = parser.parse_args(argv)
+    config = load_ddos_config()
+    if args.operation == "status":
+        state = "已启用" if config["enabled"] else "未启用"
+        d = config["defaults"]
+        print(f"DDoS 告警：{state}；间隔={config['check_interval_seconds']}s；冷却={config['cooldown_seconds']}s；"
+              f"带宽>={d['rx_mbps_threshold']}Mbps；PPS>={d['rx_pps_threshold']:.0f}；"
+              f"softirq>={d['softirq_pct_threshold']}%；UFW拒绝>={d['ufw_denied_mbps_threshold']}Mbps；"
+              f"失联>={d['offline_seconds_threshold']}s；自定义节点={len(config['servers'])}")
+        return
+    if args.operation == "enable":
+        config["enabled"] = True
+        save_ddos_config(config)
+        print("已启用 DDoS 告警")
+        return
+    if args.operation == "disable":
+        config["enabled"] = False
+        save_ddos_config(config)
+        print("已关闭 DDoS 告警")
+        return
+    if args.operation == "test":
+        tg = telegram_config(SSH_TELEGRAM_CONFIG_FILE)
+        if not tg:
+            raise ValueError("尚未配置安全告警 Bot（请先在 SSH 登录告警中配置 Telegram Bot）")
+        text = (
+            "✅ DDoS 告警测试消息\n\n"
+            f"🖥 中心节点：{SERVER_NAME}\n"
+            "🔔 通知通道：与 SSH 登录告警共用 Telegram Bot，接收正常。\n"
+            f"🕒 时间：{_format_utc8(time.time())}"
+        )
+        if not send_security_telegram_message(text):
+            raise RuntimeError("DDoS 测试消息发送失败，请检查 Bot Token、用户 ID 及是否已点击 Start")
+        print("DDoS 测试消息已发送")
 
 
 def panels_cli(argv):
@@ -3028,6 +3672,37 @@ def ssh_login_cli(argv):
     atomic_write(path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
 
 
+def _load_ddos_history_from_db():
+    path = Path(STATE_DIR) / "ddos-alert.sqlite"
+    if not path.is_file():
+        return [], {}
+    db = sqlite3.connect(str(path), timeout=5)
+    try:
+        history = []
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ddos_alert_history'").fetchone():
+            history = [
+                {"created_at": float(created_at), "server": server, "kind": kind,
+                 "summary": summary, "delivered": bool(delivered)}
+                for created_at, server, kind, summary, delivered in db.execute(
+                    "SELECT created_at, server, kind, summary, delivered "
+                    "FROM ddos_alert_history ORDER BY id DESC LIMIT 30"
+                )
+            ]
+        tracked = {}
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ddos_server_state'").fetchone():
+            for server, last_seen_ts, attack_active, offline_active in db.execute(
+                "SELECT server, last_seen_ts, attack_active, offline_active FROM ddos_server_state"
+            ):
+                tracked[server] = {
+                    "last_seen_ts": float(last_seen_ts),
+                    "attack_active": bool(attack_active),
+                    "offline_active": bool(offline_active),
+                }
+        return history, tracked
+    finally:
+        db.close()
+
+
 def admin_overview_payload(admin_config=None):
     worker_map = {worker.panel["name"]: worker for worker in WORKERS}
     panels_list = []
@@ -3064,6 +3739,50 @@ def admin_overview_payload(admin_config=None):
             }
     tg_raw = json.loads(Path(TELEGRAM_CONFIG_FILE).read_text(encoding="utf-8")) if Path(TELEGRAM_CONFIG_FILE).is_file() else {}
     ssh_tg_raw = json.loads(Path(SSH_TELEGRAM_CONFIG_FILE).read_text(encoding="utf-8")) if Path(SSH_TELEGRAM_CONFIG_FILE).is_file() else {}
+    ddos_cfg = load_ddos_config()
+    if RUNTIME is not None and RUNTIME.ddos_monitor is not None:
+        ddos_live = RUNTIME.ddos_monitor.snapshot()
+    else:
+        history, tracked = _load_ddos_history_from_db()
+        fallback_servers = []
+        for sname in sorted(set(ddos_cfg["servers"]) | set(tracked)):
+            override = ddos_cfg["servers"].get(sname) or {}
+            policy = dict(ddos_cfg["defaults"])
+            for key in DDOS_DEFAULT_THRESHOLDS:
+                if key in override:
+                    policy[key] = override[key]
+            policy["enabled"] = bool(override.get("enabled", True))
+            policy["customized"] = sname in ddos_cfg["servers"]
+            policy["note"] = override.get("note", "")
+            tr = tracked.get(sname, {})
+            state_label = "waiting"
+            if ddos_cfg["enabled"] and not policy["enabled"]:
+                state_label = "ignored"
+            elif tr.get("offline_active"):
+                state_label = "offline"
+            elif tr.get("attack_active"):
+                state_label = "alerting"
+            elif tr.get("last_seen_ts", 0) > 0:
+                state_label = "normal"
+            fallback_servers.append({
+                "server": sname,
+                "state": state_label,
+                "last_seen_ts": tr.get("last_seen_ts", 0.0),
+                "sample_age_seconds": None,
+                "rx_mbps": None,
+                "rx_pps": None,
+                "softirq_pct": None,
+                "ufw_denied_mbps": None,
+                "triggers": [],
+                "policy": policy,
+            })
+        ddos_live = {
+            "vm_ok": None,
+            "vm_error": "",
+            "last_check_at": 0.0,
+            "servers": fallback_servers,
+            "history": history,
+        }
     return {
         "server_name": SERVER_NAME,
         "admin": {
@@ -3094,6 +3813,11 @@ def admin_overview_payload(admin_config=None):
         "ssh_telegram": {
             "configured": Path(SSH_TELEGRAM_CONFIG_FILE).is_file(),
             "allowed_user_ids": ssh_tg_raw.get("allowed_user_ids", []),
+        },
+        "ddos": {
+            **ddos_cfg,
+            "server_overrides": ddos_cfg["servers"],
+            **ddos_live,
         },
     }
 
@@ -3222,6 +3946,69 @@ def apply_admin_action(method, path, body, admin_config):
                      "✅ SSH 登录告警 Bot 测试消息；接收配置正常。")
         return {"ok": True}
 
+    if path == "/api/admin/ddos" and method == "POST":
+        current = load_ddos_config()
+        updated = {
+            "enabled": bool(body.get("enabled", current["enabled"])),
+            "check_interval_seconds": body.get("check_interval_seconds", current["check_interval_seconds"]),
+            "cooldown_seconds": body.get("cooldown_seconds", current["cooldown_seconds"]),
+            "confirm_samples": body.get("confirm_samples", current["confirm_samples"]),
+            "notify_recovery": bool(body.get("notify_recovery", current["notify_recovery"])),
+            "defaults": body.get("defaults") if isinstance(body.get("defaults"), dict) else current["defaults"],
+            "servers": current["servers"],
+        }
+        save_ddos_config(updated)
+        if RUNTIME is not None:
+            RUNTIME.reload_ddos_monitor()
+        return {"ok": True}
+
+    if path == "/api/admin/ddos/servers":
+        current = load_ddos_config()
+        name = str(body.get("name", "")).strip()
+        orig_name = str(body.get("orig_name", "")).strip()
+        if not NAME_RE.fullmatch(name):
+            raise ValueError("节点名称只能使用字母、数字、点、下划线和连字符")
+        if method == "DELETE":
+            forget = bool(body.get("forget", False))
+            forget_only = bool(body.get("forget_only", False))
+            if not forget_only:
+                current["servers"].pop(name, None)
+                save_ddos_config(current)
+            if forget:
+                if RUNTIME is not None and RUNTIME.ddos_monitor is not None:
+                    RUNTIME.ddos_monitor.forget_server(name)
+                else:
+                    db_path = Path(STATE_DIR) / "ddos-alert.sqlite"
+                    if db_path.is_file():
+                        db = sqlite3.connect(str(db_path), timeout=5)
+                        try:
+                            with db:
+                                if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ddos_server_state'").fetchone():
+                                    db.execute("DELETE FROM ddos_server_state WHERE server=?", (name,))
+                        finally:
+                            db.close()
+            if not forget_only and RUNTIME is not None:
+                RUNTIME.reload_ddos_monitor()
+            return {"ok": True}
+        if orig_name and orig_name != name:
+            current["servers"].pop(orig_name, None)
+        entry = {"enabled": bool(body.get("enabled", True))}
+        note = str(body.get("note", "") or "").strip()
+        if note:
+            entry["note"] = note
+        for key in DDOS_DEFAULT_THRESHOLDS:
+            if key in body and body[key] not in (None, ""):
+                entry[key] = body[key]
+        current["servers"][name] = entry
+        save_ddos_config(current)
+        if RUNTIME is not None:
+            RUNTIME.reload_ddos_monitor()
+        return {"ok": True}
+
+    if path == "/api/admin/ddos/test" and method == "POST":
+        ddos_alert_cli(["test"])
+        return {"ok": True}
+
     if path == "/api/admin/password" and method == "POST":
         if not verify_admin_password(str(body.get("current_password", "")), admin_config):
             raise ValueError("当前密码错误")
@@ -3249,6 +4036,9 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "ssh-login":
         ssh_login_cli(sys.argv[2:])
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "ddos-alert":
+        ddos_alert_cli(sys.argv[2:])
+        return
     if len(sys.argv) > 1 and sys.argv[1] == "web-admin":
         web_admin_cli(sys.argv[2:])
         return
@@ -3257,6 +4047,7 @@ def main():
     if PANELS_FILE:
         RUNTIME.reload_panels()
         RUNTIME.reload_telegram()
+        RUNTIME.reload_ddos_monitor()
     elif not API_URL:
         raise ValueError("缺少 XUI_API_URL 或 XUI_PANELS_FILE")
     server = ThreadingHTTPServer(("0.0.0.0", 9105), MetricsHandler)
