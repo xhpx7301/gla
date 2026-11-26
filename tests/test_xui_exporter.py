@@ -2218,6 +2218,57 @@ class ExporterTest(unittest.TestCase):
                     self.assertFalse(EXPORTER.load_ddos_config()["enabled"])
                     EXPORTER.ddos_alert_cli(["enable"])
                     self.assertTrue(EXPORTER.load_ddos_config()["enabled"])
+
+                    # Lightweight host metrics install command & /api/host-metrics endpoint
+                    call("POST", "/api/admin/ssh-login/url", {"url": "https://ssh.example.com/api/ssh-login"})
+                    call("POST", "/api/admin/ssh-login/servers", {"name": "mini-hk", "cidrs": "", "groups": ""})
+                    cmd_res = call("POST", "/api/admin/ddos/install-command", {"name": "mini-hk"})
+                    self.assertIn("HOST_METRICS_URL=https://ssh.example.com/api/host-metrics", cmd_res["command"])
+                    self.assertIn("install-host-metrics-agent.sh", cmd_res["command"])
+                    mini_key = json.loads(ssh_cfg.read_text(encoding="utf-8"))["servers"]["mini-hk"]["key"]
+
+                    bad_req = urllib.request.Request(
+                        f"{base}/api/host-metrics",
+                        data=urllib.parse.urlencode({
+                            "server": "mini-hk", "rx_bytes": "100", "rx_packets": "1",
+                            "tx_bytes": "50", "tx_packets": "1",
+                            "cpu_idle_seconds": "10.5", "cpu_softirq_seconds": "0.2",
+                            "mem_total_bytes": "536870912", "mem_available_bytes": "268435456",
+                        }).encode(),
+                        headers={"X-GLA-Key": "wrong-key"},
+                        method="POST")
+                    with self.assertRaises(urllib.error.HTTPError) as err:
+                        urllib.request.urlopen(bad_req, timeout=3)
+                    self.assertEqual(err.exception.code, 403)
+
+                    pushed_lines = []
+                    def fake_push(lines, base_url=None, timeout=5):
+                        pushed_lines.extend(lines)
+
+                    good_req = urllib.request.Request(
+                        f"{base}/api/host-metrics",
+                        data=urllib.parse.urlencode({
+                            "server": "mini-hk", "rx_bytes": "123456", "rx_packets": "789",
+                            "tx_bytes": "654321", "tx_packets": "321",
+                            "cpu_idle_seconds": "100.5", "cpu_softirq_seconds": "1.25",
+                            "mem_total_bytes": "536870912", "mem_available_bytes": "268435456",
+                            "ufw_denied_bytes": "4096",
+                        }).encode(),
+                        headers={"X-GLA-Key": mini_key},
+                        method="POST")
+                    with mock.patch.object(EXPORTER, "push_victoriametrics_prometheus", side_effect=fake_push):
+                        with urllib.request.urlopen(good_req, timeout=3) as resp:
+                            self.assertEqual(resp.status, 204)
+                    joined = "\n".join(pushed_lines)
+                    for metric_name in (
+                        'node_time_seconds{server="mini-hk"}',
+                        'node_network_receive_bytes_total{server="mini-hk",device="eth_total"} 123456',
+                        'node_network_receive_packets_total{server="mini-hk",device="eth_total"} 789',
+                        'node_cpu_seconds_total{server="mini-hk",cpu="0",mode="softirq"} 1.250000',
+                        'node_memory_MemAvailable_bytes{server="mini-hk"} 268435456',
+                        'gla_ufw_default_denied_bytes_total{server="mini-hk",family="ipv4"} 4096',
+                    ):
+                        self.assertIn(metric_name, joined)
             finally:
                 server.shutdown()
                 server.server_close()

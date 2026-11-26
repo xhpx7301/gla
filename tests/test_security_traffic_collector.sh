@@ -8,6 +8,14 @@ bash -n "$COLLECTOR"
 bash -n "$ROOT/deploy-xray-grafana-loki-alloy.sh"
 bash -n "$ROOT/deploy-xray-alloy-collector.sh"
 bash -n "$ROOT/install-ssh-login-agent.sh"
+bash -n "$ROOT/install-host-metrics-agent.sh"
+host_metrics_agent="$(awk '
+  /cat >"\$AGENT_FILE" <<'\''AGENT'\''/ { capture=1; next }
+  capture && $0 == "AGENT" { exit }
+  capture { print }
+' "$ROOT/install-host-metrics-agent.sh")"
+[ -n "$host_metrics_agent" ] || { printf '未能提取轻量化主机指标采集脚本。\n' >&2; exit 1; }
+printf '%s\n' "$host_metrics_agent" | sh -n
 agent_script="$(awk '
   /cat >"\$AGENT_FILE" <<'\''AGENT'\''/ { capture=1; next }
   capture && $0 == "AGENT" { exit }

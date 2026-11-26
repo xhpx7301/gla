@@ -2414,10 +2414,87 @@ class MetricsHandler(BaseHTTPRequestHandler):
                 print(f"SSH 登录事件处理失败 ({error_kind(error)})", file=sys.stderr, flush=True)
                 self.send_error(400, "invalid event")
             return
+        if path == "/api/host-metrics":
+            try:
+                self.handle_host_metrics()
+            except (ValueError, TypeError, KeyError, OSError, RuntimeError) as error:
+                print(f"主机指标上报处理失败 ({error_kind(error)})", file=sys.stderr, flush=True)
+                self.send_error(400, "invalid metrics")
+            return
         if path.startswith("/api/admin/"):
             self.handle_admin_mutation("POST", path)
             return
         self.send_error(404)
+
+    def handle_host_metrics(self):
+        config_path = Path(SSH_LOGIN_CONFIG_FILE)
+        if not config_path.is_file():
+            self.send_error(503, "Host metrics intake is not configured")
+            return
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        servers = config.get("servers", {}) if isinstance(config, dict) else {}
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > 8192:
+            self.send_error(413)
+            return
+        fields = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"), strict_parsing=True)
+        event = {key: values[0] for key, values in fields.items() if values}
+        server = event.get("server", "")
+        server_config = servers.get(server) if isinstance(servers, dict) else None
+        supplied_key = self.headers.get("X-GLA-Key", "")
+        if (not isinstance(server_config, dict) or not isinstance(server_config.get("key"), str)
+                or not hmac.compare_digest(supplied_key, server_config["key"])):
+            self.send_error(403)
+            return
+        if not NAME_RE.fullmatch(server):
+            self.send_error(400, "invalid server")
+            return
+
+        def num_field(key, required=True):
+            raw = event.get(key)
+            if raw is None or raw == "":
+                if required:
+                    raise ValueError(f"missing {key}")
+                return None
+            val = float(raw)
+            if not math.isfinite(val) or val < 0:
+                raise ValueError(f"invalid {key}")
+            return val
+
+        rx_bytes = num_field("rx_bytes")
+        tx_bytes = num_field("tx_bytes")
+        rx_packets = num_field("rx_packets")
+        tx_packets = num_field("tx_packets")
+        cpu_idle = num_field("cpu_idle_seconds")
+        cpu_softirq = num_field("cpu_softirq_seconds")
+        mem_total = num_field("mem_total_bytes")
+        mem_avail = num_field("mem_available_bytes")
+        ufw_denied = num_field("ufw_denied_bytes", required=False)
+
+        ts_ms = int(time.time() * 1000)
+        lines = [
+            f"{metric('node_time_seconds', f'{ts_ms / 1000.0:.3f}', server=server)} {ts_ms}",
+            f"{metric('node_network_receive_bytes_total', f'{rx_bytes:.0f}', server=server, device='eth_total')} {ts_ms}",
+            f"{metric('node_network_transmit_bytes_total', f'{tx_bytes:.0f}', server=server, device='eth_total')} {ts_ms}",
+            f"{metric('node_network_receive_packets_total', f'{rx_packets:.0f}', server=server, device='eth_total')} {ts_ms}",
+            f"{metric('node_network_transmit_packets_total', f'{tx_packets:.0f}', server=server, device='eth_total')} {ts_ms}",
+            f"{metric('node_cpu_seconds_total', f'{cpu_idle:.6f}', server=server, cpu='0', mode='idle')} {ts_ms}",
+            f"{metric('node_cpu_seconds_total', f'{cpu_softirq:.6f}', server=server, cpu='0', mode='softirq')} {ts_ms}",
+            f"{metric('node_memory_MemTotal_bytes', f'{mem_total:.0f}', server=server)} {ts_ms}",
+            f"{metric('node_memory_MemAvailable_bytes', f'{mem_avail:.0f}', server=server)} {ts_ms}",
+        ]
+        if ufw_denied is not None:
+            lines.append(f"{metric('gla_ufw_default_denied_bytes_total', f'{ufw_denied:.0f}', server=server, family='ipv4')} {ts_ms}")
+
+        vm_ok = True
+        try:
+            push_victoriametrics_prometheus(lines)
+        except ERRORS as error:
+            vm_ok = False
+            print(f"主机指标写入 VictoriaMetrics 失败 ({error_kind(error)})", file=sys.stderr, flush=True)
+        self.send_response(204 if vm_ok else 503)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def handle_ssh_login(self):
         config_path = Path(SSH_LOGIN_CONFIG_FILE)
@@ -2854,6 +2931,14 @@ def save_ddos_config(config, path=None):
     target = Path(path or DDOS_ALERT_CONFIG_FILE)
     atomic_write(target, json.dumps(normalized, ensure_ascii=False, indent=2) + "\n")
     return normalized
+
+
+def push_victoriametrics_prometheus(lines, base_url=None, timeout=5):
+    url = f"{(base_url or VICTORIAMETRICS_URL).rstrip('/')}/api/v1/import/prometheus"
+    body = ("\n".join(lines) + "\n").encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": "text/plain; charset=utf-8"})
+    with urllib.request.urlopen(req, timeout=timeout):
+        return
 
 
 def query_victoriametrics(expr, base_url=None, timeout=3):
@@ -4008,6 +4093,23 @@ def apply_admin_action(method, path, body, admin_config):
     if path == "/api/admin/ddos/test" and method == "POST":
         ddos_alert_cli(["test"])
         return {"ok": True}
+
+    if path == "/api/admin/ddos/install-command" and method == "POST":
+        name = str(body.get("name", "")).strip()
+        cfg_path = Path(SSH_LOGIN_CONFIG_FILE)
+        ssh_cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.is_file() else {}
+        servers = ssh_cfg.get("servers") or {}
+        if not name or name not in servers:
+            raise ValueError("请先在「SSH 登录告警」中添加该服务器以生成通信密钥")
+        url = ssh_cfg.get("ingest_url", "")
+        if not re.fullmatch(r"https://[A-Za-z0-9.-]+(?::[0-9]+)?/api/ssh-login", url):
+            raise ValueError("请先在「SSH 登录告警」中设置有效的 HTTPS 接收地址")
+        metrics_url = url[:-len("/api/ssh-login")] + "/api/host-metrics"
+        key = servers[name]["key"]
+        cmd = (f"SERVER_NAME={shlex.quote(name)} HOST_METRICS_URL={shlex.quote(metrics_url)} "
+               f"HOST_METRICS_KEY={shlex.quote(key)} bash <(curl -fsSL "
+               "https://raw.githubusercontent.com/xhpx7301/gla/main/install-host-metrics-agent.sh)")
+        return {"command": cmd}
 
     if path == "/api/admin/password" and method == "POST":
         if not verify_admin_password(str(body.get("current_password", "")), admin_config):

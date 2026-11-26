@@ -107,6 +107,14 @@ Xray 来源 IP 的“连接次数”和 3x-ui 的“流量字节数”是两种�
 
 仪表盘表格会将 Grafana 原始字段名转换为中文，并默认按主要数值降序排列：SSH 使用“来源 IP / 国家/地区 / 省份 / 城市 / 失败次数”，Fail2ban 使用“封禁 IP / 国家/地区 / 省份 / 城市 / 封禁次数”，3x-ui 使用“客户端 / 流量”和“入站 / 端口 / 流量 / 协议”，Xray access log 使用“来源 IP / 国家/地区 / 省份 / 城市 / 连接次数”。“协议”用于区分 `vless`、`vmess` 等入站类型，不能替代“流量”；流量由独立数值列显示。
 
+## 轻量主机指标与 DDoS 告警（免 Alloy / Docker）
+
+对于内存较小（如 256M~512M）或未安装 Docker 的子服务器，可以不部署 Alloy，改用 `install-host-metrics-agent.sh` 安装纯 Shell + `curl` 的轻量化推送代理（仅约 2~4 MB 内存，兼容 Debian/Ubuntu 的 systemd 与 Alpine 的 OpenRC）。代理每 30 秒读取 `/proc/net/dev`、`/proc/stat`、`/proc/meminfo`，使用与 SSH 登录告警相同的服务器密钥和域名（`https://你的域名/api/host-metrics`）上报到中心端 `gla-xui-exporter`，再由中心端写入 VictoriaMetrics。
+
+- 可直接在 Web 配置台 `/admin -> DDoS 告警 -> 轻量化采集命令` 为已登记的服务器生成一键安装命令；如果子服务器已安装过 SSH 登录告警（存在 `/etc/gla/ssh-login.env`），直接运行 `bash <(curl -fsSL https://raw.githubusercontent.com/xhpx7301/gla/main/install-host-metrics-agent.sh)` 即可自动复用配置。
+- DDoS 告警与节点失联告警由中心端直查 VictoriaMetrics 评估，与 SSH 登录告警共用同一个安全告警 Telegram Bot，支持全局与单节点独立阈值配置。
+- 卸载：`bash <(curl -fsSL https://raw.githubusercontent.com/xhpx7301/gla/main/install-host-metrics-agent.sh) uninstall`。
+
 ## Web 配置台
 
 Web 配置台**默认开启**，默认管理账户为 `gla`，初始密码为 `gla12345`（保存在 `secrets/web-admin.json`）。首次登录后请及时在网页「安全设置」或中心服务器 `gla -> 12. 管理 Web 配置台` 中修改密码，也可在菜单中随时关闭。

@@ -549,7 +549,7 @@
               <div><label>UFW 拒绝流量阈值（Mbps，0 关闭）</label><input id="ddos-ufw-mbps" type="number" min="0" max="100000" step="0.1" value="20" required></div>
               <div><label>节点失联超时（秒，0 关闭）</label><input id="ddos-offline" type="number" min="0" max="86400" value="180" required></div>
             </div>
-            <div class="hint">中心端直接查询 VictoriaMetrics 主机指标，采集端无需额外进程。低配小鸡建议重点关注 PPS、softirq 与失联超时；高配中心节点可在下方单独调高阈值。</div>
+            <div class="hint">支持两种采集模式：中心端或高配服务器可使用 Alloy；低配小鸡推荐使用右侧「轻量化采集命令」（纯 Shell + curl，无需 Docker/Alloy，自动复用 SSH 登录告警密钥）。</div>
             <div class="row" style="margin-top:14px;">
               <button type="submit">保存 DDoS 配置</button>
               <button type="button" class="secondary" id="ddos-test">发送测试告警</button>
@@ -560,7 +560,10 @@
         <div class="card">
           <div class="card-header">
             <h2>节点实时状态与独立阈值</h2>
-            <button type="button" id="open-add-ddos-server-btn">+ 添加节点覆盖</button>
+            <div class="row">
+              <button type="button" class="secondary" id="open-ddos-install-btn">轻量化采集命令</button>
+              <button type="button" id="open-add-ddos-server-btn">+ 添加节点覆盖</button>
+            </div>
           </div>
           <div class="table-wrap">
             <table>
@@ -783,6 +786,33 @@
           <button type="submit">保存节点配置</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- 弹窗 6：轻量化主机指标采集安装命令 -->
+  <div id="modal-ddos-install" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <h2>轻量化主机指标采集命令（免 Alloy / Docker）</h2>
+        <button type="button" class="modal-close" data-close="modal-ddos-install">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="row" style="margin-bottom:12px;">
+          <div style="flex:1;">
+            <label>选择已登记服务器（来自「SSH 登录告警」）</label>
+            <select id="ddos-install-server"></select>
+          </div>
+          <div style="align-self:flex-end;">
+            <button type="button" id="ddos-install-gen-btn">生成命令</button>
+          </div>
+        </div>
+        <div class="hint" style="margin-top:0;margin-bottom:10px;">仅占用 ~2MB 内存（纯 Shell + curl，兼容 Debian/Ubuntu/Alpine），每 30 秒通过 <code>/api/host-metrics</code> 推送带宽、PPS、软中断与内存到中心端。</div>
+        <pre id="ddos-install-cmd-text" class="mono" style="white-space:pre-wrap;padding:14px;background:var(--input-bg);border:1px solid var(--border-strong);border-radius:10px;color:var(--accent);margin:0;">请选择服务器并点击“生成命令”</pre>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="secondary" data-close="modal-ddos-install">关闭</button>
+        <button type="button" id="copy-ddos-install-cmd">复制命令</button>
+      </div>
     </div>
   </div>
 
@@ -1280,6 +1310,31 @@
     });
     document.getElementById("goto-ssh-bot-btn").onclick = () => switchTab("ssh");
     document.getElementById("open-add-ddos-server-btn").onclick = () => openDdosServerModal();
+    document.getElementById("open-ddos-install-btn").onclick = () => {
+      const sel = document.getElementById("ddos-install-server");
+      sel.replaceChildren();
+      const names = Object.keys(state?.ssh_login?.servers || {});
+      for (const n of names) {
+        sel.appendChild(el("option", { value: n, text: n }));
+      }
+      if (!names.length) {
+        sel.appendChild(el("option", { value: "", text: "请先在「SSH 登录告警」添加服务器" }));
+      }
+      document.getElementById("ddos-install-cmd-text").textContent = names.length ? "点击“生成命令”获取该节点的安装命令" : "尚未在「SSH 登录告警」添加服务器";
+      openModal("modal-ddos-install");
+    };
+    document.getElementById("ddos-install-gen-btn").onclick = async () => {
+      const name = document.getElementById("ddos-install-server").value;
+      if (!name) return toast("请先在「SSH 登录告警」中添加服务器", true);
+      try {
+        const res = await api("/api/admin/ddos/install-command", { method: "POST", body: JSON.stringify({ name }) });
+        document.getElementById("ddos-install-cmd-text").textContent = res.command;
+      } catch (e) { toast(e.message, true); }
+    };
+    document.getElementById("copy-ddos-install-cmd").onclick = async () => {
+      await navigator.clipboard.writeText(document.getElementById("ddos-install-cmd-text").textContent);
+      toast("已复制到剪贴板");
+    };
     document.querySelectorAll("[data-ip-tab]").forEach(btn => {
       btn.onclick = () => switchIpModalTab(btn.dataset.ipTab);
     });
