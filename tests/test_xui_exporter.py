@@ -1886,6 +1886,91 @@ class ExporterTest(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=3)
 
+    def test_web_admin_ip_group_notes_and_ordering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            ssh_cfg = root / "ssh-login.json"
+            admin_cfg = root / "web-admin.json"
+            with mock.patch.object(EXPORTER, "SSH_LOGIN_CONFIG_FILE", str(ssh_cfg)), \
+                    mock.patch.object(EXPORTER, "WEB_ADMIN_CONFIG_FILE", str(admin_cfg)), \
+                    mock.patch.object(EXPORTER, "ADMIN_HTML_FILE",
+                                      str(pathlib.Path(__file__).parents[1] / "assets" / "admin.html")):
+                with mock.patch("sys.stdin", io.StringIO("secret1234")):
+                    EXPORTER.web_admin_cli(["set-password"])
+                cfg = EXPORTER.web_admin_config()
+
+                # Create group with per-IP notes and explicit order
+                EXPORTER.apply_admin_action("POST", "/api/admin/ssh-login/groups", {
+                    "name": "独享IP",
+                    "items": [
+                        {"cidr": "89.185.26.58/32", "note": "公司出口"},
+                        {"cidr": "23.236.75.192/32", "note": ""},
+                        {"cidr": "2602:f656:5::61/128", "note": "家里 IPv6"},
+                    ],
+                }, cfg)
+                saved = json.loads(ssh_cfg.read_text(encoding="utf-8"))
+                self.assertEqual(saved["ip_groups"]["独享IP"], [
+                    "89.185.26.58/32", "23.236.75.192/32", "2602:f656:5::61/128"])
+                self.assertEqual(saved["ip_group_notes"]["独享IP"], {
+                    "89.185.26.58/32": "公司出口",
+                    "2602:f656:5::61/128": "家里 IPv6",
+                })
+
+                # Reorder items, edit/clear notes, and remove an IP
+                EXPORTER.apply_admin_action("POST", "/api/admin/ssh-login/groups", {
+                    "orig_name": "独享IP",
+                    "name": "独享IP",
+                    "items": [
+                        {"cidr": "2602:f656:5::61/128", "note": "家里宽带"},
+                        {"cidr": "89.185.26.58/32", "note": ""},
+                    ],
+                }, cfg)
+                saved = json.loads(ssh_cfg.read_text(encoding="utf-8"))
+                self.assertEqual(saved["ip_groups"]["独享IP"], [
+                    "2602:f656:5::61/128", "89.185.26.58/32"])
+                self.assertEqual(saved["ip_group_notes"]["独享IP"], {
+                    "2602:f656:5::61/128": "家里宽带",
+                })
+
+                # Overview exposes both ordered CIDRs and notes
+                overview = EXPORTER.admin_overview_payload(cfg)
+                self.assertEqual(overview["ssh_login"]["ip_groups"]["独享IP"], [
+                    "2602:f656:5::61/128", "89.185.26.58/32"])
+                self.assertEqual(overview["ssh_login"]["ip_group_notes"]["独享IP"], {
+                    "2602:f656:5::61/128": "家里宽带",
+                })
+
+                # CLI set-group / rename-group preserves retained notes and prunes removed ones
+                EXPORTER.ssh_login_cli(["set-group", "--name", "独享IP",
+                                        "--cidrs", "198.51.100.1/32,2602:f656:5::61/128"])
+                EXPORTER.ssh_login_cli(["rename-group", "--name", "独享IP", "--new-name", "vip",
+                                        "--cidrs", "2602:f656:5::61/128,198.51.100.1/32"])
+                saved = json.loads(ssh_cfg.read_text(encoding="utf-8"))
+                self.assertEqual(saved["ip_groups"]["vip"], ["2602:f656:5::61/128", "198.51.100.1/32"])
+                self.assertEqual(saved["ip_group_notes"], {"vip": {"2602:f656:5::61/128": "家里宽带"}})
+
+                # Overlong note is rejected
+                with self.assertRaises(ValueError):
+                    EXPORTER.apply_admin_action("POST", "/api/admin/ssh-login/groups", {
+                        "orig_name": "vip",
+                        "name": "vip",
+                        "items": [{"cidr": "2602:f656:5::61/128", "note": "x" * 201}],
+                    }, cfg)
+
+                # Deleting group removes its notes too
+                EXPORTER.apply_admin_action("DELETE", "/api/admin/ssh-login/groups", {"name": "vip"}, cfg)
+                saved = json.loads(ssh_cfg.read_text(encoding="utf-8"))
+                self.assertNotIn("vip", saved["ip_groups"])
+                self.assertNotIn("ip_group_notes", saved)
+
+                # Admin HTML contains per-IP note & manual reorder controls
+                admin_html = (pathlib.Path(__file__).parents[1] / "assets" / "admin.html").read_text(encoding="utf-8")
+                self.assertIn("ip-single-note", admin_html)
+                self.assertIn("ip-note-input", admin_html)
+                self.assertIn("moveGroupIp", admin_html)
+                self.assertIn("parseBatchIpItems", admin_html)
+                self.assertIn("ip_group_notes", admin_html)
+
     def test_access_log_real_target_without_traffic_growth_does_not_fast_confirm(self):
         panel = EXPORTER.PanelWorker({"name": "node-a"})
         with tempfile.TemporaryDirectory() as directory, \

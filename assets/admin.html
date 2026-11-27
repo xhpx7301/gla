@@ -260,6 +260,11 @@
       border: 1px solid rgba(167, 139, 250, 0.28);
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
+    .ip-pill-note {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      font-size: 11.5px; color: var(--text-soft);
+      padding-left: 6px; border-left: 1px solid rgba(167, 139, 250, 0.35);
+    }
     body.light .ip-pill { color: #5b21b6; background: rgba(139, 92, 246, 0.10); }
 
     /* Modal (二级弹窗菜单) */
@@ -279,6 +284,7 @@
       border-radius: 16px; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
       animation: modalIn 0.16s ease-out;
     }
+    .modal.modal-wide { max-width: 720px; }
     @keyframes modalIn {
       from { opacity: 0; transform: translateY(8px) scale(0.98); }
       to { opacity: 1; transform: translateY(0) scale(1); }
@@ -316,15 +322,43 @@
     /* IP List Editor inside Modal */
     .ip-list {
       border: 1px solid var(--border); border-radius: 10px;
-      background: var(--input-bg); max-height: 240px; overflow-y: auto;
+      background: var(--input-bg); max-height: 290px; overflow-y: auto;
       margin-top: 10px;
     }
     .ip-item {
       display: flex; align-items: center; justify-content: space-between; gap: 10px;
-      padding: 9px 12px; border-bottom: 1px solid var(--border);
+      padding: 8px 12px; border-bottom: 1px solid var(--border);
+      transition: background 0.12s ease;
     }
     .ip-item:last-child { border-bottom: none; }
-    .ip-item-val { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+    .ip-item.dragging { opacity: 0.45; }
+    .ip-item.drag-over {
+      border-top: 2px solid var(--accent);
+      background: rgba(56, 189, 248, 0.08);
+    }
+    .ip-item-main {
+      display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0;
+    }
+    .ip-drag-handle {
+      color: var(--muted); cursor: grab; user-select: none;
+      font-size: 14px; line-height: 1; padding: 4px 2px; flex-shrink: 0;
+    }
+    .ip-drag-handle:hover { color: var(--text); }
+    .ip-drag-handle:active { cursor: grabbing; }
+    .ip-item-val {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px; flex-shrink: 0; min-width: 142px;
+    }
+    .ip-note-input {
+      flex: 1; min-width: 110px; padding: 5px 9px; font-size: 12.5px;
+      border-radius: 6px; background: var(--surface-solid);
+    }
+    .ip-item-actions {
+      display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
+    }
+    button.icon-sm {
+      padding: 4px 8px; font-size: 12px; line-height: 1.2; border-radius: 6px; min-width: 28px;
+    }
     .ip-empty { padding: 16px; text-align: center; color: var(--muted); font-size: 13px; }
 
     /* Misc */
@@ -364,6 +398,9 @@
       .card { padding: 16px; }
       .tabs { width: 100%; }
       .tab { flex: 1 1 auto; text-align: center; padding: 8px 10px; }
+      .ip-item { flex-wrap: wrap; }
+      .ip-item-main { flex-basis: 100%; flex-wrap: wrap; }
+      .ip-item-actions { margin-left: auto; }
     }
   </style>
 </head>
@@ -660,7 +697,7 @@
 
   <!-- 弹窗 2：可信来源 IP 组（二级操作菜单） -->
   <div id="modal-ip-group" class="modal-backdrop hidden">
-    <div class="modal">
+    <div class="modal modal-wide">
       <div class="modal-head">
         <h2 id="ip-group-modal-title">新增 IP 组</h2>
         <button type="button" class="modal-close" data-close="modal-ip-group">&times;</button>
@@ -678,17 +715,19 @@
           </div>
 
           <div id="ip-tab-single" style="margin-top:14px;">
-            <label>添加单个 IP 或 CIDR（单个 IP 自动识别为 /32 或 /128）</label>
+            <label>添加单个 IP 或 CIDR（单个 IP 自动识别为 /32 或 /128，备注可选）</label>
             <div class="row">
-              <div style="flex:1;"><input id="ip-single-input" placeholder="例如 82.152.161.210 或 198.51.100.0/24"></div>
+              <div style="flex:1.2;min-width:190px;"><input id="ip-single-input" placeholder="例如 82.152.161.210 或 198.51.100.0/24"></div>
+              <div style="flex:1;min-width:140px;"><input id="ip-single-note" placeholder="备注（可选，如 家里宽带）" maxlength="200"></div>
               <button type="button" class="secondary" id="ip-single-add-btn">+ 添加到列表</button>
             </div>
+            <div class="hint" style="margin-top:6px;">支持在下方直接编辑每个 IP 的备注，并通过拖拽 <code>⋮⋮</code> 或点击 <code>↑</code> <code>↓</code> 调整顺序。</div>
             <div class="ip-list" id="ip-group-list"></div>
           </div>
 
           <div id="ip-tab-batch" class="hidden" style="margin-top:14px;">
-            <label>批量粘贴多个 IP / CIDR（每行一个或用逗号分隔）</label>
-            <textarea id="ip-batch-input" rows="5" placeholder="82.152.161.210&#10;203.0.113.0/24&#10;2001:db8::1"></textarea>
+            <label>批量粘贴多个 IP / CIDR（每行一个或用逗号分隔，支持 <code>IP # 备注</code> 格式）</label>
+            <textarea id="ip-batch-input" rows="5" placeholder="82.152.161.210 # 公司出口&#10;203.0.113.0/24&#10;2001:db8::1 # 家里 IPv6"></textarea>
             <div class="row" style="margin-top:10px;">
               <button type="button" class="secondary" id="ip-batch-append-btn">追加到列表</button>
               <button type="button" class="secondary" id="ip-batch-replace-btn">覆盖当前列表</button>
@@ -823,6 +862,7 @@
     let csrfToken = "";
     let state = null;
     let editingGroupIps = [];
+    let draggingGroupIpIdx = -1;
     let editingServerIps = [];
 
     function toast(msg, isErr = false) {
@@ -974,10 +1014,19 @@
       if (!liveOnly) document.getElementById("ssh-ingest-url").value = data.ssh_login.ingest_url || "";
       const groupsTbody = document.getElementById("ip-groups-tbody");
       groupsTbody.replaceChildren();
+      const groupNotes = data.ssh_login.ip_group_notes || {};
       for (const [gname, cidrs] of Object.entries(data.ssh_login.ip_groups)) {
-        const pills = el("div", { className: "ip-pills" }, cidrs.map(c => el("span", { className: "ip-pill", text: c })));
+        const notes = groupNotes[gname] || {};
+        const pills = el("div", { className: "ip-pills" }, cidrs.map(c => {
+          const note = notes[c] || "";
+          if (!note) return el("span", { className: "ip-pill", text: c });
+          return el("span", { className: "ip-pill", title: `${c} · ${note}` }, [
+            el("span", { text: c }),
+            el("span", { className: "ip-pill-note", text: note })
+          ]);
+        }));
         const editBtn = el("button", { className: "sm secondary", type: "button", text: "管理 / 编辑" });
-        editBtn.onclick = () => openIpGroupModal(gname, cidrs);
+        editBtn.onclick = () => openIpGroupModal(gname, cidrs, notes);
         const delBtn = el("button", { className: "sm danger", type: "button", text: "删除" });
         delBtn.onclick = () => deleteIpGroup(gname);
         groupsTbody.appendChild(el("tr", {}, [
@@ -1222,21 +1271,95 @@
       document.getElementById("ip-tab-batch").classList.toggle("hidden", tab !== "batch");
     }
 
-    function openIpGroupModal(name = "", cidrs = []) {
+    function openIpGroupModal(name = "", cidrs = [], notes = {}) {
       document.getElementById("ip-group-form").reset();
       document.getElementById("ip-group-modal-title").textContent = name ? ("管理 IP 组：" + name) : "新增 IP 组";
       document.getElementById("ip-group-orig-name").value = name;
       document.getElementById("ip-group-name").value = name;
-      editingGroupIps = [...cidrs];
+      editingGroupIps = cidrs.map(c => ({ cidr: c, note: (notes && notes[c]) || "" }));
       renderGroupIpList();
       switchIpModalTab("single");
       openModal("modal-ip-group");
     }
 
+    function moveGroupIp(fromIdx, toIdx) {
+      if (fromIdx === toIdx || fromIdx < 0 || toIdx < 0 || fromIdx >= editingGroupIps.length || toIdx >= editingGroupIps.length) return;
+      const [moved] = editingGroupIps.splice(fromIdx, 1);
+      editingGroupIps.splice(toIdx, 0, moved);
+      renderGroupIpList();
+    }
+
     function renderGroupIpList() {
-      renderIpList("ip-group-list", editingGroupIps, idx => {
-        editingGroupIps.splice(idx, 1);
-        renderGroupIpList();
+      const box = document.getElementById("ip-group-list");
+      box.replaceChildren();
+      if (!editingGroupIps.length) {
+        box.appendChild(el("div", { className: "ip-empty", text: "暂无条目，请在上方输入单个 IP 或 CIDR 后点击添加" }));
+        return;
+      }
+      editingGroupIps.forEach((item, idx) => {
+        const row = el("div", { className: "ip-item" });
+        const handle = el("span", { className: "ip-drag-handle", title: "拖拽调整顺序", text: "⋮⋮" });
+        handle.onmousedown = () => { row.draggable = true; };
+        handle.onmouseup = () => { row.draggable = false; };
+        row.ondragstart = e => {
+          draggingGroupIpIdx = idx;
+          row.classList.add("dragging");
+          if (e.dataTransfer) {
+            e.dataTransfer.effectAllowed = "move";
+            e.dataTransfer.setData("text/plain", String(idx));
+          }
+        };
+        row.ondragend = () => {
+          draggingGroupIpIdx = -1;
+          row.draggable = false;
+          row.classList.remove("dragging");
+          box.querySelectorAll(".ip-item.drag-over").forEach(n => n.classList.remove("drag-over"));
+        };
+        row.ondragover = e => {
+          if (draggingGroupIpIdx < 0 || draggingGroupIpIdx === idx) return;
+          e.preventDefault();
+          if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+          row.classList.add("drag-over");
+        };
+        row.ondragleave = () => row.classList.remove("drag-over");
+        row.ondrop = e => {
+          e.preventDefault();
+          row.classList.remove("drag-over");
+          const from = draggingGroupIpIdx;
+          draggingGroupIpIdx = -1;
+          if (from >= 0 && from !== idx) moveGroupIp(from, idx);
+        };
+
+        const noteInput = el("input", {
+          type: "text",
+          className: "ip-note-input",
+          placeholder: "添加备注...",
+          maxlength: "200"
+        });
+        noteInput.value = item.note || "";
+        noteInput.oninput = () => { item.note = noteInput.value; };
+
+        const upBtn = el("button", { type: "button", className: "secondary icon-sm", title: "上移", text: "↑" });
+        upBtn.disabled = idx === 0;
+        upBtn.onclick = () => moveGroupIp(idx, idx - 1);
+
+        const downBtn = el("button", { type: "button", className: "secondary icon-sm", title: "下移", text: "↓" });
+        downBtn.disabled = idx === editingGroupIps.length - 1;
+        downBtn.onclick = () => moveGroupIp(idx, idx + 1);
+
+        const delBtn = el("button", { type: "button", className: "sm danger", text: "删除" });
+        delBtn.onclick = () => {
+          editingGroupIps.splice(idx, 1);
+          renderGroupIpList();
+        };
+
+        row.appendChild(el("div", { className: "ip-item-main" }, [
+          handle,
+          el("span", { className: "ip-item-val", text: item.cidr }),
+          noteInput
+        ]));
+        row.appendChild(el("div", { className: "ip-item-actions" }, [upBtn, downBtn, delBtn]));
+        box.appendChild(row);
       });
     }
 
@@ -1348,31 +1471,71 @@
     document.getElementById("open-add-ip-group-btn").onclick = () => openIpGroupModal();
     document.getElementById("open-add-ssh-server-btn").onclick = () => openSshServerModal();
 
-    document.getElementById("ip-single-add-btn").onclick = () => {
+    function addSingleGroupIp() {
       const input = document.getElementById("ip-single-input");
+      const noteInput = document.getElementById("ip-single-note");
       const val = normalizeIpOrCidr(input.value);
+      const note = noteInput.value.trim();
       if (!val) return;
-      if (!editingGroupIps.includes(val)) editingGroupIps.push(val);
+      const existing = editingGroupIps.find(item => item.cidr === val);
+      if (existing) {
+        if (note) existing.note = note;
+      } else {
+        editingGroupIps.push({ cidr: val, note });
+      }
       input.value = "";
+      noteInput.value = "";
       renderGroupIpList();
-    };
+    }
+    document.getElementById("ip-single-add-btn").onclick = addSingleGroupIp;
     document.getElementById("ip-single-input").onkeydown = e => {
-      if (e.key === "Enter") { e.preventDefault(); document.getElementById("ip-single-add-btn").click(); }
+      if (e.key === "Enter") { e.preventDefault(); addSingleGroupIp(); }
+    };
+    document.getElementById("ip-single-note").onkeydown = e => {
+      if (e.key === "Enter") { e.preventDefault(); addSingleGroupIp(); }
     };
 
-    function parseBatchIps(text) {
-      return String(text || "").split(/[\s,，]+/).map(normalizeIpOrCidr).filter(Boolean);
+    function parseBatchIpItems(text) {
+      const result = [];
+      for (const rawLine of String(text || "").split(/\r?\n/)) {
+        const hashIdx = rawLine.indexOf("#");
+        const ipPart = hashIdx >= 0 ? rawLine.slice(0, hashIdx) : rawLine;
+        const note = hashIdx >= 0 ? rawLine.slice(hashIdx + 1).trim() : "";
+        for (const token of ipPart.split(/[\s,，]+/)) {
+          const cidr = normalizeIpOrCidr(token);
+          if (cidr) result.push({ cidr, note });
+        }
+      }
+      return result;
     }
     document.getElementById("ip-batch-append-btn").onclick = () => {
-      const items = parseBatchIps(document.getElementById("ip-batch-input").value);
-      items.forEach(item => { if (!editingGroupIps.includes(item)) editingGroupIps.push(item); });
+      const items = parseBatchIpItems(document.getElementById("ip-batch-input").value);
+      items.forEach(item => {
+        const existing = editingGroupIps.find(entry => entry.cidr === item.cidr);
+        if (existing) {
+          if (item.note) existing.note = item.note;
+        } else {
+          editingGroupIps.push({ cidr: item.cidr, note: item.note });
+        }
+      });
       document.getElementById("ip-batch-input").value = "";
       renderGroupIpList();
       switchIpModalTab("single");
     };
     document.getElementById("ip-batch-replace-btn").onclick = () => {
-      const items = parseBatchIps(document.getElementById("ip-batch-input").value);
-      editingGroupIps = Array.from(new Set(items));
+      const items = parseBatchIpItems(document.getElementById("ip-batch-input").value);
+      const next = [];
+      const seen = new Map();
+      items.forEach(item => {
+        if (seen.has(item.cidr)) {
+          if (item.note) seen.get(item.cidr).note = item.note;
+        } else {
+          const entry = { cidr: item.cidr, note: item.note };
+          seen.set(item.cidr, entry);
+          next.push(entry);
+        }
+      });
+      editingGroupIps = next;
       document.getElementById("ip-batch-input").value = "";
       renderGroupIpList();
       switchIpModalTab("single");
@@ -1458,14 +1621,23 @@
     document.getElementById("ip-group-form").onsubmit = async e => {
       e.preventDefault();
       const pending = normalizeIpOrCidr(document.getElementById("ip-single-input").value);
-      if (pending && !editingGroupIps.includes(pending)) editingGroupIps.push(pending);
+      const pendingNote = document.getElementById("ip-single-note").value.trim();
+      if (pending) {
+        const existing = editingGroupIps.find(item => item.cidr === pending);
+        if (existing) {
+          if (pendingNote) existing.note = pendingNote;
+        } else {
+          editingGroupIps.push({ cidr: pending, note: pendingNote });
+        }
+      }
       try {
         await api("/api/admin/ssh-login/groups", {
           method: "POST",
           body: JSON.stringify({
             orig_name: document.getElementById("ip-group-orig-name").value.trim(),
             name: document.getElementById("ip-group-name").value.trim(),
-            cidrs: editingGroupIps.join(",")
+            cidrs: editingGroupIps.map(item => item.cidr).join(","),
+            items: editingGroupIps.map(item => ({ cidr: item.cidr, note: (item.note || "").trim() }))
           })
         });
         closeModal("modal-ip-group");

@@ -81,6 +81,103 @@ def valid_ip_group_name(name):
     return (isinstance(name, str) and 1 <= len(name) <= 63
             and not name.startswith("-")
             and not any(ch.isspace() or ch == "," or ord(ch) < 32 for ch in name))
+
+
+def normalize_ip_group_note(note):
+    text = re.sub(r"[\r\n\t]+", " ", str(note or "")).strip()
+    if len(text) > 200:
+        raise ValueError("IP 备注不能超过 200 个字符")
+    return text
+
+
+def parse_ip_group_entries(cidrs_text="", items=None, notes=None, existing_notes=None):
+    entries = []
+    seen = {}
+    existing_notes = existing_notes if isinstance(existing_notes, dict) else {}
+    notes_map = notes if isinstance(notes, dict) else None
+    if items is not None:
+        if not isinstance(items, list):
+            raise ValueError("IP 列表格式无效")
+        for raw_item in items:
+            if isinstance(raw_item, dict):
+                cidr = str(raw_item.get("cidr", "")).strip()
+                note = normalize_ip_group_note(raw_item.get("note", ""))
+            elif isinstance(raw_item, str):
+                cidr = raw_item.strip()
+                raw_note = notes_map.get(cidr, existing_notes.get(cidr, "")) if notes_map is not None else existing_notes.get(cidr, "")
+                note = normalize_ip_group_note(raw_note)
+            else:
+                raise ValueError("IP 条目格式无效")
+            if not cidr:
+                if note:
+                    raise ValueError("IP / CIDR 不能为空")
+                continue
+            ipaddress.ip_network(cidr, strict=False)
+            if cidr not in seen:
+                seen[cidr] = len(entries)
+                entries.append([cidr, note])
+            elif note:
+                entries[seen[cidr]][1] = note
+    else:
+        for raw_cidr in str(cidrs_text or "").split(","):
+            cidr = raw_cidr.strip()
+            if not cidr:
+                continue
+            ipaddress.ip_network(cidr, strict=False)
+            raw_note = notes_map.get(cidr, "") if notes_map is not None else existing_notes.get(cidr, "")
+            note = normalize_ip_group_note(raw_note)
+            if cidr not in seen:
+                seen[cidr] = len(entries)
+                entries.append([cidr, note])
+            elif note:
+                entries[seen[cidr]][1] = note
+    if not entries:
+        raise ValueError("IP 组至少需要一个可信来源 CIDR")
+    ordered_cidrs = [cidr for cidr, _ in entries]
+    group_notes = {cidr: note for cidr, note in entries if note}
+    return ordered_cidrs, group_notes
+
+
+def save_ssh_ip_group(config, name, orig_name="", cidrs_text="", items=None, notes=None, allow_create=True, allow_update=True):
+    groups = config.setdefault("ip_groups", {})
+    servers = config.setdefault("servers", {})
+    raw_all_notes = config.get("ip_group_notes")
+    all_notes = raw_all_notes if isinstance(raw_all_notes, dict) else {}
+    if not valid_ip_group_name(name):
+        raise ValueError("IP 组名称长度需为 1-63 字符，且不能包含空格、逗号或控制字符")
+    if orig_name:
+        if orig_name not in groups:
+            raise ValueError("IP 组不存在")
+        if orig_name != name and name in groups:
+            raise ValueError("目标 IP 组名称已存在")
+        existing_notes = all_notes.get(orig_name, {})
+    else:
+        exists = name in groups
+        if exists and not allow_update:
+            raise ValueError("IP 组名称已存在")
+        if not exists and not allow_create:
+            raise ValueError("IP 组不存在")
+        existing_notes = all_notes.get(name, {}) if exists else {}
+    ordered_cidrs, parsed_notes = parse_ip_group_entries(
+        cidrs_text=cidrs_text, items=items, notes=notes, existing_notes=existing_notes)
+    if orig_name and orig_name != name:
+        del groups[orig_name]
+        all_notes.pop(orig_name, None)
+        for item in servers.values():
+            if isinstance(item, dict):
+                item["allowed_ip_groups"] = sorted({
+                    name if group == orig_name else group
+                    for group in item.get("allowed_ip_groups", [])
+                })
+    groups[name] = ordered_cidrs
+    if parsed_notes:
+        all_notes[name] = parsed_notes
+    else:
+        all_notes.pop(name, None)
+    if all_notes:
+        config["ip_group_notes"] = all_notes
+    else:
+        config.pop("ip_group_notes", None)
 ERRORS = (OSError, RuntimeError, ValueError, TypeError, KeyError, sqlite3.Error)
 METRICS = {
     "xui_exporter_up": ("gauge", "3x-ui traffic and online API health"),
@@ -3630,46 +3727,30 @@ def ssh_login_cli(argv):
             print("尚未添加可信来源 IP 组")
         return
     if args.operation in ("add-group", "set-group"):
-        if not valid_ip_group_name(args.name):
-            raise ValueError("IP 组名称长度需为 1-63 字符，且不能包含空格、逗号或控制字符")
-        if args.operation == "add-group" and args.name in groups:
-            raise ValueError("IP 组名称已存在")
-        if args.operation == "set-group" and args.name not in groups:
-            raise ValueError("IP 组不存在")
-        cidrs = [value.strip() for value in args.cidrs.split(",") if value.strip()]
-        if not cidrs:
-            raise ValueError("IP 组至少需要一个可信来源 CIDR")
-        for cidr in cidrs:
-            ipaddress.ip_network(cidr, strict=False)
-        groups[args.name] = cidrs
+        save_ssh_ip_group(
+            config,
+            args.name,
+            cidrs_text=args.cidrs,
+            allow_create=(args.operation == "add-group"),
+            allow_update=(args.operation == "set-group"),
+        )
         atomic_write(path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
         return
     if args.operation == "rename-group":
         if not args.name or args.name not in groups:
             raise ValueError("IP 组不存在")
-        if not valid_ip_group_name(args.new_name):
-            raise ValueError("新 IP 组名称长度需为 1-63 字符，且不能包含空格、逗号或控制字符")
-        if args.new_name != args.name and args.new_name in groups:
-            raise ValueError("目标 IP 组名称已存在")
-        cidrs = [value.strip() for value in args.cidrs.split(",") if value.strip()]
-        if not cidrs:
-            raise ValueError("IP 组至少需要一个可信来源 CIDR")
-        for cidr in cidrs:
-            ipaddress.ip_network(cidr, strict=False)
-        del groups[args.name]
-        groups[args.new_name] = cidrs
-        for item in servers.values():
-            if isinstance(item, dict):
-                item["allowed_ip_groups"] = sorted({
-                    args.new_name if group == args.name else group
-                    for group in item.get("allowed_ip_groups", [])
-                })
+        save_ssh_ip_group(config, args.new_name, orig_name=args.name, cidrs_text=args.cidrs)
         atomic_write(path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
         return
     if args.operation == "delete-group":
         if not args.name or args.name not in groups:
             raise ValueError("IP 组不存在")
         del groups[args.name]
+        raw_all_notes = config.get("ip_group_notes")
+        if isinstance(raw_all_notes, dict):
+            raw_all_notes.pop(args.name, None)
+            if not raw_all_notes:
+                config.pop("ip_group_notes", None)
         for item in servers.values():
             if isinstance(item, dict):
                 item["allowed_ip_groups"] = [group for group in item.get("allowed_ip_groups", [])
@@ -3878,6 +3959,18 @@ def admin_overview_payload(admin_config=None):
         "ssh_login": {
             "ingest_url": ssh_raw.get("ingest_url", ""),
             "ip_groups": ssh_raw.get("ip_groups", {}),
+            "ip_group_notes": {
+                gname: {
+                    str(cidr): str(note).strip()
+                    for cidr, note in gnotes.items()
+                    if isinstance(cidr, str) and isinstance(note, str) and str(note).strip()
+                }
+                for gname, gnotes in (ssh_raw.get("ip_group_notes") or {}).items()
+                if isinstance(gname, str) and isinstance(gnotes, dict) and any(
+                    isinstance(cidr, str) and isinstance(note, str) and str(note).strip()
+                    for cidr, note in gnotes.items()
+                )
+            } if isinstance(ssh_raw.get("ip_group_notes"), dict) else {},
             "servers": ssh_servers,
         },
         "telegram": {
@@ -3950,12 +4043,22 @@ def apply_admin_action(method, path, body, admin_config):
         orig_name = str(body.get("orig_name", "")).strip()
         if method == "DELETE":
             ssh_login_cli(["delete-group", "--name", name])
-        elif orig_name and orig_name != name:
-            ssh_login_cli(["rename-group", "--name", orig_name, "--new-name", name, "--cidrs", str(body.get("cidrs", ""))])
         else:
-            existing = json.loads(Path(SSH_LOGIN_CONFIG_FILE).read_text(encoding="utf-8")).get("ip_groups", {}) if Path(SSH_LOGIN_CONFIG_FILE).is_file() else {}
-            op = "set-group" if name in existing else "add-group"
-            ssh_login_cli([op, "--name", name, "--cidrs", str(body.get("cidrs", ""))])
+            cfg_path = Path(SSH_LOGIN_CONFIG_FILE)
+            config = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {"servers": {}}
+            if not isinstance(config, dict) or not isinstance(config.get("servers", {}), dict):
+                raise ValueError("SSH 告警配置格式无效")
+            if not isinstance(config.get("ip_groups", {}), dict):
+                raise ValueError("可信来源 IP 组配置格式无效")
+            save_ssh_ip_group(
+                config,
+                name,
+                orig_name=orig_name,
+                cidrs_text=str(body.get("cidrs", "")),
+                items=body.get("items"),
+                notes=body.get("notes"),
+            )
+            atomic_write(cfg_path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
         return {"ok": True}
 
     if path == "/api/admin/ssh-login/servers":
